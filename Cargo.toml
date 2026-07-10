@@ -1,0 +1,14 @@
+# Cargo workspace. The Rust binding is a member; the native core it links is built
+# by scripts/build-macos.sh, not by cargo.
+[workspace]
+members = ["rust"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/your-org/meeting-record"
+
+[profile.release]
+lto = true

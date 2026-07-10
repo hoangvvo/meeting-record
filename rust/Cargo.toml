@@ -1,0 +1,12 @@
+[package]
+name = "meeting-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "System-audio capture and meeting detection for macOS and Windows"
+links = "meetingrecord"
+
+[dependencies]
+
+[dev-dependencies]

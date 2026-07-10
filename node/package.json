@@ -1,0 +1,34 @@
+{
+  "name": "meeting-record",
+  "version": "0.1.0",
+  "description": "System-audio capture and meeting detection for macOS and Windows",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "gypfile": true,
+  "files": [
+    "dist",
+    "src",
+    "binding.gyp"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build:native": "cd .. && ./scripts/build-macos.sh",
+    "build:addon": "node-gyp rebuild",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:native && npm run build:addon && npm run build:ts",
+    "install": "node-gyp rebuild",
+    "test": "node --test test/",
+    "example": "node examples/record.mjs"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.0.0",
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  },
+  "license": "MIT"
+}

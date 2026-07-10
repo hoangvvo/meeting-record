@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="$ROOT/build"
+BUILD="$ROOT/native/build"   # not $ROOT/build: node-gyp owns that
 mkdir -p "$BUILD"
 
 # Codesigning identity. Ad-hoc ("-") is enough to get a TCC prompt for a local
@@ -20,7 +20,7 @@ IDENTITY="${MREC_IDENTITY:--}"
 
 # Fails the build if meeting-record-detect.h drifts from the offsets Swift hardcodes.
 echo "==> struct layout check"
-clang -I"$ROOT/native/include" -o "$BUILD/layout_check" "$ROOT/tests/layout_check.c"
+clang -I"$ROOT/native/include" -o "$BUILD/layout_check" "$ROOT/native/tests/layout_check.c"
 "$BUILD/layout_check"
 
 echo "==> swiftc: libmeetingrecord_macos.a"
@@ -36,7 +36,7 @@ echo "    $(du -h "$BUILD/libmeetingrecord_macos.a" | cut -f1) $BUILD/libmeeting
 # Detection needs no entitlements or bundle, so it builds as a plain binary.
 echo "==> classification tests"
 swiftc -O -o "$BUILD/catalog_test" \
-  "$ROOT/tests/catalog_test.swift" \
+  "$ROOT/native/tests/catalog_test.swift" \
   "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses}.swift
 "$BUILD/catalog_test" | tail -2
 
@@ -44,7 +44,7 @@ echo "==> meetingtest"
 clang -O2 \
   -I"$ROOT/native/include" \
   -o "$BUILD/meetingtest" \
-  "$ROOT/examples/meetingtest.c" \
+  "$ROOT/native/examples/meetingtest.c" \
   "$BUILD/libmeetingrecord_macos.a" \
   -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
   -framework Foundation -framework AppKit -framework ApplicationServices \
@@ -62,8 +62,8 @@ mkdir -p "$APP/Contents/MacOS"
 clang -O2 \
   -I"$ROOT/native/include" \
   -o "$APP/Contents/MacOS/MrecSelfTest" \
-  "$ROOT/examples/selftest.c" \
-  "$ROOT/examples/selftest_main.m" \
+  "$ROOT/native/examples/selftest.c" \
+  "$ROOT/native/examples/selftest_main.m" \
   "$BUILD/libmeetingrecord_macos.a" \
   -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
   -framework Foundation -framework AppKit \

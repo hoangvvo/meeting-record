@@ -18,14 +18,24 @@ static void on_meeting(const mrec_meeting *m, mrec_event event, void *ud) {
 mrec_watch_start(on_meeting, NULL);
 ```
 
-The API is C. A Node/TypeScript binding is designed but not implemented — see
-[docs/NODE-API.md](docs/NODE-API.md). Implementation details and platform
-behaviour are in [docs/INTERNALS.md](docs/INTERNALS.md).
+Three bindings over one core:
+
+| language | entry point | install |
+|---|---|---|
+| **TypeScript / Node** | `meeting-record` | `npm install meeting-record` |
+| **Rust** | `meeting_record` | `cargo add meeting-record` |
+| **C** | `native/include/meeting-record.h` | link the static library |
+
+The Node and Rust layers are thin wrappers over the same C ABI, so behaviour is
+identical across all three. Design rationale is in
+[docs/NODE-API.md](docs/NODE-API.md); platform mechanics and failure modes in
+[docs/INTERNALS.md](docs/INTERNALS.md).
 
 ---
 
 ## Contents
 
+- [Layout](#layout)
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Permissions](#permissions)
@@ -39,19 +49,45 @@ behaviour are in [docs/INTERNALS.md](docs/INTERNALS.md).
 
 ---
 
+## Layout
+
+A monorepo: one native core, one binding per language.
+
+```
+native/          C ABI core — Swift (macOS) + C++ (Windows)
+  include/         meeting-record.h, meeting-record-detect.h
+  macos/ windows/  platform implementations
+  examples/ tests/ C and Swift checks for the core
+node/            npm package  "meeting-record"   (N-API addon + TypeScript)
+rust/            cargo crate  "meeting-record"   (cargo workspace member)
+scripts/         build-macos.sh
+docs/
+```
+
+Both bindings link the same static library, so there is no duplicated logic and no
+behavioural drift between them.
+
 ## Install
 
 Requires macOS 14.2+ (Apple silicon or Intel) or Windows 10 build 20348+.
 
 ```bash
-git clone <this repo> && cd system-recording
-./scripts/build-macos.sh
+npm install meeting-record     # Node
+cargo add meeting-record       # Rust
 ```
 
-That produces `build/libmeetingrecord_macos.a` and runs the test suite. Link it with:
+From a clone:
 
 ```bash
-clang myapp.c build/libmeetingrecord_macos.a \
+git clone <this repo> && cd meeting-record
+npm run build                  # native core + addon + TypeScript + Rust
+```
+
+For C, `./scripts/build-macos.sh` produces
+`native/build/libmeetingrecord_macos.a`. Link it with:
+
+```bash
+clang myapp.c native/build/libmeetingrecord_macos.a \
   -I native/include \
   -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
   -framework Foundation -framework AppKit -framework ApplicationServices \
@@ -73,6 +109,57 @@ Capture will not work without it — the system refuses to even prompt.
 ---
 
 ## Quickstart
+
+### TypeScript
+
+```ts
+import { createWriteStream } from 'node:fs'
+import mrec from 'meeting-record'
+
+await mrec.permissions.request('system-audio')
+
+mrec.autoRecord({
+  onStart(session, meeting) {
+    console.log(`recording ${meeting.platform} at ${session.sampleRate}Hz`)
+    session.pipe(createWriteStream(`${meeting.platform}.f32`))
+  },
+  onStop(meeting) {
+    console.log(`finished ${meeting.platform}`)
+  },
+})
+```
+
+Audio arrives as a `Readable` stream of interleaved float32, so it pipes anywhere
+and gives you backpressure. Lower-level pieces are available too:
+
+```ts
+mrec.meetings.on('started', (m) => { /* m.shouldRecord, m.platform, m.title */ })
+mrec.meetings.watch()
+
+const session = await mrec.capture.start({ pids: [1234], mono: true })
+session.on('drop', (n) => console.warn(`lost ${n} samples`))
+await session.stop()
+```
+
+### Rust
+
+Capture and watching return guards that stop on drop, so a running capture cannot
+be leaked by an early return.
+
+```rust
+use meeting_record as mrec;
+
+let _watcher = mrec::watch(|event, meeting| {
+    if event == mrec::MeetingEvent::Started && meeting.should_record {
+        // The handler below runs on a realtime thread: copy and return.
+        let _capture = mrec::record(meeting, |buffer| {
+            tx.send(buffer.frames.to_vec()).ok();
+        });
+    }
+})?;
+```
+
+### C
 
 The complete flow: ask for permission, wait for a meeting, record it to a file.
 
@@ -430,15 +517,14 @@ Not yet verified:
   and produces correctly-timed frames, but the last runs recorded silence — a
   wedged `coreaudiod` from repeated `SIGKILL`s during development, reproduced
   identically by a standalone prototype. Run `sudo killall coreaudiod`, then
-  `./scripts/build-macos.sh selftest` and `open build/MrecSelfTest.app`.
+  `./scripts/build-macos.sh selftest` and `open native/build/MrecSelfTest.app`.
 - **positive meeting detection.** Nothing was in a call during testing. Join one
-  and run `./build/meetingtest`.
+  and run `./native/build/meetingtest`.
 - **both Windows backends.** Written from the reverse-engineered API surface and
   Microsoft's documented contracts; never executed.
 
 ### Not built yet
 
-- Node/N-API binding and TypeScript API — [design](docs/NODE-API.md)
 - microphone capture and mic/system mixing
 - Opus/WAV encoding
 - participant names and mute state
@@ -447,16 +533,29 @@ Not yet verified:
 
 ---
 
-## Testing
+## Building and testing
 
 ```bash
-./scripts/build-macos.sh            # library + layout check + unit tests
-./scripts/build-macos.sh selftest   # + signed .app exercising real capture
+npm run build      # everything: native core, Node addon + TS, Rust
+npm test           # native checks + Node tests + cargo test
+```
 
-./build/meetingtest                 # detection; no permission needed
+Individually:
+
+```bash
+./scripts/build-macos.sh                 # core + layout check + unit tests
+npm run build --workspace meeting-record # Node addon + TypeScript
+cargo test                               # Rust crate and FFI layout tests
+```
+
+Manual checks:
+
+```bash
+./native/build/meetingtest           # detection; needs no permission
 cat /tmp/meeting-record-detecttest.log
 
-open build/MrecSelfTest.app        # capture; play audio first
+./scripts/build-macos.sh selftest    # signed .app exercising real capture
+open native/build/MrecSelfTest.app   # play audio first
 cat /tmp/meeting-record-selftest.log
 ```
 

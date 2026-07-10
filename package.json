@@ -1,0 +1,14 @@
+{
+  "name": "meeting-record-monorepo",
+  "private": true,
+  "description": "System-audio capture and meeting detection — monorepo root",
+  "workspaces": ["node"],
+  "scripts": {
+    "build:native": "./scripts/build-macos.sh",
+    "build:node": "npm run build --workspace meeting-record",
+    "build:rust": "cargo build",
+    "build": "npm run build:native && npm run build:node && npm run build:rust",
+    "test": "npm run build:native && npm run test --workspace meeting-record && cargo test"
+  },
+  "license": "MIT"
+}

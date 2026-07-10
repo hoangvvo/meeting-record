@@ -1,0 +1,7 @@
+native/build/
+node/build/
+node/dist/
+node_modules/
+target/
+*.log
+*.f32

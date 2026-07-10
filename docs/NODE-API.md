@@ -1,7 +1,7 @@
 # Node / TypeScript API design
 
-**Status: proposed, not implemented.** The C ABI in `native/include/` is shaped to
-support this; none of the TypeScript below exists yet.
+**Status: implemented** in `src/index.ts`. This document records why the API has
+the shape it does; the [README](../README.md) is the usage reference.
 
 The aim is that the common case — record calls automatically — is a few lines,
 while the individual pieces remain usable on their own.
