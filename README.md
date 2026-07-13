@@ -548,7 +548,20 @@ npm run build --workspace meeting-record # Node addon + TypeScript
 cargo test                               # Rust crate and FFI layout tests
 ```
 
-Manual checks:
+Try it interactively:
+
+```bash
+# play some audio first, then record 10s to a playable .wav
+node node/examples/record-wav.mjs 10
+
+# live detection monitor — open a call and watch it react
+node node/examples/watch.mjs
+
+# record every meeting automatically
+node node/examples/record.mjs
+```
+
+Lower-level checks:
 
 ```bash
 ./native/build/meetingtest           # detection; needs no permission
