@@ -26,7 +26,7 @@ fn main() -> Result<(), meeting_record::Error> {
 
     let _watcher = meeting_record::watch(move |event, meeting| {
         if event == meeting_record::MeetingEvent::Started && meeting.should_record {
-            println!("recording {} ({})", meeting.platform, meeting.app_name);
+            println!("recording {} ({})", meeting.platform.as_str(), meeting.app_name);
             let tx = tx.clone();
             // Realtime thread: copy and send, nothing else.
             match meeting_record::record(meeting, move |buffer| {

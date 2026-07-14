@@ -186,8 +186,9 @@ private:
 
 Napi::Object MeetingToJS(Napi::Env env, const mrec_meeting *m) {
   Napi::Object out = Napi::Object::New(env);
-  out.Set("platform", Napi::String::New(env, mrec_platform_name(m->platform)));
-  out.Set("platformId", Napi::Number::New(env, m->platform));
+  out.Set("platform", Napi::String::New(env, mrec_platform_id(m->platform)));
+  /* Non-enumerable in the TS layer: only used to round-trip back into C. */
+  out.Set("platformCode", Napi::Number::New(env, m->platform));
   out.Set("pid", Napi::Number::New(env, m->pid));
   out.Set("appName", Napi::String::New(env, m->app_name));
   out.Set("title", Napi::String::New(env, m->title));
@@ -209,9 +210,9 @@ Napi::Object MeetingToJS(Napi::Env env, const mrec_meeting *m) {
 /* Read a JS meeting object back into the C struct. */
 bool MeetingFromJS(const Napi::Object &obj, mrec_meeting *out) {
   std::memset(out, 0, sizeof *out);
-  if (!obj.Has("platformId") || !obj.Has("pid")) return false;
+  if (!obj.Has("platformCode") || !obj.Has("pid")) return false;
   out->platform =
-      static_cast<mrec_platform>(obj.Get("platformId").As<Napi::Number>().Int32Value());
+      static_cast<mrec_platform>(obj.Get("platformCode").As<Napi::Number>().Int32Value());
   out->pid = obj.Get("pid").As<Napi::Number>().Uint32Value();
 
   if (obj.Has("_audioPids")) {

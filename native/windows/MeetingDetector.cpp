@@ -483,18 +483,19 @@ mrec_permission mrec_accessibility_permission_status(void) {
 
 mrec_status mrec_request_accessibility_permission(void) { return MREC_OK; }
 
-const char *mrec_platform_name(mrec_platform platform) {
+const char *mrec_platform_id(mrec_platform platform) {
   switch (platform) {
-    case MREC_PLATFORM_ZOOM: return "Zoom";
-    case MREC_PLATFORM_TEAMS: return "Microsoft Teams";
-    case MREC_PLATFORM_MEET: return "Google Meet";
-    case MREC_PLATFORM_WEBEX: return "Webex";
-    case MREC_PLATFORM_SLACK: return "Slack";
-    case MREC_PLATFORM_DISCORD: return "Discord";
-    case MREC_PLATFORM_GENERIC_BROWSER: return "Browser call";
+    case MREC_PLATFORM_ZOOM: return "zoom";
+    case MREC_PLATFORM_TEAMS: return "teams";
+    case MREC_PLATFORM_MEET: return "meet";
+    case MREC_PLATFORM_WEBEX: return "webex";
+    case MREC_PLATFORM_SLACK: return "slack";
+    case MREC_PLATFORM_DISCORD: return "discord";
+    case MREC_PLATFORM_GENERIC_BROWSER: return "browser";
     case MREC_PLATFORM_UNKNOWN: break;
   }
-  return "Unknown";
+  return "unknown";
 }
+
 
 } // extern "C"

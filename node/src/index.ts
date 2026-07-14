@@ -14,15 +14,22 @@ const native = require_('../build/Release/meeting_record.node')
 export type Permission = 'system-audio' | 'accessibility'
 export type PermissionStatus = 'granted' | 'denied' | 'unknown' | 'not-required'
 
+/**
+ * Stable platform identifier. Compare against these, persist them, use them in
+ * filenames — the values never change.
+ *
+ * The library ships no display labels; presentation and localisation are yours.
+ */
 export type Platform =
-  | 'Zoom'
-  | 'Microsoft Teams'
-  | 'Google Meet'
-  | 'Webex'
-  | 'Slack'
-  | 'Discord'
-  | 'Browser call'
-  | 'Unknown'
+  | 'zoom'
+  | 'teams'
+  | 'meet'
+  | 'webex'
+  | 'slack'
+  | 'discord'
+  /** A browser tab on a recognised call URL. */
+  | 'browser'
+  | 'unknown'
 
 export interface Meeting {
   readonly platform: Platform
@@ -114,16 +121,21 @@ export const permissions = {
 const audioPidsOf = new WeakMap<Meeting, number[]>()
 
 function toMeeting(raw: any): Meeting {
-  const { _audioPids, platformId, ...rest } = raw
+  const { _audioPids, platformCode, ...rest } = raw
   const meeting = rest as Meeting
-  Object.defineProperty(meeting, '__platformId', { value: platformId, enumerable: false })
+  // Hidden rather than deleted: needed to hand the meeting back to the C layer,
+  // but not part of the public shape.
+  Object.defineProperty(meeting, '__platformCode', {
+    value: platformCode,
+    enumerable: false,
+  })
   audioPidsOf.set(meeting, _audioPids ?? [])
   return meeting
 }
 
 function toNative(meeting: Meeting): any {
   return {
-    platformId: (meeting as any).__platformId ?? 0,
+    platformCode: (meeting as any).__platformCode ?? 0,
     pid: meeting.pid,
     _audioPids: audioPidsOf.get(meeting) ?? [],
   }

@@ -187,25 +187,32 @@ public func mrec_request_accessibility_permission() -> Int32 {
     return 0
 }
 
-/// Names are allocated once at first use and never freed, so the returned pointer
-/// stays valid for the process lifetime.
+/// Allocated once at first use and never freed, so the returned pointer stays
+/// valid for the process lifetime.
 ///
 /// The C contract is a borrowed pointer with no matching free, so allocating per
 /// call would leak on every call — and callers do call this from inside event
 /// callbacks. The Windows backend returns string literals for the same reason.
-private let platformNames: [Int32: UnsafePointer<CChar>] = {
+private let allPlatforms: [MeetingPlatform] = [
+    .unknown, .zoom, .teams, .meet, .webex, .slack, .discord, .genericBrowser,
+]
+
+private func cachedStrings(_ value: @escaping (MeetingPlatform) -> String)
+    -> [Int32: UnsafePointer<CChar>] {
     var table: [Int32: UnsafePointer<CChar>] = [:]
-    for platform in [MeetingPlatform.unknown, .zoom, .teams, .meet,
-                     .webex, .slack, .discord, .genericBrowser] {
-        table[platform.rawValue] = UnsafePointer(strdup(platform.displayName))
+    for platform in allPlatforms {
+        table[platform.rawValue] = UnsafePointer(strdup(value(platform)))
     }
     return table
-}()
-
-@_cdecl("mrec_platform_name")
-public func mrec_platform_name(_ platform: Int32) -> UnsafePointer<CChar>? {
-    platformNames[platform] ?? platformNames[MeetingPlatform.unknown.rawValue]
 }
+
+private let platformIDs = cachedStrings { $0.id }
+
+@_cdecl("mrec_platform_id")
+public func mrec_platform_id(_ platform: Int32) -> UnsafePointer<CChar>? {
+    platformIDs[platform] ?? platformIDs[MeetingPlatform.unknown.rawValue]
+}
+
 
 // MARK: - Recording a detected meeting
 

@@ -88,7 +88,7 @@ enum MeetingDetector {
             platform: platform,
             pid: owner,
             audioPIDs: Array(audioPIDs.prefix(16)),
-            appName: platform.displayName,
+            appName: processName(of: owner, in: processes),
             title: title,
             url: "",
             isUsingMic: !listening.isEmpty,
@@ -137,7 +137,7 @@ enum MeetingDetector {
                 platform: matched ?? .genericBrowser,
                 pid: owner,
                 audioPIDs: Array(audioPIDs.prefix(16)),
-                appName: entry.browser.name,
+                appName: processName(of: owner, in: entry.processes),
                 title: title,
                 url: url,
                 isUsingMic: !listening.isEmpty,
@@ -168,6 +168,13 @@ enum MeetingDetector {
             guard let id = app.bundleIdentifier?.lowercased() else { return false }
             return bundleID.hasPrefix(id) || id.hasPrefix(bundleID)
         }?.processIdentifier
+    }
+
+    /// Executable name as reported by the kernel. Factual OS data rather than a
+    /// label chosen here — consumers decide how to present it.
+    private static func processName(of pid: pid_t,
+                                    in processes: [AudioProcess]) -> String {
+        processes.first { $0.pid == pid }?.name ?? processes.first?.name ?? ""
     }
 
     static var recordThreshold: Int32 { Score.recordThreshold }

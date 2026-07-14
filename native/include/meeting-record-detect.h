@@ -152,7 +152,17 @@ mrec_permission mrec_accessibility_permission_status(void);
  */
 mrec_status mrec_request_accessibility_permission(void);
 
-const char *mrec_platform_name(mrec_platform platform);
+/*
+ * Stable machine identifier: "zoom", "teams", "meet", "webex", "slack",
+ * "discord", "browser", "unknown". The values never change, so they are safe to
+ * compare, persist, and put in filenames.
+ *
+ * The library ships no human-readable labels: presentation is the caller's
+ * concern, including localisation.
+ *
+ * Returns static storage owned by the library; do not free.
+ */
+const char *mrec_platform_id(mrec_platform platform);
 
 #ifdef __cplusplus
 }

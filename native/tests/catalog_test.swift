@@ -59,16 +59,27 @@ struct CatalogTests {
                     "browsers are not native meeting apps")
 
         print("\nbrowser matching")
-        expectEqual(MeetingCatalog.browser(forBundleID: "com.google.Chrome")?.name, "Chrome",
-                    "Chrome")
-        expectEqual(MeetingCatalog.browser(forBundleID: "com.google.Chrome.helper")?.name,
-                    "Chrome", "Chrome helper")
-        expectEqual(MeetingCatalog.browser(forBundleID: "com.apple.Safari")?.name, "Safari",
-                    "Safari")
-        expectEqual(MeetingCatalog.browser(forBundleID: "company.thebrowser.Browser")?.name,
-                    "Arc", "Arc")
-        expectEqual(MeetingCatalog.browser(forBundleID: "us.zoom.xos")?.name, nil,
-                    "Zoom is not a browser")
+        expectEqual(MeetingCatalog.browser(forBundleID: "com.google.Chrome")?.bundlePrefix,
+                    "com.google.chrome", "Chrome")
+        expectEqual(MeetingCatalog.browser(forBundleID: "com.google.Chrome.helper")?.bundlePrefix,
+                    "com.google.chrome", "Chrome helper")
+        expectEqual(MeetingCatalog.browser(forBundleID: "com.apple.Safari")?.bundlePrefix,
+                    "com.apple.safari", "Safari")
+        expectEqual(MeetingCatalog.browser(forBundleID: "company.thebrowser.Browser")?.bundlePrefix,
+                    "company.thebrowser.browser", "Arc")
+        expect(MeetingCatalog.browser(forBundleID: "us.zoom.xos") == nil,
+               "Zoom is not a browser")
+
+        // Stable ids are part of the contract: consumers branch on them.
+        print("\nplatform identifiers are stable")
+        expectEqual(MeetingPlatform.zoom.id, "zoom", "zoom")
+        expectEqual(MeetingPlatform.teams.id, "teams", "teams")
+        expectEqual(MeetingPlatform.meet.id, "meet", "meet")
+        expectEqual(MeetingPlatform.webex.id, "webex", "webex")
+        expectEqual(MeetingPlatform.slack.id, "slack", "slack")
+        expectEqual(MeetingPlatform.discord.id, "discord", "discord")
+        expectEqual(MeetingPlatform.genericBrowser.id, "browser", "browser")
+        expectEqual(MeetingPlatform.unknown.id, "unknown", "unknown")
 
         print("\nmeeting URL recognition")
         expectEqual(MeetingCatalog.platform(forURLOrTitle: "https://meet.google.com/abc-defg-hij"),

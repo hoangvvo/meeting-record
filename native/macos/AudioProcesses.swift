@@ -134,7 +134,7 @@ enum AudioProcessRegistry {
                     objectID: obj,
                     pid: pid,
                     bundleID: bundleID,
-                    name: displayName(pid: pid, bundleID: bundleID),
+                    name: executableName(pid: pid, bundleID: bundleID),
                     isRunningOutput: HAL.value(obj, kAudioProcessPropertyIsRunningOutput,
                                                default: UInt32(0)) != 0,
                     isRunningInput: HAL.value(obj, kAudioProcessPropertyIsRunningInput,
@@ -157,9 +157,9 @@ enum AudioProcessRegistry {
         kill(pid, 0) == 0 || errno == EPERM
     }
 
-    /// HAL exposes no process name, and helper processes have no bundle id, so
-    /// fall back to the executable name from the kernel.
-    private static func displayName(pid: pid_t, bundleID: String) -> String {
+    /// The HAL exposes no process name and helper processes have no bundle id, so
+    /// read the executable name from the kernel.
+    private static func executableName(pid: pid_t, bundleID: String) -> String {
         var buf = [CChar](repeating: 0, count: 4096)
         if proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 {
             let path = String(cString: buf)

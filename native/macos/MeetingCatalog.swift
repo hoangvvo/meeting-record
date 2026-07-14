@@ -17,18 +17,21 @@ enum MeetingPlatform: Int32 {
     case discord = 6
     case genericBrowser = 7
 
-    var displayName: String {
+    /// Stable machine identifier. Safe to compare, persist, and use in filenames.
+    /// Never change these values: consumers branch on them.
+    var id: String {
         switch self {
-        case .unknown: return "Unknown"
-        case .zoom: return "Zoom"
-        case .teams: return "Microsoft Teams"
-        case .meet: return "Google Meet"
-        case .webex: return "Webex"
-        case .slack: return "Slack"
-        case .discord: return "Discord"
-        case .genericBrowser: return "Browser call"
+        case .unknown: return "unknown"
+        case .zoom: return "zoom"
+        case .teams: return "teams"
+        case .meet: return "meet"
+        case .webex: return "webex"
+        case .slack: return "slack"
+        case .discord: return "discord"
+        case .genericBrowser: return "browser"
         }
     }
+
 }
 
 struct NativeApp {
@@ -39,7 +42,6 @@ struct NativeApp {
 
 struct BrowserApp {
     let bundlePrefix: String
-    let name: String
 }
 
 enum MeetingCatalog {
@@ -57,15 +59,16 @@ enum MeetingCatalog {
 
     /// Browsers whose tabs may host a call. Audio-capable helper processes of
     /// these are candidates, but only count as a meeting once a URL or title
-    /// matches, or the mic is live.
+    /// matches, or the mic is live. No label is stored: the process name comes
+    /// from the OS, and naming things is the consumer's concern.
     static let browsers: [BrowserApp] = [
-        BrowserApp(bundlePrefix: "com.google.chrome", name: "Chrome"),
-        BrowserApp(bundlePrefix: "com.apple.safari", name: "Safari"),
-        BrowserApp(bundlePrefix: "com.microsoft.edgemac", name: "Edge"),
-        BrowserApp(bundlePrefix: "org.mozilla.firefox", name: "Firefox"),
-        BrowserApp(bundlePrefix: "company.thebrowser.browser", name: "Arc"),
-        BrowserApp(bundlePrefix: "com.brave.browser", name: "Brave"),
-        BrowserApp(bundlePrefix: "com.vivaldi.vivaldi", name: "Vivaldi"),
+        BrowserApp(bundlePrefix: "com.google.chrome"),
+        BrowserApp(bundlePrefix: "com.apple.safari"),
+        BrowserApp(bundlePrefix: "com.microsoft.edgemac"),
+        BrowserApp(bundlePrefix: "org.mozilla.firefox"),
+        BrowserApp(bundlePrefix: "company.thebrowser.browser"),
+        BrowserApp(bundlePrefix: "com.brave.browser"),
+        BrowserApp(bundlePrefix: "com.vivaldi.vivaldi"),
     ]
 
     /// URL host/path fragments that identify a live call, mapped to a platform.

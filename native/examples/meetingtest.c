@@ -25,7 +25,7 @@ static const char *EventName(mrec_event event) {
 
 static void Describe(const mrec_meeting *m, const char *prefix) {
   fprintf(g_log, "%s %s pid=%u confidence=%d mic=%d out=%d\n", prefix,
-          mrec_platform_name(m->platform), m->pid, m->confidence,
+          mrec_platform_id(m->platform), m->pid, m->confidence,
           m->is_using_mic, m->is_playing_audio);
   fprintf(g_log, "    app=\"%s\"\n", m->app_name);
   if (m->title[0]) fprintf(g_log, "    title=\"%s\"\n", m->title);

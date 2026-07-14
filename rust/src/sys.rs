@@ -111,5 +111,5 @@ extern "C" {
     pub fn mrec_watch_start(cb: Option<MeetingCallback>, user_data: *mut c_void) -> c_int;
     pub fn mrec_watch_stop() -> c_int;
     pub fn mrec_is_watching() -> i32;
-    pub fn mrec_platform_name(platform: i32) -> *const c_char;
+    pub fn mrec_platform_id(platform: i32) -> *const c_char;
 }

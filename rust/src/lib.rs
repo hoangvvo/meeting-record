@@ -6,7 +6,11 @@
 //! # fn main() -> Result<(), mrec::Error> {
 //! let watcher = mrec::watch(|event, meeting| {
 //!     if event == mrec::MeetingEvent::Started && meeting.should_record {
-//!         println!("recording {}", meeting.platform);
+//!         // `platform` is a stable identifier, not a label: match on it.
+//!         match meeting.platform {
+//!             mrec::Platform::Zoom | mrec::Platform::Teams => { /* ... */ }
+//!             _ => {}
+//!         }
 //!     }
 //! })?;
 //! # Ok(())
@@ -169,9 +173,60 @@ pub fn audio_processes() -> Vec<AudioProcess> {
 
 /* ---- meetings ---------------------------------------------------------- */
 
+/// Conferencing platform.
+///
+/// [`Platform::as_str`] gives a stable identifier. The library intentionally
+/// provides no human-readable labels — presentation and localisation belong to
+/// the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Platform {
+    Unknown,
+    Zoom,
+    Teams,
+    Meet,
+    Webex,
+    Slack,
+    Discord,
+    /// A browser tab on a call URL we recognise but cannot attribute further.
+    Browser,
+}
+
+impl Platform {
+    fn from_raw(value: i32) -> Self {
+        match value {
+            1 => Platform::Zoom,
+            2 => Platform::Teams,
+            3 => Platform::Meet,
+            4 => Platform::Webex,
+            5 => Platform::Slack,
+            6 => Platform::Discord,
+            7 => Platform::Browser,
+            _ => Platform::Unknown,
+        }
+    }
+
+    /// Stable identifier: `"zoom"`, `"teams"`, `"meet"`, `"webex"`, `"slack"`,
+    /// `"discord"`, `"browser"`, `"unknown"`. Safe to persist and to compare.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Platform::Unknown => "unknown",
+            Platform::Zoom => "zoom",
+            Platform::Teams => "teams",
+            Platform::Meet => "meet",
+            Platform::Webex => "webex",
+            Platform::Slack => "slack",
+            Platform::Discord => "discord",
+            Platform::Browser => "browser",
+        }
+    }
+
+}
+
+
 #[derive(Clone)]
 pub struct Meeting {
-    pub platform: String,
+    pub platform: Platform,
     /// The application the user sees; not necessarily where the audio is.
     pub pid: u32,
     pub app_name: String,
@@ -206,16 +261,8 @@ impl fmt::Debug for Meeting {
 
 impl Meeting {
     fn from_raw(raw: &sys::Meeting) -> Self {
-        let platform = unsafe {
-            let ptr = sys::mrec_platform_name(raw.platform);
-            if ptr.is_null() {
-                "Unknown".to_string()
-            } else {
-                CStr::from_ptr(ptr).to_string_lossy().into_owned()
-            }
-        };
         Meeting {
-            platform,
+            platform: Platform::from_raw(raw.platform),
             pid: raw.pid,
             app_name: c_string(&raw.app_name),
             title: c_string(&raw.title),
