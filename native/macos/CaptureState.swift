@@ -7,11 +7,9 @@ public typealias MrecAudioCallback = @convention(c) (
 ) -> Void
 
 /// Holds the host's callback so the realtime IOProc can reach it through a raw
-/// pointer. Reference type because it is passed as IOProc `clientData`.
+/// pointer. A class because it is passed as IOProc `clientData`.
 ///
-/// The realtime path (`emit`) only reads immutable-after-start fields, so no
-/// locking is needed there — which matters, because taking a lock on a CoreAudio
-/// IO thread risks priority inversion and dropouts.
+/// `emit` reads only fields that are immutable after start, so it takes no lock.
 final class CaptureStateBox {
     private var callback: MrecAudioCallback?
     private var userData: UnsafeMutableRawPointer?
@@ -19,8 +17,8 @@ final class CaptureStateBox {
     private var sampleRate: Double = 0
     private var channels: UInt32 = 0
 
-    /// Host clock ticks -> nanoseconds. Resolved once; `mach_timebase_info` is a
-    /// syscall-free read but we still avoid it on the audio thread.
+    /// Host clock ticks -> nanoseconds, resolved once to keep it off the audio
+    /// thread.
     private var timebaseNumer: UInt64 = 1
     private var timebaseDenom: UInt64 = 1
 
@@ -53,7 +51,7 @@ final class CaptureStateBox {
         channels = 0
     }
 
-    /// Called from the realtime IOProc.
+    /// Called on the realtime IOProc thread.
     @inline(__always)
     func emit(_ frames: UnsafePointer<Float>, frameCount: UInt32, channels: UInt32) {
         guard let callback else { return }

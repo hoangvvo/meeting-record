@@ -4,28 +4,16 @@ import Foundation
 
 /// System-audio capture via CoreAudio process taps (macOS 14.2+).
 ///
-/// Pipeline:
-///   1. `AudioHardwareCreateProcessTap` with a `CATapDescription` — either a
-///      mixdown of specific processes or a global mixdown.
-///   2. A **private** aggregate device that lists the tap in its tap list. The
-///      default output device is set as the aggregate's *main* sub-device purely
-///      to supply a clock; the sub-device list stays empty so we never take over
-///      the user's output path.
-///   3. `AudioDeviceCreateIOProcID` on the aggregate to pull interleaved float32.
+/// Process tap -> private aggregate device listing that tap ->
+/// `AudioDeviceCreateIOProcID` pulling interleaved float32.
 ///
-/// Two behaviours here are load-bearing and cost real time to discover:
+/// `AudioDeviceCreateIOProcIDWithBlock` does not work on a tap-backed aggregate:
+/// it returns `noErr`, `IsRunning` stays 0, and the block is never invoked. With
+/// the TCC grant undetermined it blocks indefinitely. Use the C function pointer
+/// form.
 ///
-///   * **Never use `AudioDeviceCreateIOProcIDWithBlock`.** On a tap-backed
-///     aggregate the block variant returns `noErr`, the device reports
-///     `IsRunning == 0`, and the block is never invoked. Before the TCC grant
-///     exists it is worse: the call blocks forever inside
-///     `HALC_ProxyIOContext::_TellServerAboutStreamUsage`. The C function
-///     pointer form works in both cases.
-///
-///   * **Prefer a process-list tap over a global tap.** A global tap sits after
-///     the hardware mix, so it records digital silence whenever the user mutes
-///     their speakers — fatal for a meeting recorder. A process tap reads each
-///     app's stream before that point and keeps working while muted.
+/// A global tap reads after the hardware mix and yields silence while output is
+/// muted. A process-list tap does not.
 final class TapCapture {
     struct Format {
         var sampleRate: Double
@@ -65,8 +53,7 @@ final class TapCapture {
         }
         tapID = tap
 
-        // The aggregate references the tap by UID string. Read it back from the
-        // created object rather than trusting the description's UUID.
+        // The aggregate references the tap by UID string.
         let tapUID = HAL.string(tap, kAudioTapPropertyUID) ?? description.uuid.uuidString
 
         guard let output = HAL.defaultOutputDevice() else {
@@ -77,11 +64,10 @@ final class TapCapture {
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "meeting-record-capture",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
-            // Clock anchor only — deliberately *not* in the sub-device list, so the
-            // aggregate exposes just the tap's input stream and no output path.
+            // Clock source only; not in the sub-device list, so the aggregate
+            // exposes the tap's input stream and no output path.
             kAudioAggregateDeviceMainSubDeviceKey: output.uid,
             kAudioAggregateDeviceSubDeviceListKey: [[String: Any]](),
-            // Private: invisible to other apps and to Audio MIDI Setup.
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
             kAudioAggregateDeviceTapAutoStartKey: true,
@@ -100,9 +86,8 @@ final class TapCapture {
         }
         aggregateID = aggregate
 
-        // Take the format from the aggregate's first input stream. The tap's own
-        // kAudioTapPropertyFormat can disagree with what the device delivers
-        // (e.g. reports mono while the stream is stereo).
+        // `kAudioTapPropertyFormat` can disagree with what the device delivers,
+        // so read the aggregate's first input stream instead.
         guard let resolved = firstInputStreamFormat(of: aggregate) else {
             teardown()
             throw CaptureError.deviceFailed(kAudioDeviceUnsupportedFormatError)
@@ -111,7 +96,6 @@ final class TapCapture {
         stateBox.updateFormat(sampleRate: resolved.mSampleRate,
                               channels: resolved.mChannelsPerFrame)
 
-        // C function pointer, not the block variant. See the type doc comment.
         var proc: AudioDeviceIOProcID?
         let procErr = AudioDeviceCreateIOProcID(aggregate,
                                                 captureIOProc,
@@ -162,15 +146,13 @@ final class TapCapture {
         let description: CATapDescription
 
         if globalMixdown || pids.isEmpty {
-            // Empty exclusion list == tap everything the system plays.
+            // Empty exclusion list taps everything the system plays.
             description = mono
                 ? CATapDescription(monoGlobalTapButExcludeProcesses: [])
                 : CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         } else {
-            // pids are Unix pids; the tap API wants HAL process object ids. Dead
-            // pids are dropped first: the HAL happily hands back objects for exited
-            // processes, and a tap built over those yields silence rather than an
-            // error.
+            // The tap API wants HAL process object ids, not Unix pids. Dead pids
+            // resolve to objects that yield silence, so drop them first.
             let objects = pids
                 .filter(AudioProcessRegistry.isAlive)
                 .compactMap { HAL.processObject(forPID: $0) }
@@ -182,15 +164,11 @@ final class TapCapture {
 
         description.uuid = UUID()
         description.name = "meeting-record-tap"
-        // .unmuted = listen in without altering what the user hears.
         description.muteBehavior = muteCapturedOutput ? .muted : .unmuted
         // Non-exclusive so other processes can tap the same audio concurrently.
         description.isExclusive = false
-        // NOT private. The aggregate device resolves the tap by UID string, and a
-        // private tap is not published for that lookup: the aggregate is created
-        // happily, exposes an input stream, and delivers nothing but zeros. The
-        // *aggregate* is still private, which is what actually keeps us out of
-        // other apps' device lists.
+        // A private tap is not published for UID lookup, so the aggregate binds a
+        // stream that only ever delivers zeros. The aggregate itself stays private.
         description.isPrivate = false
         return description
     }
@@ -233,7 +211,7 @@ enum CaptureError: Error {
         }
     }
 
-    /// CoreAudio errors are packed four-character codes; render both forms.
+    /// CoreAudio errors are packed four-character codes.
     private func fourCC(_ status: OSStatus) -> String {
         let v = UInt32(bitPattern: status)
         let bytes = [UInt8(truncatingIfNeeded: v >> 24), UInt8(truncatingIfNeeded: v >> 16),
@@ -245,9 +223,8 @@ enum CaptureError: Error {
     }
 }
 
-/// Realtime IOProc. Runs on a CoreAudio thread: no allocation, no locks, no
-/// Swift runtime calls that could allocate. It only forwards the buffer to the
-/// C callback registered by the host.
+/// Runs on a CoreAudio realtime thread: no allocation, no locks. Forwards the
+/// buffer to the host's callback.
 private let captureIOProc: AudioDeviceIOProc = {
     _, _, inInputData, _, _, _, clientData in
 

@@ -2,8 +2,15 @@
   "name": "meeting-record",
   "version": "0.1.0",
   "description": "System-audio capture and meeting detection for macOS and Windows",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "gypfile": true,
   "files": [
     "dist",
@@ -11,7 +18,7 @@
     "binding.gyp"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "build:native": "cd .. && ./scripts/build-macos.sh",

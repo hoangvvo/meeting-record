@@ -1,11 +1,7 @@
 //! Raw FFI declarations for the C ABI in `native/include/`.
 //!
-//! Hand-written rather than bindgen-generated: the surface is 16 functions and two
-//! structs, and hand-writing keeps the crate free of a build-time dependency on
-//! libclang.
-//!
-//! Field order and padding here must match the headers exactly. `layout_check.c`
-//! guards the C side; `tests/layout.rs` guards this side.
+//! Hand-written to avoid a build-time dependency on libclang. Field order and
+//! padding must match the headers; `tests/layout.rs` asserts it.
 
 use std::os::raw::{c_char, c_double, c_int, c_void};
 
@@ -23,7 +19,7 @@ pub const MREC_ERR_BUFFER_TOO_SMALL: i32 = -10;
 
 pub const MREC_MAX_AUDIO_PIDS: usize = 16;
 
-/// Interleaved float32 PCM, delivered on a realtime audio thread.
+/// Interleaved float32 PCM on a realtime audio thread.
 pub type AudioCallback = unsafe extern "C" fn(
     frames: *const f32,
     frame_count: u32,
@@ -85,7 +81,7 @@ extern "C" {
         out_count: *mut usize,
     ) -> c_int;
 
-    /// `mrec_start` is `static inline` in the header, so only this is a real symbol.
+    /// `mrec_start` is `static inline`, so only this is a real symbol.
     pub fn mrec_start_raw(
         pids: *const u32,
         pid_count: usize,

@@ -17,10 +17,8 @@
 //! # }
 //! ```
 //!
-//! Two things are enforced by the type system here rather than by documentation:
-//! capture and watching are process-wide singletons, so both hand back a guard
-//! that stops them on drop. That matters because leaking a running capture leaves
-//! OS audio state behind.
+//! Capture and watching are process-wide singletons. Both return a guard that
+//! stops them on drop.
 
 pub mod sys;
 
@@ -33,7 +31,7 @@ use std::sync::Mutex;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     UnsupportedOs,
-    /// Not granted, or still undetermined. On macOS see [`request_audio_permission`].
+    /// Not granted, or undetermined.
     Permission(String),
     AlreadyRunning,
     NotRunning,
@@ -116,9 +114,8 @@ pub fn audio_permission() -> Permission {
 
 /// Show the one-time system-audio prompt.
 ///
-/// Returns immediately: the dialog is modal to the user, not to the caller. Poll
-/// [`audio_permission`] for the answer. Requires a GUI process — see the crate
-/// README.
+/// Returns immediately; poll [`audio_permission`] for the answer. Requires a GUI
+/// process.
 pub fn request_audio_permission() {
     unsafe { sys::mrec_request_audio_permission() };
 }
@@ -175,9 +172,8 @@ pub fn audio_processes() -> Vec<AudioProcess> {
 
 /// Conferencing platform.
 ///
-/// [`Platform::as_str`] gives a stable identifier. The library intentionally
-/// provides no human-readable labels — presentation and localisation belong to
-/// the caller.
+/// [`Platform::as_str`] is a stable identifier. No human-readable labels are
+/// provided; presentation and localisation belong to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Platform {
@@ -207,7 +203,7 @@ impl Platform {
     }
 
     /// Stable identifier: `"zoom"`, `"teams"`, `"meet"`, `"webex"`, `"slack"`,
-    /// `"discord"`, `"browser"`, `"unknown"`. Safe to persist and to compare.
+    /// `"discord"`, `"browser"`, `"unknown"`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Platform::Unknown => "unknown",
@@ -227,7 +223,7 @@ impl Platform {
 #[derive(Clone)]
 pub struct Meeting {
     pub platform: Platform,
-    /// The application the user sees; not necessarily where the audio is.
+    /// The user-visible application, not necessarily where the audio is.
     pub pid: u32,
     pub app_name: String,
     /// Requires the accessibility permission; empty otherwise.
@@ -237,9 +233,9 @@ pub struct Meeting {
     pub is_using_mic: bool,
     pub is_playing_audio: bool,
     pub confidence: i32,
-    /// Prefer this over comparing `confidence`; the weights may change.
+    /// Prefer this to comparing `confidence`; the weights may change.
     pub should_record: bool,
-    /// Retained so [`record`] can start capture without the caller handling pids.
+    /// Lets [`record`] start capture without the caller handling pids.
     raw: sys::Meeting,
 }
 
@@ -293,8 +289,8 @@ pub enum MeetingEvent {
 
 type MeetingHandler = Box<dyn FnMut(MeetingEvent, &Meeting) + Send + 'static>;
 
-// The C API takes a `void*`, but the watcher is a process-wide singleton anyway,
-// so the handler lives here rather than being leaked into a raw pointer.
+// The watcher is a process-wide singleton, so the handler lives here rather than
+// in the C API's `void*`.
 static MEETING_HANDLER: Mutex<Option<MeetingHandler>> = Mutex::new(None);
 
 unsafe extern "C" fn meeting_trampoline(
@@ -323,7 +319,7 @@ unsafe extern "C" fn meeting_trampoline(
 }
 
 /// Stops watching when dropped.
-#[must_use = "watching stops as soon as this guard is dropped"]
+#[must_use = "watching stops when this guard is dropped"]
 pub struct Watcher {
     _private: (),
 }
@@ -339,8 +335,7 @@ impl Drop for Watcher {
 
 /// Watch for meetings starting, changing and ending.
 ///
-/// The handler runs on an internal serial queue, not a realtime thread, so it may
-/// allocate and block.
+/// The handler runs on an internal serial queue, so it may allocate and block.
 pub fn watch<F>(handler: F) -> Result<Watcher, Error>
 where
     F: FnMut(MeetingEvent, &Meeting) + Send + 'static,
@@ -376,11 +371,9 @@ static AUDIO_HANDLER: Mutex<Option<AudioHandler>> = Mutex::new(None);
 
 /// Realtime audio thread.
 ///
-/// Taking a mutex here is not ideal for a realtime context — it can in principle
-/// invert priority against a caller that is swapping the handler. In practice the
-/// handler is set once before capture starts and cleared after it stops, so the
-/// lock is uncontended. A caller doing real work should still forward into a
-/// lock-free queue and return immediately.
+/// `try_lock` rather than `lock`: the handler is set before capture starts and
+/// cleared after it stops, so the lock is uncontended, and a realtime thread must
+/// not block. Handlers should forward into a queue and return.
 unsafe extern "C" fn audio_trampoline(
     frames: *const f32,
     frame_count: u32,
@@ -414,8 +407,8 @@ unsafe extern "C" fn audio_trampoline(
 pub struct CaptureOptions {
     /// Specific processes.
     pub pids: Vec<u32>,
-    /// Or the whole system mix. Records silence while the user's output is muted,
-    /// so prefer `pids` or [`record`].
+    /// Or the whole system mix. Records silence while output is muted, so prefer
+    /// `pids` or [`record`].
     pub system_wide: bool,
     /// Mono mixdown. Defaults to true via [`CaptureOptions::mono`].
     pub stereo: bool,
@@ -424,7 +417,7 @@ pub struct CaptureOptions {
 }
 
 /// Stops capture when dropped.
-#[must_use = "capture stops as soon as this guard is dropped"]
+#[must_use = "capture stops when this guard is dropped"]
 pub struct Capture {
     pub sample_rate: f64,
     pub channels: u32,
@@ -465,11 +458,10 @@ fn finish_start(status: i32) -> Result<Capture, Error> {
 
 /// Capture specific processes, or the system mix.
 ///
-/// The handler runs on a realtime audio thread: do not allocate, lock, or perform
-/// I/O in it. Copy into a queue and process elsewhere.
+/// The handler runs on a realtime audio thread: no allocation, locks, or I/O.
 ///
-/// Blocks for up to six seconds on the first call, while the permission grant is
-/// undetermined, so do not call it from a UI thread.
+/// Blocks for up to six seconds while the permission grant is undetermined, so do
+/// not call from a UI thread.
 pub fn capture<F>(options: CaptureOptions, handler: F) -> Result<Capture, Error>
 where
     F: FnMut(AudioBuffer<'_>) + Send + 'static,
@@ -497,7 +489,7 @@ where
     finish_start(status)
 }
 
-/// Capture a detected meeting. The usual entry point: no pids involved.
+/// Capture a detected meeting, without handling pids.
 pub fn record<F>(meeting: &Meeting, handler: F) -> Result<Capture, Error>
 where
     F: FnMut(AudioBuffer<'_>) + Send + 'static,

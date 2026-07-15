@@ -1,7 +1,5 @@
-//! Guards the hand-written FFI structs in `sys` against the C headers.
-//!
-//! The C side is checked by `../tests/layout_check.c`; this is the Rust half. If
-//! either drifts, memory is silently misread across the boundary.
+//! Guards the hand-written FFI structs in `sys` against the C headers. Drift here
+//! silently misreads memory across the boundary.
 
 use meeting_record::sys;
 
@@ -40,7 +38,7 @@ fn process_layout_matches_header() {
     assert_eq!(&p.name as *const _ as usize - base, 268);
 }
 
-/// Exercises the real library: these must not crash or hang.
+/// Exercises the real library.
 #[test]
 fn reads_live_state() {
     let _ = meeting_record::audio_permission();

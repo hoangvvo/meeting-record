@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
 #
-# Build the macOS native core (and optionally the C self-test app bundle).
+# Build the macOS native core, and optionally the C self-test app bundle.
 #
 #   ./scripts/build-macos.sh              # static library only
 #   ./scripts/build-macos.sh selftest     # + signed .app that exercises it
 #
-# The self-test has to live in a bundle: CoreAudio process taps are gated by
-# kTCCServiceAudioCapture, and TCC will not prompt for (or grant to) a bare
-# executable with no Info.plist and no code-signing identity.
+# The self-test needs a bundle: TCC will not prompt for a bare executable with no
+# Info.plist and no code-signing identity.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/native/build"   # not $ROOT/build: node-gyp owns that
 mkdir -p "$BUILD"
 
-# Codesigning identity. Ad-hoc ("-") is enough to get a TCC prompt for a local
-# build; override with MREC_IDENTITY="Developer ID Application: ..." to ship.
+# Codesigning identity; override with MREC_IDENTITY to ship.
 IDENTITY="${MREC_IDENTITY:--}"
 
-# Fails the build if meeting-record-detect.h drifts from the offsets Swift hardcodes.
+# Fails if meeting-record-detect.h drifts from the offsets Swift hardcodes.
 echo "==> struct layout check"
 clang -I"$ROOT/native/include" -o "$BUILD/layout_check" "$ROOT/native/tests/layout_check.c"
 "$BUILD/layout_check"
@@ -33,7 +31,7 @@ swiftc -O \
 
 echo "    $(du -h "$BUILD/libmeetingrecord_macos.a" | cut -f1) $BUILD/libmeetingrecord_macos.a"
 
-# Detection needs no entitlements or bundle, so it builds as a plain binary.
+# Detection needs no entitlements or bundle.
 echo "==> classification tests"
 swiftc -O -o "$BUILD/catalog_test" \
   "$ROOT/native/tests/catalog_test.swift" \

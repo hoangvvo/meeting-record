@@ -1,7 +1,6 @@
 //! Record every meeting to a raw float32 file.
 //!
-//! The audio callback runs on a realtime thread, so it only forwards into a
-//! channel; the writing happens on a normal thread.
+//! The audio callback forwards into a channel; writing happens on another thread.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -28,13 +27,13 @@ fn main() -> Result<(), meeting_record::Error> {
         if event == meeting_record::MeetingEvent::Started && meeting.should_record {
             println!("recording {} ({})", meeting.platform.as_str(), meeting.app_name);
             let tx = tx.clone();
-            // Realtime thread: copy and send, nothing else.
+            // Realtime thread.
             match meeting_record::record(meeting, move |buffer| {
                 let _ = tx.send(buffer.frames.to_vec());
             }) {
                 Ok(capture) => {
                     println!("  {}Hz {}ch", capture.sample_rate, capture.channels);
-                    // Leaked deliberately: dropping the guard would stop capture.
+                    // Dropping the guard would stop capture.
                     std::mem::forget(capture);
                 }
                 Err(e) => eprintln!("  failed: {e}"),

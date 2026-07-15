@@ -8,27 +8,20 @@ import Foundation
 /// microphone and from screen recording, surfaced in System Settings under
 /// "Screen & System Audio Recording".
 ///
-/// Apple ships no preflight/request API for it, which leaves two awkward facts:
+/// There is no preflight or request API, so status is probed by building a
+/// throwaway tap and aggregate and checking whether IO starts.
 ///
-///  * **Status can only be probed.** We build a throwaway tap + aggregate and
-///    see whether IO actually starts.
-///
-///  * **The prompt needs a GUI process.** In a process with no `NSApplication`
-///    running, TCC has nowhere to draw the dialog and the CoreAudio call blocks
-///    indefinitely instead of failing. Calling from the main thread deadlocks for
-///    the same reason: the prompt needs the main run loop to be serviced.
+/// The prompt requires a running `NSApplication`. Without one TCC has nowhere to
+/// draw it and the CoreAudio call blocks instead of failing; calling from the main
+/// thread deadlocks, since the prompt needs that run loop.
 enum Permissions {
-    /// A grant cannot be revoked without restarting the app, so once we have seen
-    /// GRANTED we never probe again. Probing is not free: it builds and tears down
-    /// a real tap, and doing that next to a live capture can disturb it.
+    /// A grant cannot be revoked without an app restart, so GRANTED is cached.
+    /// Probing builds and tears down a real tap, which can disturb a live capture.
     private static let cacheLock = NSLock()
     private static var cachedGranted = false
 
-    /// Probe the grant without ever blocking the caller.
-    ///
-    /// Returns GRANTED / DENIED when the answer is knowable within `timeout`, and
-    /// UNKNOWN when the probe blocks — which is itself the signal that TCC has not
-    /// been asked yet and a GUI prompt is required.
+    /// Returns GRANTED or DENIED when knowable within `timeout`, UNKNOWN when the
+    /// probe blocks — meaning TCC has not been asked and a GUI prompt is required.
     static func audioCaptureStatus(timeout: TimeInterval = 4.0) -> Int32 {
         cacheLock.lock()
         let granted = cachedGranted
@@ -44,8 +37,8 @@ enum Permissions {
         return status
     }
 
-    /// The probe itself. Blocks indefinitely when the grant is undetermined and
-    /// the process cannot present a prompt, so only reach it via `withTimeout`.
+    /// Blocks indefinitely when the grant is undetermined and no prompt can be
+    /// presented. Reach it only via `withTimeout`.
     private static func probeBlocking() -> Int32 {
         guard #available(macOS 14.2, *) else { return 0 /* UNKNOWN */ }
 
@@ -83,8 +76,8 @@ enum Permissions {
               aggregate != kAudioObjectUnknown else { return 0 }
         defer { AudioHardwareDestroyAggregateDevice(aggregate) }
 
-        // A denied tap still yields a device with an input stream, so the stream
-        // count proves nothing. Whether IO *starts* is the real signal.
+        // A denied tap still yields an input stream, so only whether IO starts
+        // distinguishes the two.
         var proc: AudioDeviceIOProcID?
         guard AudioDeviceCreateIOProcID(aggregate, probeIOProc, nil, &proc) == noErr,
               let proc else { return 2 }
@@ -95,19 +88,15 @@ enum Permissions {
         return 1 // GRANTED
     }
 
-    /// Trigger the one-time prompt.
+    /// Trigger the one-time prompt by probing off the main thread.
     ///
-    /// The prompt is raised by the same CoreAudio path we use to capture, so this
-    /// just performs a probe off the main thread. Requires
-    /// `NSAudioCaptureUsageDescription` in the host bundle's Info.plist; without
-    /// it the system refuses to prompt at all.
-    ///
-    /// Returns immediately — poll `audioCaptureStatus()` for the user's answer.
+    /// Requires `NSAudioCaptureUsageDescription` in the host bundle's Info.plist;
+    /// without it the system does not prompt. Returns immediately — poll
+    /// `audioCaptureStatus()` for the answer.
     static func requestAudioCapture() -> Int32 {
         guard #available(macOS 14.2, *) else { return -1 /* UNSUPPORTED_OS */ }
-        // Deliberately the blocking probe on a detached thread: raising the
-        // prompt is the whole point, and it must not run on the main thread or
-        // the run loop that has to draw the dialog is the one we are blocking.
+        // The blocking probe raises the prompt, and must not run on the main
+        // thread, which has to draw it.
         Thread.detachNewThread {
             _ = probeBlocking()
         }
@@ -115,5 +104,5 @@ enum Permissions {
     }
 }
 
-/// No-op: the probe cares only whether IO starts, not about the samples.
+/// Only whether IO starts matters, not the samples.
 private let probeIOProc: AudioDeviceIOProc = { _, _, _, _, _, _, _ in noErr }

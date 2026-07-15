@@ -1,9 +1,8 @@
 /*
- * Exercises the meeting-detection module: one scan, then live watching.
+ * Meeting detection: one scan, then live watching.
  *
- * Detection needs no permission for its decisive signals, so unlike the audio
- * self-test this runs fine as a plain binary. Titles and URLs will be empty
- * without Accessibility, which is the point being demonstrated.
+ * Needs no permission, so this runs as a plain binary. Titles and URLs are empty
+ * without Accessibility.
  */
 #include "meeting-record.h"
 #include "meeting-record-detect.h"

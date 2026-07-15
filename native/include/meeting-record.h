@@ -5,9 +5,8 @@
  *   macOS   : CoreAudio process taps (CATapDescription + private aggregate device)
  *   Windows : WASAPI process loopback (ActivateAudioInterfaceAsync)
  *
- * Both backends deliver de-interleaved-agnostic *interleaved float32* PCM on a
- * realtime audio thread. The callback MUST NOT allocate, lock, or call into a
- * managed runtime — push into a ring buffer and drain elsewhere.
+ * Both backends deliver interleaved float32 PCM on a realtime audio thread. The
+ * callback must not allocate, lock, or call into a managed runtime.
  */
 #ifndef MEETING_RECORD_H
 #define MEETING_RECORD_H
@@ -43,11 +42,10 @@ typedef enum {
 } mrec_permission;
 
 /*
- * macOS: reports whether this app holds kTCCServiceAudioCapture.
+ * macOS: whether this app holds kTCCServiceAudioCapture.
  *
- * There is no public preflight API, so this probes by creating a throwaway tap
- * and aggregate device and checking whether IO actually starts. Cheap (~10ms)
- * but not free; cache the result.
+ * No preflight API exists, so this probes with a throwaway tap and aggregate
+ * device. Around 10ms when granted; the result is cached internally.
  */
 mrec_permission mrec_audio_permission_status(void);
 
@@ -77,18 +75,14 @@ typedef struct {
   char name[256];
 } mrec_process;
 
-/*
- * Fill `out` with up to `capacity` entries; writes the count to `out_count`.
- * On macOS this walks kAudioHardwarePropertyProcessObjectList, which is the
- * only reliable way to know which apps are actually producing sound.
- */
+/* Fills up to `capacity` entries and writes the count to `out_count`. */
 mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
                                           size_t *out_count);
 
 /* ---- capture --------------------------------------------------------- */
 /*
- * Called on a realtime audio thread. `frames` is interleaved float32 with
- * `channels` channels and `frame_count` frames per channel.
+ * Called on a realtime audio thread. `frames` is interleaved float32, valid only
+ * for the duration of the call.
  */
 typedef void (*mrec_audio_callback)(const float *frames, uint32_t frame_count,
                                      uint32_t channels, double sample_rate,
@@ -96,30 +90,26 @@ typedef void (*mrec_audio_callback)(const float *frames, uint32_t frame_count,
 
 typedef struct {
   /*
-   * Processes to capture. Prefer this over global capture: a process tap reads
-   * each app's stream *before* the hardware mix, so it keeps working when the
-   * user mutes their speakers. A global tap does not.
+   * Processes to capture. A process tap reads before the hardware mix, so it keeps
+   * working while the user's output is muted.
    */
   const uint32_t *pids;
   size_t pid_count;
 
   /*
-   * Capture the whole system mix instead of specific processes. Simpler, but
-   * yields silence while output is muted. Ignored when pid_count > 0.
+   * Capture the whole system mix instead. Yields silence while output is muted.
+   * Ignored when pid_count > 0.
    */
   int32_t global_mixdown;
 
-  /* 1 = mono mixdown, 0 = stereo. Mono halves bandwidth for speech. */
+  /* 1 = mono mixdown, 0 = stereo. */
   int32_t mono;
 
-  /*
-   * 1 = also mute the captured processes' output to the speakers. Normally 0:
-   * you are listening in, not intercepting.
-   */
+  /* 1 = also mute the captured processes' output to the speakers. */
   int32_t mute_captured_output;
 } mrec_config;
 
-/* Internal: the exported symbol. Call mrec_start() instead. */
+/* Exported symbol behind mrec_start(); call that instead. */
 int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
                          int32_t global_mixdown, int32_t mono,
                          int32_t mute_captured_output, mrec_audio_callback cb,
@@ -130,7 +120,7 @@ static inline void mrec_config_defaults(mrec_config *cfg) {
   cfg->pids = NULL;
   cfg->pid_count = 0;
   cfg->global_mixdown = 0;
-  cfg->mono = 1; /* speech: half the data, no loss that matters */
+  cfg->mono = 1;
   cfg->mute_captured_output = 0;
 }
 

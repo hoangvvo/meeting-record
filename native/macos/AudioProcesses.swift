@@ -1,12 +1,8 @@
 import CoreAudio
 import Foundation
 
-/// Thin wrappers over the CoreAudio HAL property API, plus enumeration of the
-/// system's audio process objects.
-///
-/// `kAudioHardwarePropertyProcessObjectList` is the only dependable way to learn
-/// which applications are actually producing sound — window titles and
-/// `NSRunningApplication` tell you nothing about audio IO.
+/// Wrappers over the CoreAudio HAL property API, plus enumeration of the system's
+/// audio process objects.
 enum HAL {
     static let system = AudioObjectID(kAudioObjectSystemObject)
 
@@ -55,9 +51,7 @@ enum HAL {
 
     /// Read a variable-length property into an array of trivial values.
     ///
-    /// Goes through raw memory rather than pre-filling a Swift array: there is no
-    /// generic way to synthesise a zero `T`, and bit-casting a fixed-width zero
-    /// into `T` traps whenever the widths differ.
+    /// Uses raw memory because there is no generic way to synthesise a zero `T`.
     static func array<T>(_ object: AudioObjectID,
                          _ selector: AudioObjectPropertySelector,
                          scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
@@ -80,7 +74,7 @@ enum HAL {
                                          count: min(received, count)))
     }
 
-    /// Default output device, and its UID (needed as the aggregate's clock anchor).
+    /// Default output device and its UID.
     static func defaultOutputDevice() -> (id: AudioObjectID, uid: String)? {
         let id = value(system, kAudioHardwarePropertyDefaultOutputDevice,
                        default: AudioObjectID(kAudioObjectUnknown))
@@ -90,10 +84,8 @@ enum HAL {
         return (id, uid)
     }
 
-    /// Translate a Unix pid into the HAL's process *object* id.
-    ///
-    /// Passing a raw pid where an AudioObjectID is expected fails with
-    /// `kAudioHardwareBadObjectError` ('!obj') — the two namespaces are unrelated.
+    /// Translate a Unix pid into the HAL's process object id. The namespaces are
+    /// unrelated; passing a raw pid fails with `kAudioHardwareBadObjectError`.
     static func processObject(forPID pid: pid_t) -> AudioObjectID? {
         var addr = address(kAudioHardwarePropertyTranslatePIDToProcessObject)
         var inPID = pid
@@ -120,10 +112,9 @@ struct AudioProcess {
 enum AudioProcessRegistry {
     /// Every live process the HAL knows is doing audio IO.
     ///
-    /// Dead processes are excluded here rather than left to the caller. The HAL
-    /// keeps process objects after the process exits and still reports
-    /// `isRunningOutput == true` for them, so a caller that trusts this list would
-    /// build a tap over corpses and capture silence — with no error anywhere.
+    /// The HAL keeps process objects after a process exits, still reporting
+    /// `isRunningOutput == true`. A tap over those captures silence without error,
+    /// so they are excluded here.
     static func all() -> [AudioProcess] {
         HAL.array(HAL.system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self)
             .compactMap { obj in
@@ -143,22 +134,18 @@ enum AudioProcessRegistry {
             }
     }
 
-    /// Processes currently rendering audio — the natural capture target.
-    /// `all()` has already excluded dead processes.
+    /// Processes currently rendering audio.
     static func activeOutput() -> [AudioProcess] {
         all().filter { $0.isRunningOutput && $0.pid != getpid() }
     }
 
-    /// Signal 0 performs permission and existence checks without delivering.
-    /// EPERM means the process exists but belongs to someone else — still alive.
-    ///
-    /// Load-bearing: see the note on `all()`.
+    /// Signal 0 checks existence without delivering. EPERM means the process
+    /// exists but is owned by another user.
     static func isAlive(_ pid: pid_t) -> Bool {
         kill(pid, 0) == 0 || errno == EPERM
     }
 
-    /// The HAL exposes no process name and helper processes have no bundle id, so
-    /// read the executable name from the kernel.
+    /// The HAL exposes no process name and helpers have no bundle id.
     private static func executableName(pid: pid_t, bundleID: String) -> String {
         var buf = [CChar](repeating: 0, count: 4096)
         if proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 {

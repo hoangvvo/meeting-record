@@ -4,20 +4,16 @@ import Foundation
 
 /// Watches for meetings starting, changing and ending.
 ///
-/// Event-driven rather than a poll loop. Three triggers, cheapest first:
-///
-///  * `NSWorkspace` launch/terminate notifications — an app appearing or going
-///    away can only change the answer.
-///  * A CoreAudio listener on `kAudioHardwarePropertyProcessObjectList` — fires
-///    when any process starts or stops doing audio IO, which is exactly the
-///    transition that turns "Zoom is open" into "Zoom is in a call".
-///  * A slow backstop timer, because neither of the above fires when a call's
-///    state changes without the process set changing (someone unmutes, the tab
-///    navigates to a different meeting).
+/// Three triggers:
+///  * `NSWorkspace` launch/terminate notifications.
+///  * A CoreAudio listener on `kAudioHardwarePropertyProcessObjectList`, which
+///    fires when a process starts or stops audio IO.
+///  * A slow timer, for state changes that leave the process set unchanged, such
+///    as unmuting or navigating to a different meeting.
 final class MeetingWatcher {
-    /// Slow enough not to matter, fast enough that a mute toggle shows up.
+    /// Backstop interval for changes the other triggers miss.
     private static let backstopInterval: TimeInterval = 5.0
-    /// Audio process lists churn in bursts; let them settle before re-scanning.
+    /// Audio process lists churn in bursts, so let them settle before re-scanning.
     private static let debounceInterval: TimeInterval = 0.4
 
     private let queue = DispatchQueue(label: "meetingrecord.watcher")
@@ -46,7 +42,7 @@ final class MeetingWatcher {
             })
         }
 
-        // Process-list changes are the signal that a call went live.
+        // Process-list changes indicate a call going live.
         var address = HAL.address(kAudioHardwarePropertyProcessObjectList)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.scheduleRescan()
@@ -61,7 +57,7 @@ final class MeetingWatcher {
         timer.resume()
         self.timer = timer
 
-        // Emit current state immediately so callers do not wait for a transition.
+        // Emit current state so callers need not wait for a transition.
         queue.async { [weak self] in self?.rescan() }
     }
 
@@ -80,8 +76,7 @@ final class MeetingWatcher {
             AudioObjectRemovePropertyListenerBlock(HAL.system, &address, queue, block)
             listenerBlock = nil
         }
-        // Deliberately not synthesising ENDED events here: the caller asked to stop
-        // watching, so it is not waiting for teardown notifications.
+        // No ENDED events on explicit stop.
         queue.sync { active.removeAll() }
     }
 
@@ -112,7 +107,7 @@ final class MeetingWatcher {
         active = next
     }
 
-    /// Only the fields a consumer would act on — not confidence jitter.
+    /// Compares only fields a consumer would act on, excluding confidence.
     private func changed(_ a: DetectedMeeting, _ b: DetectedMeeting) -> Bool {
         a.platform != b.platform
             || a.title != b.title

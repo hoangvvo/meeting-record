@@ -17,13 +17,11 @@ struct DetectedMeeting {
 
 /// Decides whether the user is in a meeting, and which processes to record.
 ///
-/// The ordering here is deliberate: identity and audio activity come from
-/// property reads that need no permission and cannot be wrong about *liveness*.
-/// Accessibility only ever adds a title or URL on top. A meeting is reported at
-/// full confidence with the Accessibility permission absent entirely.
+/// Identity and audio activity come from property reads that need no permission.
+/// Accessibility only adds a title or URL, so full confidence is reachable without
+/// it.
 enum MeetingDetector {
-    /// Confidence weights. A known app merely being open is not a meeting; what
-    /// makes it one is two-way audio.
+    /// Confidence weights. A known app being open is not a meeting on its own.
     private enum Score {
         static let knownApp: Int32 = 40
         static let playingAudio: Int32 = 30
@@ -38,9 +36,8 @@ enum MeetingDetector {
             $0.pid != getpid() && AudioProcessRegistry.isAlive($0.pid)
         }
 
-        // Group audio processes by the application they belong to. Helper
-        // processes carry the parent's bundle id prefix, which is exactly what
-        // makes prefix matching the right tool.
+        // Group by application. Helper processes carry the parent's bundle id
+        // prefix.
         var byPlatform: [MeetingPlatform: [AudioProcess]] = [:]
         var browserProcesses: [(BrowserApp, AudioProcess)] = []
 
@@ -74,11 +71,10 @@ enum MeetingDetector {
         if !playing.isEmpty { confidence += Score.playingAudio }
         if !listening.isEmpty { confidence += Score.usingMic }
 
-        // The app being merely open is not worth reporting.
+        // An open app with no audio is not reported.
         guard !playing.isEmpty || !listening.isEmpty else { return nil }
 
-        // Prefer the process the user thinks of as "the app" for `pid`, but record
-        // whichever processes actually carry the audio.
+        // `pid` is the user-visible app; `audioPIDs` is what carries the audio.
         let owner = ownerPID(for: processes) ?? processes[0].pid
         let audioPIDs = Array(Set(playing.map(\.pid) + listening.map(\.pid))).sorted()
 
@@ -99,10 +95,9 @@ enum MeetingDetector {
 
     // MARK: - Browser tabs
 
-    /// Browser audio is ambiguous — a YouTube tab looks identical to a Meet tab at
-    /// the process level. So a browser only counts as a meeting when either the
-    /// URL/title names a known service, or the microphone is live (a page does not
-    /// get the mic without the user allowing it).
+    /// A video tab and a call tab are indistinguishable at the process level, so a
+    /// browser counts as a meeting only when the URL or title names a known service,
+    /// or the microphone is live.
     private static func buildBrowser(
         _ entries: [(BrowserApp, AudioProcess)]) -> [DetectedMeeting] {
         var grouped: [String: (browser: BrowserApp, processes: [AudioProcess])] = [:]
@@ -123,7 +118,7 @@ enum MeetingDetector {
             let matched = MeetingCatalog.platform(forURLOrTitle: url)
                 ?? MeetingCatalog.platform(forURLOrTitle: title)
 
-            // Without a URL match, the microphone is the only trustworthy signal.
+            // Without a URL match, the microphone is the only usable signal.
             guard matched != nil || !listening.isEmpty else { continue }
 
             var confidence = Score.knownApp
@@ -150,18 +145,15 @@ enum MeetingDetector {
 
     // MARK: - Helpers
 
-    /// The user-visible process for a group of audio processes.
-    ///
-    /// Audio usually comes from a helper, so map back to whichever of these pids
-    /// owns a real application. `NSWorkspace` only lists actual applications, which
-    /// is precisely the filter we want.
+    /// The user-visible process for a group of audio processes. `NSWorkspace` lists
+    /// only real applications, which filters out helpers.
     private static func ownerPID(for processes: [AudioProcess]) -> pid_t? {
         let apps = NSWorkspace.shared.runningApplications
         let appPIDs = Set(apps.map(\.processIdentifier))
         if let direct = processes.first(where: { appPIDs.contains($0.pid) }) {
             return direct.pid
         }
-        // Fall back to matching the helper's bundle id prefix against a real app.
+        // Otherwise match the helper's bundle id prefix against a real app.
         guard let bundleID = processes.first?.bundleID.lowercased(),
               !bundleID.isEmpty else { return nil }
         return apps.first { app in
@@ -170,8 +162,7 @@ enum MeetingDetector {
         }?.processIdentifier
     }
 
-    /// Executable name as reported by the kernel. Factual OS data rather than a
-    /// label chosen here — consumers decide how to present it.
+    /// Executable name as reported by the kernel.
     private static func processName(of pid: pid_t,
                                     in processes: [AudioProcess]) -> String {
         processes.first { $0.pid == pid }?.name ?? processes.first?.name ?? ""

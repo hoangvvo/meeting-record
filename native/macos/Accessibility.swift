@@ -2,31 +2,28 @@ import ApplicationServices
 import AppKit
 import Foundation
 
-/// Accessibility (AX) helpers for reading window titles and browser URLs.
+/// Accessibility helpers for reading window titles and browser URLs.
 ///
-/// Everything here is best-effort enrichment. Detection must stay correct when
-/// this whole file returns nil, because the user may never grant Accessibility.
+/// Best-effort enrichment: detection stays correct when every function here
+/// returns nil.
 ///
-/// Three hazards:
-///
-///  * **AX calls are synchronous IPC into the target app.** A busy or hung app
-///    blocks *us*. Every element gets an explicit messaging timeout.
-///  * **Chromium and Electron do not expose a tree until asked.** Setting
-///    `AXEnhancedUserInterface` on the application element makes them build one.
-///  * **Trees are deep and wide.** A full walk of a Chrome window is thousands of
-///    elements, so traversal is bounded by depth and node count.
+/// Three constraints:
+///  * AX calls are synchronous IPC into the target app, so a hung app blocks the
+///    caller. Every element gets a messaging timeout.
+///  * Chromium and Electron build no tree until `AXEnhancedUserInterface` is set.
+///  * Trees run to thousands of elements, so traversal is bounded by depth and
+///    node count.
 enum Accessibility {
     /// Seconds before an AX request to another process gives up.
     private static let messagingTimeout: Float = 0.25
 
-    /// Cheap, honest preflight — unlike audio capture, this one exists.
+    /// Preflight check.
     static func isTrusted() -> Bool {
         AXIsProcessTrusted()
     }
 
-    /// Open the Accessibility pane. There is no prompt that can grant this
-    /// without a visit to System Settings, and the app must be relaunched
-    /// afterwards before `AXIsProcessTrusted()` flips.
+    /// Opens the Accessibility pane. There is no in-app prompt, and the app must be
+    /// relaunched before `AXIsProcessTrusted()` changes.
     static func openSettings() {
         let url = URL(string:
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
@@ -61,8 +58,7 @@ enum Accessibility {
         copyAttribute(element, attribute) as? [AXUIElement] ?? []
     }
 
-    /// Chromium/Electron build an accessibility tree only once something asks for
-    /// one. Without this, `AXWebArea` simply does not exist in their trees.
+    /// Without this, `AXWebArea` does not exist in Chromium or Electron trees.
     private static func enableEnhancedInterface(_ app: AXUIElement) {
         AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString,
                                      kCFBooleanTrue)
@@ -76,8 +72,7 @@ enum Accessibility {
         let app = application(pid)
 
         if let focused = copyAttribute(app, kAXFocusedWindowAttribute as String) {
-            // CFTypeRef -> AXUIElement is safe here: the attribute is documented
-            // to return an element, and a mismatch just yields no title.
+            // The attribute returns an element; a mismatch yields no title.
             let window = unsafeBitCast(focused, to: AXUIElement.self)
             AXUIElementSetMessagingTimeout(window, messagingTimeout)
             if let title = stringAttribute(window, kAXTitleAttribute as String) {
@@ -96,15 +91,11 @@ enum Accessibility {
 
     // MARK: - Browser URLs
 
-    /// Best-effort URL of the browser's active tab.
+    /// URL of the browser's active tab.
     ///
-    /// Two strategies, because no single one covers every browser:
-    ///
-    ///  * Safari and Chrome expose `AXURL` on the window or a descendant, which is
-    ///    exact.
-    ///  * Chromium variants otherwise expose the URL as the value of a text field
-    ///    in the toolbar (the omnibox), which is what the user typed rather than
-    ///    the canonical URL — good enough to match a meeting host.
+    /// Safari and Chrome expose `AXURL` on the window or a descendant. Other
+    /// Chromium variants only expose the omnibox text field's value, which is what
+    /// the user typed rather than the canonical URL.
     static func browserURL(pid: pid_t) -> String? {
         guard isTrusted() else { return nil }
         let app = application(pid)
@@ -124,7 +115,7 @@ enum Accessibility {
         return nil
     }
 
-    /// `AXURL` comes back as an NSURL, not a string.
+    /// `AXURL` returns an NSURL, not a string.
     private static func urlAttribute(_ element: AXUIElement) -> String? {
         guard let raw = copyAttribute(element, "AXURL") else { return nil }
         if let url = raw as? URL { return url.absoluteString }
@@ -132,8 +123,7 @@ enum Accessibility {
         return nil
     }
 
-    /// Bounded search for a URL: an `AXURL` anywhere, or a web area's title, or
-    /// the omnibox text field's value.
+    /// Bounded search for an `AXURL`, a web area's title, or the omnibox value.
     private static func findURL(in element: AXUIElement,
                                 depth: Int,
                                 maxDepth: Int,
@@ -145,15 +135,14 @@ enum Accessibility {
 
         let role = stringAttribute(element, kAXRoleAttribute as String) ?? ""
 
-        // The omnibox: a text field whose value looks like a URL or host.
+        // The omnibox is a text field whose value looks like a URL or host.
         if role == kAXTextFieldRole as String,
            let value = stringAttribute(element, kAXValueAttribute as String),
            value.contains(".") || value.hasPrefix("http") {
             return value
         }
 
-        // Descending into a web area's DOM is enormous and never yields a URL that
-        // the window itself would not already expose.
+        // A web area's DOM is large and exposes no URL the window does not.
         if role == "AXWebArea" {
             return stringAttribute(element, kAXTitleAttribute as String)
         }

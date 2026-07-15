@@ -1,22 +1,18 @@
 /*
  * Windows backend: WASAPI application (process) loopback.
  *
- * Unlike the classic render-endpoint loopback (IAudioClient::Initialize with
- * AUDCLNT_STREAMFLAGS_LOOPBACK on the default output device), process loopback
- * captures a *specific process tree* and works regardless of the output device,
- * the user's volume, or mute state. That matters for the same reason it does on
- * macOS: a muted user must still be recorded.
+ * Unlike render-endpoint loopback, process loopback captures a specific process
+ * tree and is unaffected by the output device, volume, or mute state.
  *
- * Requires Windows 10 build 20348 / Windows 11. No permission prompt exists for
- * this on Windows — availability of the API is the only gate.
+ * Requires Windows 10 build 20348 / Windows 11. No permission prompt exists; API
+ * availability is the only gate.
  *
- * Key constraints of the process-loopback path:
- *   - the activation is asynchronous; you must pump the completion handler
- *   - the client must be initialised in shared mode, and the format must be
- *     supplied explicitly (GetMixFormat is unavailable on a loopback-activated
- *     client)
- *   - INCLUDE_PROCESS_TREE captures child processes too, which is what you want
- *     for Chrome/Electron/Teams where audio lives in a helper process
+ * Constraints:
+ *   - activation is asynchronous via a completion handler
+ *   - the client must be initialised in shared mode with an explicit format;
+ *     GetMixFormat is unavailable on a loopback-activated client
+ *   - INCLUDE_PROCESS_TREE also captures child processes, which is required for
+ *     Chrome, Electron and Teams
  */
 #include "meeting-record.h"
 
@@ -58,10 +54,7 @@ std::string HResultMessage(const char *what, HRESULT hr) {
   return buf;
 }
 
-/*
- * ActivateAudioInterfaceAsync hands the result to a completion handler rather
- * than returning it, so we wrap an event the caller can wait on.
- */
+/* ActivateAudioInterfaceAsync reports through a handler, so wrap a waitable event. */
 class ActivationHandler
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
@@ -131,11 +124,7 @@ public:
     user_data_ = user_data;
     channels_ = mono ? 1 : 2;
 
-    /*
-     * Process loopback activates one client per target process. A global capture
-     * instead excludes nothing from the current process tree, which the API
-     * expresses as "include the whole system": pid 0 with EXCLUDE semantics.
-     */
+    /* One client per target process; pid 0 with EXCLUDE semantics is system-wide. */
     if (global_mixdown) {
       auto stream = Activate(0, /*exclude=*/true);
       if (!stream) return MREC_ERR_TAP_FAILED;
@@ -193,10 +182,7 @@ private:
     AUDIOCLIENT_ACTIVATION_PARAMS params{};
     params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
     params.ProcessLoopbackParams.TargetProcessId = pid;
-    /*
-     * INCLUDE_PROCESS_TREE is essential for real targets: Chrome, Electron and
-     * Teams render audio from helper processes, not the pid you can see.
-     */
+    /* Chrome, Electron and Teams render audio from helpers, not the visible pid. */
     params.ProcessLoopbackParams.ProcessLoopbackMode =
         exclude ? PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
                 : PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
@@ -230,9 +216,8 @@ private:
     }
 
     /*
-     * A loopback-activated client cannot report a mix format, so state it
-     * explicitly. Float32 at 48 kHz matches the macOS backend so downstream
-     * consumers see one format on both platforms.
+     * A loopback-activated client cannot report a mix format. Float32 at 48 kHz
+     * matches the macOS backend.
      */
     WAVEFORMATEX format{};
     format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
@@ -243,10 +228,9 @@ private:
     format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
 
     /*
-     * Polling mode: no AUDCLNT_STREAMFLAGS_EVENTCALLBACK. Setting that flag
-     * without a subsequent SetEventHandle() makes Start() fail with
-     * AUDCLNT_E_EVENTHANDLE_NOT_SET, and the drain loop below polls
-     * GetNextPacketSize anyway.
+     * Polling mode, so no AUDCLNT_STREAMFLAGS_EVENTCALLBACK: that flag without a
+     * following SetEventHandle() makes Start() fail with
+     * AUDCLNT_E_EVENTHANDLE_NOT_SET.
      *
      * Buffer duration is in 100-nanosecond units.
      */
@@ -289,10 +273,7 @@ private:
         continue;
       }
       if (frames > 0 && callback_ != nullptr) {
-        /*
-         * AUDCLNT_BUFFERFLAGS_SILENT means the buffer contents are undefined and
-         * must be treated as silence rather than forwarded.
-         */
+        /* SILENT means the buffer contents are undefined; emit zeros instead. */
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
           silence_.assign(static_cast<size_t>(frames) * stream.channels, 0.0f);
           callback_(silence_.data(), frames, stream.channels, kSampleRate,
@@ -339,9 +320,8 @@ extern "C" {
 
 mrec_permission mrec_audio_permission_status(void) {
   /*
-   * Windows has no TCC analogue for loopback capture; there is nothing to grant.
-   * The only real gate is OS version (build 20348+), which surfaces as an
-   * activation failure from mrec_start rather than as a permission state.
+   * No TCC analogue exists. The OS version gate surfaces as an activation failure
+   * from mrec_start rather than as a permission state.
    */
   return MREC_PERM_NOT_REQUIRED;
 }
@@ -353,10 +333,8 @@ mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
   if (!out || !out_count) return MREC_ERR_INTERNAL;
 
   /*
-   * Windows exposes no "is this process rendering audio" query comparable to
-   * kAudioHardwarePropertyProcessObjectList, so enumerate processes and let the
-   * caller decide. is_running_output stays 0 to signal "unknown" rather than
-   * claiming knowledge we do not have.
+   * No per-process audio-activity query exists here, so enumerate processes and
+   * leave is_running_output at 0 to mean unknown.
    */
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE) return MREC_ERR_INTERNAL;
@@ -389,10 +367,7 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
                          int32_t global_mixdown, int32_t mono,
                          int32_t mute_captured_output,
                          mrec_audio_callback cb, void *user_data) {
-  /*
-   * Process loopback is inherently non-destructive: it cannot mute the process
-   * it captures the way a CoreAudio tap can.
-   */
+  /* Process loopback cannot mute the process it captures. */
   (void)mute_captured_output;
   return Session::Instance().Start(pids, pid_count, global_mixdown, mono, cb,
                                    user_data);

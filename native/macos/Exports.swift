@@ -1,10 +1,10 @@
 import CoreAudio
 import Foundation
 
-/// C ABI surface declared in native/include/meeting-record.h.
+/// C ABI declared in native/include/meeting-record.h.
 ///
-/// Everything is funnelled through one process-wide capture session, mirroring
-/// the underlying reality: a single tap + aggregate device pair per process.
+/// One process-wide capture session, matching the one tap and aggregate device
+/// pair a process can hold.
 
 private final class Session {
     static let shared = Session()
@@ -83,9 +83,8 @@ private func writeCString(_ value: String, to pointer: UnsafeMutableRawPointer, 
 
 // MARK: - Capture
 
-/// Flat entry point. `@_cdecl` cannot accept a pointer to a Swift struct, so the
-/// ergonomic `mrec_config` form lives in meeting-record.h as a static inline wrapper
-/// around this function.
+/// `@_cdecl` cannot accept a pointer to a Swift struct, so `mrec_config` lives in
+/// meeting-record.h as a static inline wrapper around this.
 @_cdecl("mrec_start_raw")
 public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
                              _ pidCount: Int,
@@ -114,9 +113,8 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     }
     let global = globalMixdown != 0
 
-    // With neither explicit pids nor an explicit global request, default to every
-    // process currently rendering audio — that keeps capture working while the
-    // user's output is muted, which a global tap would not.
+    // With no explicit pids and no global request, capture every process currently
+    // rendering audio, which keeps working while output is muted.
     if pids.isEmpty && !global {
         pids = AudioProcessRegistry.activeOutput().map(\.pid)
         if pids.isEmpty {
@@ -129,14 +127,12 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     session.stateBox.configure(callback: callback, userData: userData)
     let capture = TapCapture(stateBox: session.stateBox)
 
-    // Attempt the real start under a timeout rather than probing permission
-    // first. Probing means building and tearing down a second tap moments before
-    // this one, which is both slow and unreliable — the teardown races the new
-    // tap's auto-start and can yield a running-but-silent stream. One attempt,
-    // time-bounded, is cheaper and more accurate.
+    // Start under a timeout rather than probing permission first: a probe builds
+    // and tears down a second tap moments before this one, and that teardown races
+    // the new tap's auto-start, producing a running but silent stream.
     //
-    // A timeout here almost always means the TCC grant is still undetermined:
-    // that is exactly the case where CoreAudio blocks instead of failing.
+    // A timeout here means the TCC grant is undetermined, which is when CoreAudio
+    // blocks instead of failing.
     let outcome: Int32? = withTimeout(seconds: 6) {
         do {
             try capture.start(pids: pids,

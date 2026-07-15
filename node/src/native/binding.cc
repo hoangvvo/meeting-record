@@ -1,16 +1,14 @@
 /*
  * N-API binding for meeting-record.
  *
- * The only genuinely hard part is the audio path. mrec_start() delivers PCM on a
- * realtime audio thread, where calling into V8 — or allocating, or taking a lock —
- * is not allowed. So:
+ * mrec_start() delivers PCM on a realtime audio thread, where calling into V8,
+ * allocating, or locking is not allowed:
  *
  *   audio thread : memcpy into a lock-free SPSC ring buffer, then wake JS
  *   JS thread    : drain the ring into a Buffer and push it downstream
  *
- * If the consumer cannot keep up, the ring overwrites its oldest samples and
- * counts the loss. Silently dropping audio in a recorder is worse than saying so,
- * hence the drop count surfacing to JS.
+ * When the consumer falls behind, the ring overwrites its oldest samples and
+ * reports the count to JS.
  */
 #include <napi.h>
 
@@ -28,10 +26,7 @@ namespace {
 
 /* ---- ring buffer ------------------------------------------------------- */
 
-/*
- * Single producer (audio thread), single consumer (JS thread). Power-of-two
- * capacity so the modulo is a mask.
- */
+/* Single producer (audio thread), single consumer (JS thread). */
 class RingBuffer {
 public:
   explicit RingBuffer(size_t capacity) : buffer_(capacity), mask_(capacity - 1) {}
@@ -43,7 +38,7 @@ public:
     const size_t free_space = buffer_.size() - (head - tail) - 1;
 
     if (count > free_space) {
-      /* Overrun: advance the reader past what we are about to clobber. */
+      /* Overrun: advance the reader past the samples about to be overwritten. */
       const size_t overflow = count - free_space;
       tail_.store(tail + overflow, std::memory_order_release);
       dropped_.fetch_add(overflow, std::memory_order_relaxed);
@@ -82,7 +77,7 @@ private:
 /* ---- capture ----------------------------------------------------------- */
 
 struct CaptureContext {
-  RingBuffer ring{1 << 20}; /* ~1M floats: 10s of mono 48k, ample slack */
+  RingBuffer ring{1 << 20}; /* ~10s of mono 48k */
   Napi::ThreadSafeFunction tsfn;
   std::atomic<double> sample_rate{0};
   std::atomic<uint32_t> channels{0};
@@ -91,10 +86,7 @@ struct CaptureContext {
 
 std::unique_ptr<CaptureContext> g_capture;
 
-/*
- * Realtime audio thread. Copy, record the format, wake the JS side. Nothing here
- * allocates: the ring is preallocated and NonBlockingCall does not block.
- */
+/* Realtime audio thread: the ring is preallocated and NonBlockingCall does not block. */
 void OnAudio(const float *frames, uint32_t frame_count, uint32_t channels,
              double sample_rate, uint64_t host_time_ns, void *user_data) {
   auto *ctx = static_cast<CaptureContext *>(user_data);
@@ -119,10 +111,7 @@ void OnAudio(const float *frames, uint32_t frame_count, uint32_t channels,
   });
 }
 
-/*
- * mrec_start can block for several seconds the first time, while the permission
- * grant is still undetermined, so it must not run on the JS thread.
- */
+/* mrec_start can block for seconds while the permission grant is undetermined. */
 class StartWorker : public Napi::AsyncWorker {
 public:
   StartWorker(Napi::Env env, std::vector<uint32_t> pids, bool system_wide, bool mono,
@@ -202,7 +191,7 @@ Napi::Object MeetingToJS(Napi::Env env, const mrec_meeting *m) {
   for (size_t i = 0; i < m->audio_pid_count; i++) {
     pids.Set(i, Napi::Number::New(env, m->audio_pids[i]));
   }
-  /* Kept out of the public TS type; the JS layer needs it to re-issue a start. */
+  /* Not in the public TS type; used to round-trip back into C. */
   out.Set("_audioPids", pids);
   return out;
 }
@@ -231,7 +220,7 @@ bool MeetingFromJS(const Napi::Object &obj, mrec_meeting *out) {
 Napi::ThreadSafeFunction g_meeting_tsfn;
 std::atomic<bool> g_watching{false};
 
-/* Runs on the library's serial queue — not realtime, so allocation is fine. */
+/* Runs on the library's serial queue, so allocation is allowed. */
 void OnMeeting(const mrec_meeting *meeting, mrec_event event, void *user_data) {
   if (!g_watching.load(std::memory_order_relaxed)) return;
   auto *copy = new mrec_meeting(*meeting);

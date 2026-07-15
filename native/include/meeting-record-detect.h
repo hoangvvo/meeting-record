@@ -14,19 +14,16 @@
  *       mrec_start(&cfg, on_audio, NULL);
  *     }
  *
- * Detection layers four independent signals, weakest dependency last:
+ * Four signals, in order of dependency:
  *
- *   1. process identity   — is a known conferencing app running? (free, exact)
- *   2. audio/mic activity — is it actually doing audio IO? (free, exact,
- *                           language-independent; the single strongest signal
- *                           that a call is *live* rather than merely open)
- *   3. window title / URL — which meeting? (needs Accessibility permission)
- *   4. AX tree scraping   — participants, mute state (needs Accessibility, and
- *                           depends on the app's UI language)
+ *   1. process identity   — is a known conferencing app running?
+ *   2. audio/mic activity — is it doing audio IO? Distinguishes a live call from
+ *                           an app that is merely open.
+ *   3. window title / URL — needs the Accessibility permission.
+ *   4. AX tree scraping   — participants and mute state; also language-dependent.
  *
- * Layers 1-2 need no permission at all and are enough to decide "record now".
- * Layers 3-4 are enrichment only: they depend on a permission the user may refuse
- * and on the target app's UI language. Never gate recording on them.
+ * Layers 1-2 need no permission and are sufficient to decide whether to record.
+ * Recording is never gated on 3-4.
  */
 #ifndef MEETING_RECORD_DETECT_H
 #define MEETING_RECORD_DETECT_H
@@ -80,29 +77,21 @@ typedef struct {
    */
   int32_t confidence;
 
-  /*
-   * 1 when confidence clears the library's threshold. Prefer this over comparing
-   * `confidence` yourself, so the weights can change without breaking callers.
-   */
+  /* 1 when confidence clears the library's threshold. Prefer this to comparing
+   * `confidence`, which lets the weights change without breaking callers. */
   int32_t should_record;
 
   uint64_t detected_at_ns;
 } mrec_meeting;
 
-/*
- * Point-in-time scan. Cheap enough to call every second or two: layers 1-2 are
- * pure property reads. Returns meetings sorted by descending confidence.
- */
+/* Point-in-time scan, sorted by descending confidence. */
 mrec_status mrec_scan(mrec_meeting *out, size_t capacity,
                                   size_t *out_count);
 
 /*
- * Record a detected meeting.
- *
- * Equivalent to filling an mrec_config with the meeting's audio_pids, which is
- * what you want in nearly all cases. The pid list is re-resolved at start time
- * rather than trusting what detection saw, so it stays correct when an app moves
- * audio between helper processes.
+ * Record a detected meeting. Equivalent to filling an mrec_config with its
+ * audio_pids, except the pid list is re-resolved at start time, so it stays
+ * correct when an app moves audio between helper processes.
  */
 mrec_status mrec_start_meeting(const mrec_meeting *meeting, mrec_audio_callback cb,
                                void *user_data);
@@ -116,19 +105,16 @@ typedef enum {
 } mrec_event;
 
 /*
- * Invoked on an internal serial queue, not a realtime thread — you may allocate
- * and call back into a managed runtime here. For ENDED, only `platform` and
- * `pid` are guaranteed meaningful.
+ * Invoked on an internal serial queue, not a realtime thread, so allocation is
+ * allowed. For ENDED, only `platform` and `pid` are meaningful.
  */
 typedef void (*mrec_meeting_callback)(const mrec_meeting *meeting,
                                        mrec_event event,
                                        void *user_data);
 
 /*
- * Watch for meetings starting and ending.
- *
- * Driven by app launch/terminate notifications and CoreAudio process-list
- * changes, with a low-frequency poll as a backstop, so it does not busy-wait.
+ * Watch for meetings starting and ending. Driven by app lifecycle notifications
+ * and CoreAudio process-list changes, with a low-frequency poll as a backstop.
  */
 mrec_status mrec_watch_start(mrec_meeting_callback cb,
                                          void *user_data);
@@ -137,28 +123,23 @@ int32_t mrec_is_watching(void);
 
 /* ---- Accessibility permission (macOS) --------------------------------- */
 /*
- * Only needed for titles, URLs and participants — never for deciding whether to
- * record. Unlike audio capture this one *does* have a real preflight API
- * (AXIsProcessTrusted), so it is cheap and honest.
+ * Needed only for titles, URLs and participants, never for deciding whether to
+ * record. Backed by AXIsProcessTrusted, so this is a real preflight check.
  *
- * On Windows, UI Automation needs no grant: returns NOT_REQUIRED.
+ * On Windows returns NOT_REQUIRED.
  */
 mrec_permission mrec_accessibility_permission_status(void);
 
 /*
- * Opens System Settings at the Accessibility pane. There is no in-app prompt for
- * this permission that grants without a trip to Settings, and the app must be
- * relaunched afterwards before the grant takes effect.
+ * Opens System Settings at the Accessibility pane; no in-app prompt exists. The
+ * app must be relaunched before the grant takes effect.
  */
 mrec_status mrec_request_accessibility_permission(void);
 
 /*
- * Stable machine identifier: "zoom", "teams", "meet", "webex", "slack",
- * "discord", "browser", "unknown". The values never change, so they are safe to
- * compare, persist, and put in filenames.
- *
- * The library ships no human-readable labels: presentation is the caller's
- * concern, including localisation.
+ * Stable identifier: "zoom", "teams", "meet", "webex", "slack", "discord",
+ * "browser", "unknown". The values never change. No human-readable labels are
+ * provided; presentation and localisation are the caller's concern.
  *
  * Returns static storage owned by the library; do not free.
  */

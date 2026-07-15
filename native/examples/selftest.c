@@ -1,10 +1,9 @@
 /*
- * End-to-end check of the native core: enumerate audio processes, capture the
- * ones currently playing, and report how much real (non-silent) PCM arrived.
+ * End-to-end check: enumerate audio processes, capture the ones playing, report
+ * how much non-silent PCM arrived.
  *
- * Must run from inside a signed .app bundle carrying
- * NSAudioCaptureUsageDescription, hosted by a running NSApplication so TCC can
- * present its prompt — selftest_main.m does that. See scripts/build-macos.sh.
+ * Requires a signed .app bundle with NSAudioCaptureUsageDescription and a running
+ * NSApplication (see selftest_main.m).
  */
 #include "meeting-record.h"
 
@@ -65,7 +64,7 @@ int mrec_selftest_run(void) {
 
   mrec_config cfg;
   mrec_config_defaults(&cfg);
-  cfg.mono = 0; /* stereo, so we can see channel handling */
+  cfg.mono = 0;
   /* MREC_PIDS="123,456" pins capture to specific processes. */
   static uint32_t explicit_pids[32];
   size_t explicit_count = 0;
@@ -90,14 +89,14 @@ int mrec_selftest_run(void) {
     fprintf(log, "mode: explicit pids (%zu)\n", explicit_count);
   }
 
-  /* MREC_GLOBAL=1 compares the whole-system mix against per-process capture. */
+  /* MREC_GLOBAL=1 captures the whole-system mix instead. */
   if (getenv("MREC_GLOBAL") || access("/tmp/meeting-record-test-global", F_OK) == 0) {
     cfg.global_mixdown = 1;
     fprintf(log, "mode: GLOBAL mixdown\n");
   } else {
     fprintf(log, "mode: per-process\n");
   }
-  /* Leaving pids NULL makes the backend pick every actively-playing process. */
+  /* NULL pids captures every actively-playing process. */
 
   st = mrec_start(&cfg, on_audio, NULL);
   fprintf(log, "mrec_start -> %d (%s)\n", st, mrec_last_error());

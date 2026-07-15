@@ -1,24 +1,22 @@
 /**
  * meeting-record — system-audio capture and meeting detection.
  *
- * The addon is deliberately not re-exported. Everything below wraps it so that
- * callers never see pids, status codes, or the realtime callback.
+ * Wraps the native addon so callers never see pids, status codes, or the realtime
+ * callback. The addon itself is not re-exported.
  */
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 import { createRequire } from 'node:module'
 
-const require_ = createRequire(__filename)
-const native = require_('../build/Release/meeting_record.node')
+// Native addons cannot be imported under ESM. Resolved relative to dist/index.js.
+const native = createRequire(import.meta.url)('../build/Release/meeting_record.node')
 
 export type Permission = 'system-audio' | 'accessibility'
 export type PermissionStatus = 'granted' | 'denied' | 'unknown' | 'not-required'
 
 /**
- * Stable platform identifier. Compare against these, persist them, use them in
- * filenames — the values never change.
- *
- * The library ships no display labels; presentation and localisation are yours.
+ * Stable platform identifier; the values never change. No display labels are
+ * provided — presentation and localisation belong to the caller.
  */
 export type Platform =
   | 'zoom'
@@ -43,7 +41,7 @@ export interface Meeting {
   readonly isUsingMic: boolean
   readonly isPlayingAudio: boolean
   readonly confidence: number
-  /** Prefer this over comparing `confidence`; the weights may change. */
+  /** Prefer this to comparing `confidence`; the weights may change. */
   readonly shouldRecord: boolean
 }
 
@@ -56,11 +54,11 @@ export interface AudioProcess {
 }
 
 export interface CaptureOptions {
-  /** Record the processes this meeting is using. The usual choice. */
+  /** Record the processes this meeting is using. */
   meeting?: Meeting
   /** Or specific processes. */
   pids?: number[]
-  /** Or the whole system mix. Records silence while the user's output is muted. */
+  /** Or the whole system mix. Records silence while output is muted. */
   systemWide?: boolean
   /** Default true. */
   mono?: boolean
@@ -85,9 +83,8 @@ export const permissions = {
   /**
    * Show the permission prompt and resolve once the user answers.
    *
-   * System audio shows a dialog; accessibility opens System Settings and requires
-   * an app relaunch, so it resolves as soon as Settings is open rather than
-   * waiting for a grant that cannot arrive in this process.
+   * Accessibility opens System Settings and needs an app relaunch, so it resolves
+   * as soon as Settings is open.
    */
   async request(
     permission: Permission,
@@ -103,7 +100,7 @@ export const permissions = {
 
     native.requestAudioPermission()
 
-    // The dialog is modal to the user, not to us, so poll for the answer.
+    // The dialog is modal to the user, not to this process.
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 500))
@@ -116,15 +113,13 @@ export const permissions = {
 
 /* ---- meeting detection ------------------------------------------------- */
 
-/** Hidden from the public `Meeting` type: pids are unstable, so callers should
- *  pass the meeting object back rather than reading them. */
+/** Kept off the public `Meeting` type: callers pass the meeting object back. */
 const audioPidsOf = new WeakMap<Meeting, number[]>()
 
 function toMeeting(raw: any): Meeting {
   const { _audioPids, platformCode, ...rest } = raw
   const meeting = rest as Meeting
-  // Hidden rather than deleted: needed to hand the meeting back to the C layer,
-  // but not part of the public shape.
+  // Needed to hand the meeting back to the C layer, but not part of the public shape.
   Object.defineProperty(meeting, '__platformCode', {
     value: platformCode,
     enumerable: false,
@@ -170,7 +165,7 @@ class Meetings extends EventEmitter {
     return native.isWatching()
   }
 
-  /** Every process doing audio IO. Rarely needed; `scan()` is the normal path. */
+  /** Every process doing audio IO. */
   audioProcesses(): AudioProcess[] {
     return native.listAudioProcesses()
   }
@@ -187,10 +182,9 @@ export const meetings = new Meetings() as Meetings & {
 /**
  * Interleaved float32 PCM.
  *
- * A stream rather than an event, because the underlying callback runs on a
- * realtime thread and will not wait for a slow consumer. Backpressure is real:
- * if this stream is not read, the native ring buffer overwrites its oldest
- * samples and `drop` fires.
+ * A stream rather than an event: the underlying callback runs on a realtime thread
+ * and does not wait for a slow consumer. If the stream is not read, the native ring
+ * buffer overwrites its oldest samples and emits `drop`.
  */
 export class CaptureSession extends Readable {
   constructor(
@@ -201,7 +195,7 @@ export class CaptureSession extends Readable {
   }
 
   /** Required by Readable; data arrives from the native side, not on demand. */
-  _read(): void {}
+  override _read(): void {}
 
   async stop(): Promise<void> {
     native.captureStop()
@@ -219,8 +213,7 @@ export const capture = {
         pendingDrops += info.dropped
         session?.emit('drop', info.dropped)
       }
-      // Backpressure is advisory here: the native ring buffer, not this stream,
-      // is what actually absorbs a slow consumer.
+      // The native ring buffer, not this stream, absorbs a slow consumer.
       session?.push(chunk)
     }
 
@@ -247,17 +240,15 @@ export const capture = {
 /* ---- convenience ------------------------------------------------------- */
 
 export interface AutoRecordOptions {
-  /** Called when a meeting worth recording starts. */
+  /** Called when a meeting that should be recorded starts. */
   onStart: (session: CaptureSession, meeting: Meeting) => void
   onStop?: (meeting: Meeting) => void
   onError?: (error: Error, meeting: Meeting) => void
-  /** Override the library's own judgement. */
+  /** Overrides `meeting.shouldRecord`. */
   shouldRecord?: (meeting: Meeting) => boolean
 }
 
-/**
- * Record every meeting automatically. The common case, in one call.
- */
+/** Record every meeting automatically. */
 export function autoRecord(options: AutoRecordOptions): { stop(): void } {
   const active = new Map<number, Meeting>()
 

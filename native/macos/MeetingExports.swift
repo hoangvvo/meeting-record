@@ -1,7 +1,7 @@
 import ApplicationServices
 import Foundation
 
-/// C ABI for the meeting-detection module, declared in native/include/meeting-record-detect.h.
+/// C ABI declared in native/include/meeting-record-detect.h.
 
 public typealias MrecMeetingCallback = @convention(c) (
     UnsafeRawPointer?, Int32, UnsafeMutableRawPointer?
@@ -9,8 +9,9 @@ public typealias MrecMeetingCallback = @convention(c) (
 
 // MARK: - C struct layout
 //
-// Mirrors `mrec_meeting`. Offsets are computed by hand because Swift cannot
-// import the header, so they must track meeting-record-detect.h:
+// Mirrors `mrec_meeting`. Swift cannot import the header, so these offsets are
+// hand-written and must track meeting-record-detect.h. `layout_check.c` and
+// `rust/tests/layout.rs` assert them.
 //
 //   platform          Int32     @ 0
 //   pid               UInt32    @ 4
@@ -22,7 +23,7 @@ public typealias MrecMeetingCallback = @convention(c) (
 //   is_using_mic      Int32     @ 1744
 //   is_playing_audio  Int32     @ 1748
 //   confidence        Int32     @ 1752
-//   should_record     Int32     @ 1756   (fills former tail padding)
+//   should_record     Int32     @ 1756
 //   detected_at_ns    UInt64    @ 1760
 //   total size                    1768
 
@@ -65,7 +66,7 @@ private func hostTimeNanoseconds() -> UInt64 {
     return mach_absolute_time() * UInt64(info.numer) / UInt64(info.denom)
 }
 
-/// Serialise one meeting into a freshly zeroed C struct and hand it to `body`.
+/// Serialise one meeting into a zeroed C struct and pass it to `body`.
 func withCMeeting<R>(_ meeting: DetectedMeeting,
                      _ body: (UnsafeRawPointer) -> R) -> R {
     let buffer = UnsafeMutableRawPointer.allocate(byteCount: Layout.stride,
@@ -187,12 +188,8 @@ public func mrec_request_accessibility_permission() -> Int32 {
     return 0
 }
 
-/// Allocated once at first use and never freed, so the returned pointer stays
-/// valid for the process lifetime.
-///
-/// The C contract is a borrowed pointer with no matching free, so allocating per
-/// call would leak on every call — and callers do call this from inside event
-/// callbacks. The Windows backend returns string literals for the same reason.
+/// Allocated once and never freed: the C contract is a borrowed pointer with no
+/// matching free, so per-call allocation would leak.
 private let allPlatforms: [MeetingPlatform] = [
     .unknown, .zoom, .teams, .meet, .webex, .slack, .discord, .genericBrowser,
 ]
@@ -218,10 +215,8 @@ public func mrec_platform_id(_ platform: Int32) -> UnsafePointer<CChar>? {
 
 /// Start capture for a detected meeting.
 ///
-/// Rather than trusting the pid list the caller passes back — which may be
-/// seconds old, and apps move audio between helper processes — this re-scans and
-/// prefers the current pids for the same platform. The passed-in list is the
-/// fallback when the meeting has since ended.
+/// Re-scans and prefers the current pids for the same platform, since the caller's
+/// list may be stale. The passed-in list is the fallback.
 @_cdecl("mrec_start_meeting")
 public func mrec_start_meeting(_ meeting: UnsafeRawPointer?,
                                _ callback: MrecAudioCallback?,

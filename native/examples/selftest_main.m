@@ -1,13 +1,11 @@
 /*
  * GUI host for the self-test.
  *
- * The audio-capture TCC prompt can only be drawn by a process with a running
- * NSApplication, and the CoreAudio calls that trigger it must not run on the
- * thread that has to draw it. So: boot an accessory (no dock icon) NSApplication
- * on the main thread, and run the actual test on a background thread.
+ * The audio-capture prompt requires a running NSApplication, and the CoreAudio
+ * calls that trigger it must not run on the thread that draws it. So the app runs
+ * on the main thread and the test on a background thread.
  *
- * Real hosts — Electron, a SwiftUI app — already satisfy this and need none of
- * this scaffolding.
+ * Electron and native apps already satisfy this.
  */
 #import <AppKit/AppKit.h>
 #include <pthread.h>
@@ -20,10 +18,7 @@ int mrec_selftest_run(void);
 static void *run_test(void *unused) {
   (void)unused;
 
-  /*
-   * Ask for the grant if we do not already have it, then wait for the user. The
-   * prompt is modal to them, not to us, so poll rather than block.
-   */
+  /* The prompt is modal to the user, not to this process, so poll. */
   if (mrec_audio_permission_status() != MREC_PERM_GRANTED) {
     mrec_request_audio_permission();
     for (int i = 0; i < 60; i++) {
@@ -45,7 +40,7 @@ int main(void) {
     pthread_create(&thread, NULL, run_test, NULL);
     pthread_detach(thread);
 
-    /* Safety net: never leave a wedged process holding a tap. */
+    /* Never leave a wedged process holding a tap. */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(180 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ exit(3); });
 

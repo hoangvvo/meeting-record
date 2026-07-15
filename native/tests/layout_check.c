@@ -1,11 +1,7 @@
 /*
- * Guards the hand-computed struct offsets in native/macos/MeetingExports.swift.
- *
- * Swift cannot import meeting-record-detect.h, so the Swift side writes fields at
- * literal byte offsets. If this header ever changes, these assertions fail at
- * compile time instead of the Swift code silently corrupting memory.
- *
- * Run via scripts/build-macos.sh.
+ * Guards the hand-written struct offsets in native/macos/MeetingExports.swift,
+ * which writes fields at literal byte offsets because Swift cannot import the
+ * header. A header change fails here at compile time.
  */
 #include "meeting-record-detect.h"
 

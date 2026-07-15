@@ -1,9 +1,8 @@
-// Record whatever is currently playing to a playable .wav file.
+// Record whatever is playing to a .wav file.
 //
 //   node node/examples/record-wav.mjs [seconds]
 //
-// Play music or a video first, then run this. Produces a WAV you can open in
-// QuickTime — the quickest way to confirm capture actually works.
+// Start some audio first.
 import { writeFileSync } from 'node:fs'
 import mrec from '../dist/index.js'
 
@@ -46,10 +45,7 @@ const samples = new Float32Array(pcm.buffer, pcm.byteOffset, pcm.length / 4)
 let peak = 0
 for (const s of samples) if (Math.abs(s) > peak) peak = Math.abs(s)
 
-/**
- * Write 16-bit PCM rather than float32: every player handles it, whereas
- * float WAV support is inconsistent.
- */
+/** 16-bit PCM rather than float32; float WAV support is inconsistent. */
 function wav(samples, sampleRate, channels) {
   const header = Buffer.alloc(44)
   const bytes = samples.length * 2
@@ -69,8 +65,7 @@ function wav(samples, sampleRate, channels) {
 
   const body = Buffer.alloc(bytes)
   for (let i = 0; i < samples.length; i++) {
-    // Clamp before scaling: a tap can legitimately exceed 1.0 when several
-    // processes are mixed, and wrapping would sound like loud clicks.
+    // A tap can exceed 1.0 when processes are mixed; wrapping would click.
     const clamped = Math.max(-1, Math.min(1, samples[i]))
     body.writeInt16LE(Math.round(clamped * 32767), i * 2)
   }

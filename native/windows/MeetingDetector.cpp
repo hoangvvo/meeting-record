@@ -1,20 +1,14 @@
 /*
  * Windows meeting detection.
  *
- * Same layered design as the macOS backend, but the signal quality differs in one
- * important way: Windows has no equivalent of
- * kAudioHardwarePropertyProcessObjectList, so there is no cheap, exact "is this
- * process doing audio IO right now" query.
+ * Same layered design as the macOS backend. There is no equivalent of
+ * kAudioHardwarePropertyProcessObjectList, so liveness comes from
+ * IAudioSessionManager2 session enumeration: an ACTIVE render session on a
+ * conferencing process is the equivalent signal.
  *
- * The substitute is IAudioSessionManager2's session enumeration, which reports a
- * per-process audio session and its state (active / inactive / expired). That is
- * close enough: an ACTIVE render session on a conferencing process is the same
- * liveness signal the macOS backend gets from the HAL.
- *
- * Window titles come from EnumWindows + GetWindowTextW, which needs no
- * permission. Full UI Automation would also give browser URLs, but it is
- * heavyweight and only needed for enrichment, so titles carry the URL matching
- * here.
+ * Window titles come from EnumWindows + GetWindowTextW, which needs no permission.
+ * Full UI Automation would also yield browser URLs but is not used, so titles
+ * carry the URL matching.
  */
 #include "meeting-record-detect.h"
 
@@ -44,10 +38,7 @@ struct NativeApp {
   mrec_platform platform;
 };
 
-/*
- * Matched on executable name because Windows has no bundle identifiers. Teams has
- * shipped under three different names, all of which are still in the wild.
- */
+/* Matched on executable name; Windows has no bundle identifiers. */
 constexpr NativeApp kNativeApps[] = {
     {"zoom.exe", MREC_PLATFORM_ZOOM},
     {"cpthost.exe", MREC_PLATFORM_ZOOM}, /* Zoom's screen-share helper */
@@ -81,7 +72,7 @@ constexpr UrlPattern kUrlPatterns[] = {
     {"meet.jit.si", MREC_PLATFORM_GENERIC_BROWSER},
 };
 
-/* Confidence weights — kept identical to the macOS backend. */
+/* Must match the macOS backend. */
 constexpr int32_t kScoreKnownApp = 40;
 constexpr int32_t kScorePlayingAudio = 30;
 constexpr int32_t kScoreUsingMic = 25;
@@ -134,10 +125,7 @@ struct AudioActivity {
   bool capturing = false;
 };
 
-/*
- * Per-process audio activity, from the session enumerator of every render and
- * capture endpoint. AudioSessionStateActive is the liveness signal.
- */
+/* Per-process audio activity across every render and capture endpoint. */
 std::map<DWORD, AudioActivity> CollectAudioActivity() {
   std::map<DWORD, AudioActivity> activity;
 
@@ -218,7 +206,7 @@ BOOL CALLBACK TitleProc(HWND window, LPARAM param) {
   buffer.resize(static_cast<size_t>(length));
 
   std::string title = Narrow(buffer);
-  /* Prefer the longest visible title: browsers name their real window last. */
+  /* Longest visible title: browsers name their real window last. */
   if (title.size() > search->title.size()) search->title = std::move(title);
   return TRUE;
 }
@@ -305,9 +293,8 @@ std::vector<Detected> Scan() {
   for (auto &[exe, entry] : browser) {
     entry.title = WindowTitleFor(entry.pid);
     /*
-     * A browser tab playing audio is ambiguous — YouTube looks exactly like Meet
-     * at the process level. Require either a recognised meeting in the title or a
-     * live microphone, which a page only gets with explicit user consent.
+     * A video tab and a call tab are indistinguishable at the process level, so
+     * require a recognised title or a live microphone.
      */
     const mrec_platform matched = PlatformForText(entry.title);
     if (matched == MREC_PLATFORM_UNKNOWN && !entry.mic) continue;
@@ -393,10 +380,8 @@ public:
 
 private:
   /*
-   * Polled rather than event-driven. IAudioSessionNotification exists, but it
-   * fires only on session creation, not on the inactive->active transition that
-   * marks a call going live, so a poll is needed regardless. 2s is well below
-   * human-noticeable for "recording started" and costs almost nothing.
+   * Polled: IAudioSessionNotification fires only on session creation, not on the
+   * inactive->active transition that marks a call going live.
    */
   void Loop() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);

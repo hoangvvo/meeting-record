@@ -1,10 +1,8 @@
 import Foundation
 
-/// Deterministic tests for the classification logic — the part of detection that
-/// does not need a live meeting to verify.
+/// Tests for the classification logic, which needs no live meeting.
 ///
-/// Compiled together with the macOS sources (see scripts/build-macos.sh), so it
-/// tests the real catalog rather than a copy.
+/// Compiled against the real macOS sources, not a copy.
 
 @main
 struct CatalogTests {

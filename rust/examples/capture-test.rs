@@ -1,4 +1,4 @@
-//! Capture whatever is currently playing for four seconds and report the level.
+//! Capture whatever is playing for four seconds and report the level.
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 

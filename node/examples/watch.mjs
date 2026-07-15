@@ -2,8 +2,7 @@
 //
 //   node node/examples/watch.mjs
 //
-// Prints detection state as it changes. Open Zoom / Teams / a Google Meet tab /
-// a Slack huddle and watch the confidence climb. Needs no permission at all.
+// Prints detection state as it changes. Needs no permission.
 import mrec from '../dist/index.js'
 
 const stamp = () => new Date().toLocaleTimeString()
@@ -42,8 +41,7 @@ mrec.meetings.on('updated', (m) => console.log(`[${stamp()}] UPDATED\n${describe
 mrec.meetings.on('ended', (m) => console.log(`[${stamp()}] ENDED   ${m.platform}\n`))
 mrec.meetings.watch()
 
-// Also show which processes are producing audio, since that is the signal that
-// decides everything and it explains any surprising result.
+// The processes producing audio, which is what detection keys off.
 setInterval(() => {
   const active = mrec.meetings
     .audioProcesses()
