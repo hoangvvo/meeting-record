@@ -10,12 +10,12 @@ private final class Session {
     static let shared = Session()
 
     let lock = NSLock()
-    let stateBox = CaptureStateBox()
+    let systemStateBox = CaptureStateBox()
+    let microphoneStateBox = CaptureStateBox()
     var capture: TapCapture?
+    var microphone: MicrophoneCapture?
     var lastError = "no error"
 }
-
-// MARK: - Errors
 
 private var lastErrorStorage: UnsafeMutablePointer<CChar>?
 
@@ -31,8 +31,6 @@ public func mrec_last_error() -> UnsafePointer<CChar>? {
     return UnsafePointer(lastErrorStorage)
 }
 
-// MARK: - Permissions
-
 @_cdecl("mrec_audio_permission_status")
 public func mrec_audio_permission_status() -> Int32 {
     Permissions.audioCaptureStatus()
@@ -43,7 +41,15 @@ public func mrec_request_audio_permission() -> Int32 {
     Permissions.requestAudioCapture()
 }
 
-// MARK: - Process enumeration
+@_cdecl("mrec_microphone_permission_status")
+public func mrec_microphone_permission_status() -> Int32 {
+    Permissions.microphoneStatus()
+}
+
+@_cdecl("mrec_request_microphone_permission")
+public func mrec_request_microphone_permission() -> Int32 {
+    Permissions.requestMicrophone()
+}
 
 private let bundleIDOffset = 12
 private let nameOffset = 12 + 256
@@ -81,8 +87,6 @@ private func writeCString(_ value: String, to pointer: UnsafeMutableRawPointer, 
     if !bytes.isEmpty { dest.update(from: bytes, count: bytes.count) }
 }
 
-// MARK: - Capture
-
 /// `@_cdecl` cannot accept a pointer to a Swift struct, so `mrec_config` lives in
 /// meeting-record.h as a static inline wrapper around this.
 @_cdecl("mrec_start_raw")
@@ -93,6 +97,21 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
                              _ muteCapturedOutput: Int32,
                              _ callback: MrecAudioCallback?,
                              _ userData: UnsafeMutableRawPointer?) -> Int32 {
+    mrec_start_tracks_raw(pidsPtr, pidCount, globalMixdown, mono,
+                          muteCapturedOutput, 0, callback, userData, nil, nil)
+}
+
+@_cdecl("mrec_start_tracks_raw")
+public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
+                                    _ pidCount: Int,
+                                    _ globalMixdown: Int32,
+                                    _ mono: Int32,
+                                    _ muteCapturedOutput: Int32,
+                                    _ microphoneSource: Int32,
+                                    _ systemCallback: MrecAudioCallback?,
+                                    _ systemUserData: UnsafeMutableRawPointer?,
+                                    _ microphoneCallback: MrecAudioCallback?,
+                                    _ microphoneUserData: UnsafeMutableRawPointer?) -> Int32 {
     guard #available(macOS 14.2, *) else {
         setLastError("CoreAudio process taps require macOS 14.2 or newer")
         return -1
@@ -105,6 +124,15 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     if session.capture != nil {
         setLastError("capture already running")
         return -3
+    }
+
+    guard microphoneSource == 0 || microphoneSource == 1 else {
+        setLastError("unknown microphone source")
+        return -9
+    }
+    if microphoneSource == 1, Permissions.microphoneStatus() != 1 {
+        setLastError("microphone permission is not granted")
+        return -2
     }
 
     var pids: [pid_t] = []
@@ -124,8 +152,10 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
         }
     }
 
-    session.stateBox.configure(callback: callback, userData: userData)
-    let capture = TapCapture(stateBox: session.stateBox)
+    session.systemStateBox.configure(callback: systemCallback, userData: systemUserData)
+    session.microphoneStateBox.configure(callback: microphoneCallback,
+                                         userData: microphoneUserData)
+    let capture = TapCapture(stateBox: session.systemStateBox)
 
     // Start under a timeout rather than probing permission first: a probe builds
     // and tears down a second tap moments before this one, and that teardown races
@@ -150,7 +180,8 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     }
 
     guard let outcome else {
-        session.stateBox.clear()
+        session.systemStateBox.clear()
+        session.microphoneStateBox.clear()
         setLastError("timed out starting capture; system audio recording "
             + "permission is most likely not granted yet — call "
             + "mrec_request_audio_permission() from a GUI process, or grant it "
@@ -159,11 +190,34 @@ public func mrec_start_raw(_ pidsPtr: UnsafePointer<UInt32>?,
         return -2
     }
     guard outcome == 0 else {
-        session.stateBox.clear()
+        session.systemStateBox.clear()
+        session.microphoneStateBox.clear()
         return outcome
     }
 
+    var microphone: MicrophoneCapture?
+    if microphoneSource == 1 {
+        let candidate = MicrophoneCapture(stateBox: session.microphoneStateBox)
+        do {
+            try candidate.start()
+            microphone = candidate
+        } catch let error as CaptureError {
+            capture.stop()
+            session.systemStateBox.clear()
+            session.microphoneStateBox.clear()
+            setLastError(error.message)
+            return error.status
+        } catch {
+            capture.stop()
+            session.systemStateBox.clear()
+            session.microphoneStateBox.clear()
+            setLastError("microphone setup failed: \(error)")
+            return -9
+        }
+    }
+
     session.capture = capture
+    session.microphone = microphone
     setLastError("no error")
     return 0
 }
@@ -175,9 +229,12 @@ public func mrec_stop() -> Int32 {
     defer { session.lock.unlock() }
 
     guard let capture = session.capture else { return -4 /* NOT_RUNNING */ }
+    session.microphone?.stop()
     capture.stop()
+    session.microphone = nil
     session.capture = nil
-    session.stateBox.clear()
+    session.systemStateBox.clear()
+    session.microphoneStateBox.clear()
     return 0
 }
 
@@ -197,7 +254,21 @@ public func mrec_current_format(_ sampleRate: UnsafeMutablePointer<Double>?,
     defer { session.lock.unlock() }
 
     guard session.capture != nil else { return -4 }
-    let format = session.stateBox.currentFormat()
+    let format = session.systemStateBox.currentFormat()
+    sampleRate?.pointee = format.sampleRate
+    channels?.pointee = format.channels
+    return 0
+}
+
+@_cdecl("mrec_current_microphone_format")
+public func mrec_current_microphone_format(_ sampleRate: UnsafeMutablePointer<Double>?,
+                                             _ channels: UnsafeMutablePointer<UInt32>?) -> Int32 {
+    let session = Session.shared
+    session.lock.lock()
+    defer { session.lock.unlock() }
+
+    guard session.microphone != nil else { return -4 }
+    let format = session.microphoneStateBox.currentFormat()
     sampleRate?.pointee = format.sampleRate
     channels?.pointee = format.channels
     return 0

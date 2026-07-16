@@ -102,4 +102,4 @@ xattr -cr "$APP"
 echo "    built $APP (identity: $IDENTITY)"
 echo
 echo "Run it with:  open $APP     # then read /tmp/meeting-record-selftest.log"
-echo "Play audio first, or it will correctly report that nothing is playing."
+echo "Play audio and speak during the test so both tracks can be verified."

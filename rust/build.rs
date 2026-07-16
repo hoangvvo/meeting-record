@@ -4,11 +4,15 @@
 //! by cargo. This only tells the linker where to find it and which system
 //! frameworks it needs.
 
+use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use cc::Build;
+
 fn main() {
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.parent().unwrap().to_path_buf();
 
     if cfg!(target_os = "macos") {
@@ -51,7 +55,7 @@ fn main() {
 
     #[cfg(windows)]
     {
-        cc::Build::new()
+        Build::new()
             .cpp(true)
             .std("c++17")
             .include(root.join("native/include"))

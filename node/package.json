@@ -1,7 +1,7 @@
 {
   "name": "meeting-record",
   "version": "0.1.0",
-  "description": "System-audio capture and meeting detection for macOS and Windows",
+  "description": "System-audio and microphone capture with meeting detection for macOS and Windows",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -26,7 +26,7 @@
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:native && npm run build:addon && npm run build:ts",
     "install": "node-gyp rebuild",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.mjs",
     "example": "node examples/record.mjs"
   },
   "dependencies": {

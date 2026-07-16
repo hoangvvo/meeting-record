@@ -1,14 +1,14 @@
-//! System-audio capture and meeting detection for macOS and Windows.
+//! System-audio and microphone capture with meeting detection for macOS and Windows.
 //!
 //! ```no_run
-//! use meeting_record as mrec;
+//! use meeting_record::{meetings, Error, MeetingEvent, Platform};
 //!
-//! # fn main() -> Result<(), mrec::Error> {
-//! let watcher = mrec::watch(|event, meeting| {
-//!     if event == mrec::MeetingEvent::Started && meeting.should_record {
+//! # fn main() -> Result<(), Error> {
+//! let watcher = meetings::watch(|event, meeting| {
+//!     if event == MeetingEvent::Started && meeting.should_record {
 //!         // `platform` is a stable identifier, not a label: match on it.
 //!         match meeting.platform {
-//!             mrec::Platform::Zoom | mrec::Platform::Teams => { /* ... */ }
+//!             Platform::Zoom | Platform::Teams => { /* ... */ }
 //!             _ => {}
 //!         }
 //!     }
@@ -20,41 +20,47 @@
 //! Capture and watching are process-wide singletons. Both return a guard that
 //! stops them on drop.
 
-pub mod sys;
+mod sys;
 
-use std::ffi::{c_void, CStr};
-use std::fmt;
-use std::sync::Mutex;
+use std::cell::UnsafeCell;
+use std::error::Error as StdError;
+use std::ffi::{c_char, c_int, c_void, CStr};
+use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::mem;
+use std::panic::{self, AssertUnwindSafe};
+use std::ptr;
+use std::slice;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    Arc, Condvar, Mutex,
+};
+use std::thread;
+use std::time::Duration;
 
-/* ---- errors ------------------------------------------------------------ */
+use sys::{AudioCallback as RawAudioCallback, Meeting as RawMeeting, Process as RawProcess};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     UnsupportedOs,
-    /// Not granted, or undetermined.
     Permission(String),
     AlreadyRunning,
-    NotRunning,
-    NoProcesses,
     Capture(String),
     Internal(String),
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Error::UnsupportedOs => write!(f, "unsupported OS version"),
-            Error::Permission(m) => write!(f, "permission not granted: {m}"),
-            Error::AlreadyRunning => write!(f, "already running"),
-            Error::NotRunning => write!(f, "not running"),
-            Error::NoProcesses => write!(f, "no processes to capture"),
-            Error::Capture(m) => write!(f, "capture failed: {m}"),
-            Error::Internal(m) => write!(f, "internal error: {m}"),
+            Error::UnsupportedOs => f.write_str("unsupported OS version"),
+            Error::Permission(message) => write!(f, "permission not granted: {message}"),
+            Error::AlreadyRunning => f.write_str("already running"),
+            Error::Capture(message) => write!(f, "capture failed: {message}"),
+            Error::Internal(message) => write!(f, "internal error: {message}"),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl StdError for Error {}
 
 fn last_error() -> String {
     unsafe {
@@ -71,65 +77,102 @@ fn check(status: i32) -> Result<(), Error> {
     match status {
         sys::MREC_OK => Ok(()),
         sys::MREC_ERR_UNSUPPORTED_OS => Err(Error::UnsupportedOs),
-        sys::MREC_ERR_PERMISSION => Err(Error::Permission(last_error())),
+        sys::MREC_ERR_PERMISSION => Err(Error::Permission(error_detail(status))),
         sys::MREC_ERR_ALREADY_RUNNING => Err(Error::AlreadyRunning),
-        sys::MREC_ERR_NOT_RUNNING => Err(Error::NotRunning),
-        sys::MREC_ERR_NO_PROCESSES => Err(Error::NoProcesses),
-        sys::MREC_ERR_TAP_FAILED
+        sys::MREC_ERR_NOT_RUNNING
+        | sys::MREC_ERR_NO_PROCESSES
+        | sys::MREC_ERR_TAP_FAILED
         | sys::MREC_ERR_DEVICE_FAILED
-        | sys::MREC_ERR_IOPROC_FAILED => Err(Error::Capture(last_error())),
-        _ => Err(Error::Internal(last_error())),
+        | sys::MREC_ERR_IOPROC_FAILED => Err(Error::Capture(error_detail(status))),
+        _ => Err(Error::Internal(error_detail(status))),
     }
 }
 
-fn c_string(bytes: &[std::os::raw::c_char]) -> String {
-    unsafe { CStr::from_ptr(bytes.as_ptr()).to_string_lossy().into_owned() }
+fn error_detail(status: i32) -> String {
+    let detail = last_error();
+    if detail.is_empty() {
+        default_error_message(status).to_owned()
+    } else {
+        detail
+    }
 }
 
-/* ---- permissions ------------------------------------------------------- */
+fn default_error_message(status: i32) -> &'static str {
+    match status {
+        sys::MREC_ERR_UNSUPPORTED_OS => "unsupported OS version",
+        sys::MREC_ERR_PERMISSION => "permission not granted",
+        sys::MREC_ERR_ALREADY_RUNNING => "already running",
+        sys::MREC_ERR_NOT_RUNNING => "not running",
+        sys::MREC_ERR_NO_PROCESSES => "no process to capture",
+        sys::MREC_ERR_TAP_FAILED => "audio tap failed",
+        sys::MREC_ERR_DEVICE_FAILED => "audio device failed",
+        sys::MREC_ERR_IOPROC_FAILED => "audio callback failed",
+        _ => "meeting-record failed",
+    }
+}
+
+fn c_string(bytes: &[c_char]) -> String {
+    unsafe {
+        CStr::from_ptr(bytes.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
+    SystemAudio,
+    Microphone,
+    Accessibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionStatus {
     Unknown,
     Granted,
     Denied,
-    /// Windows has no equivalent grant for loopback capture.
+    /// The platform does not require an explicit prompt for this permission.
     NotRequired,
 }
 
-impl From<i32> for Permission {
+impl From<i32> for PermissionStatus {
     fn from(value: i32) -> Self {
         match value {
-            1 => Permission::Granted,
-            2 => Permission::Denied,
-            3 => Permission::NotRequired,
-            _ => Permission::Unknown,
+            1 => PermissionStatus::Granted,
+            2 => PermissionStatus::Denied,
+            3 => PermissionStatus::NotRequired,
+            _ => PermissionStatus::Unknown,
         }
     }
 }
 
-pub fn audio_permission() -> Permission {
-    unsafe { sys::mrec_audio_permission_status() }.into()
-}
+pub mod permissions {
+    use super::sys;
+    use super::{Error, Permission, PermissionStatus};
 
-/// Show the one-time system-audio prompt.
-///
-/// Returns immediately; poll [`audio_permission`] for the answer. Requires a GUI
-/// process.
-pub fn request_audio_permission() {
-    unsafe { sys::mrec_request_audio_permission() };
-}
+    pub fn status(permission: Permission) -> PermissionStatus {
+        match permission {
+            Permission::SystemAudio => unsafe { sys::mrec_audio_permission_status() }.into(),
+            Permission::Microphone => unsafe { sys::mrec_microphone_permission_status() }.into(),
+            Permission::Accessibility => {
+                unsafe { sys::mrec_accessibility_permission_status() }.into()
+            }
+        }
+    }
 
-pub fn accessibility_permission() -> Permission {
-    unsafe { sys::mrec_accessibility_permission_status() }.into()
+    /// Show the system prompt for a permission.
+    ///
+    /// Audio requests return immediately; poll [`status`] for the answer.
+    /// Accessibility opens System Settings and takes effect after an app relaunch.
+    pub fn request(permission: Permission) -> Result<(), Error> {
+        let status = match permission {
+            Permission::SystemAudio => unsafe { sys::mrec_request_audio_permission() },
+            Permission::Microphone => unsafe { sys::mrec_request_microphone_permission() },
+            Permission::Accessibility => unsafe { sys::mrec_request_accessibility_permission() },
+        };
+        super::check(status)
+    }
 }
-
-/// Opens System Settings. The app must be relaunched before a grant takes effect.
-pub fn request_accessibility_permission() {
-    unsafe { sys::mrec_request_accessibility_permission() };
-}
-
-/* ---- processes --------------------------------------------------------- */
 
 #[derive(Debug, Clone)]
 pub struct AudioProcess {
@@ -140,10 +183,22 @@ pub struct AudioProcess {
     pub is_using_mic: bool,
 }
 
+impl From<&RawProcess> for AudioProcess {
+    fn from(raw: &RawProcess) -> Self {
+        Self {
+            pid: raw.pid,
+            name: c_string(&raw.name),
+            bundle_id: c_string(&raw.bundle_id),
+            is_playing_audio: raw.is_running_output != 0,
+            is_using_mic: raw.is_running_input != 0,
+        }
+    }
+}
+
 /// Every live process doing audio IO.
-pub fn audio_processes() -> Vec<AudioProcess> {
+fn list_audio_processes() -> Vec<AudioProcess> {
     let mut buffer = vec![
-        sys::Process {
+        RawProcess {
             pid: 0,
             is_running_output: 0,
             is_running_input: 0,
@@ -155,20 +210,8 @@ pub fn audio_processes() -> Vec<AudioProcess> {
     let mut count = 0usize;
     unsafe { sys::mrec_list_audio_processes(buffer.as_mut_ptr(), buffer.len(), &mut count) };
 
-    buffer
-        .iter()
-        .take(count)
-        .map(|p| AudioProcess {
-            pid: p.pid,
-            name: c_string(&p.name),
-            bundle_id: c_string(&p.bundle_id),
-            is_playing_audio: p.is_running_output != 0,
-            is_using_mic: p.is_running_input != 0,
-        })
-        .collect()
+    buffer.iter().take(count).map(AudioProcess::from).collect()
 }
-
-/* ---- meetings ---------------------------------------------------------- */
 
 /// Conferencing platform.
 ///
@@ -188,8 +231,8 @@ pub enum Platform {
     Browser,
 }
 
-impl Platform {
-    fn from_raw(value: i32) -> Self {
+impl From<i32> for Platform {
+    fn from(value: i32) -> Self {
         match value {
             1 => Platform::Zoom,
             2 => Platform::Teams,
@@ -201,10 +244,12 @@ impl Platform {
             _ => Platform::Unknown,
         }
     }
+}
 
+impl Platform {
     /// Stable identifier: `"zoom"`, `"teams"`, `"meet"`, `"webex"`, `"slack"`,
     /// `"discord"`, `"browser"`, `"unknown"`.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Platform::Unknown => "unknown",
             Platform::Zoom => "zoom",
@@ -216,14 +261,12 @@ impl Platform {
             Platform::Browser => "browser",
         }
     }
-
 }
 
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Meeting {
     pub platform: Platform,
-    /// The user-visible application, not necessarily where the audio is.
+    /// The user-visible application. Use this with [`CaptureTarget::Process`].
     pub pid: u32,
     pub app_name: String,
     /// Requires the accessibility permission; empty otherwise.
@@ -235,30 +278,12 @@ pub struct Meeting {
     pub confidence: i32,
     /// Prefer this to comparing `confidence`; the weights may change.
     pub should_record: bool,
-    /// Lets [`record`] start capture without the caller handling pids.
-    raw: sys::Meeting,
 }
 
-impl fmt::Debug for Meeting {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Meeting")
-            .field("platform", &self.platform)
-            .field("pid", &self.pid)
-            .field("app_name", &self.app_name)
-            .field("title", &self.title)
-            .field("url", &self.url)
-            .field("is_using_mic", &self.is_using_mic)
-            .field("is_playing_audio", &self.is_playing_audio)
-            .field("confidence", &self.confidence)
-            .field("should_record", &self.should_record)
-            .finish()
-    }
-}
-
-impl Meeting {
-    fn from_raw(raw: &sys::Meeting) -> Self {
-        Meeting {
-            platform: Platform::from_raw(raw.platform),
+impl From<&RawMeeting> for Meeting {
+    fn from(raw: &RawMeeting) -> Self {
+        Self {
+            platform: raw.platform.into(),
             pid: raw.pid,
             app_name: c_string(&raw.app_name),
             title: c_string(&raw.title),
@@ -267,17 +292,16 @@ impl Meeting {
             is_playing_audio: raw.is_playing_audio != 0,
             confidence: raw.confidence,
             should_record: raw.should_record != 0,
-            raw: *raw,
         }
     }
 }
 
 /// Point-in-time scan, highest confidence first.
-pub fn scan() -> Vec<Meeting> {
-    let mut buffer = [unsafe { std::mem::zeroed::<sys::Meeting>() }; 16];
+fn scan_meetings() -> Vec<Meeting> {
+    let mut buffer = [unsafe { mem::zeroed::<RawMeeting>() }; 16];
     let mut count = 0usize;
     unsafe { sys::mrec_scan(buffer.as_mut_ptr(), buffer.len(), &mut count) };
-    buffer.iter().take(count).map(Meeting::from_raw).collect()
+    buffer.iter().take(count).map(Meeting::from).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +311,16 @@ pub enum MeetingEvent {
     Ended,
 }
 
+impl From<i32> for MeetingEvent {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => MeetingEvent::Started,
+            2 => MeetingEvent::Ended,
+            _ => MeetingEvent::Updated,
+        }
+    }
+}
+
 type MeetingHandler = Box<dyn FnMut(MeetingEvent, &Meeting) + Send + 'static>;
 
 // The watcher is a process-wide singleton, so the handler lives here rather than
@@ -294,22 +328,18 @@ type MeetingHandler = Box<dyn FnMut(MeetingEvent, &Meeting) + Send + 'static>;
 static MEETING_HANDLER: Mutex<Option<MeetingHandler>> = Mutex::new(None);
 
 unsafe extern "C" fn meeting_trampoline(
-    meeting: *const sys::Meeting,
-    event: std::os::raw::c_int,
+    meeting: *const RawMeeting,
+    event: c_int,
     _user_data: *mut c_void,
 ) {
     if meeting.is_null() {
         return;
     }
-    let event = match event {
-        0 => MeetingEvent::Started,
-        2 => MeetingEvent::Ended,
-        _ => MeetingEvent::Updated,
-    };
-    let parsed = Meeting::from_raw(&*meeting);
+    let event = event.into();
+    let parsed = Meeting::from(&*meeting);
 
     // A panic must not cross the FFI boundary.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         if let Ok(mut guard) = MEETING_HANDLER.lock() {
             if let Some(handler) = guard.as_mut() {
                 handler(event, &parsed);
@@ -336,7 +366,7 @@ impl Drop for Watcher {
 /// Watch for meetings starting, changing and ending.
 ///
 /// The handler runs on an internal serial queue, so it may allocate and block.
-pub fn watch<F>(handler: F) -> Result<Watcher, Error>
+fn watch_meetings<F>(handler: F) -> Result<Watcher, Error>
 where
     F: FnMut(MeetingEvent, &Meeting) + Send + 'static,
 {
@@ -345,9 +375,9 @@ where
     }
     *MEETING_HANDLER
         .lock()
-        .map_err(|e| Error::Internal(e.to_string()))? = Some(Box::new(handler));
+        .map_err(|error| Error::Internal(error.to_string()))? = Some(Box::new(handler));
 
-    let status = unsafe { sys::mrec_watch_start(Some(meeting_trampoline), std::ptr::null_mut()) };
+    let status = unsafe { sys::mrec_watch_start(Some(meeting_trampoline), ptr::null_mut()) };
     if status != sys::MREC_OK {
         *MEETING_HANDLER.lock().unwrap() = None;
         return check(status).map(|_| unreachable!());
@@ -355,158 +385,556 @@ where
     Ok(Watcher { _private: () })
 }
 
-/* ---- capture ----------------------------------------------------------- */
-
-/// A block of interleaved float32 PCM.
-pub struct AudioBuffer<'a> {
-    pub frames: &'a [f32],
-    pub channels: u32,
-    pub sample_rate: f64,
-    pub host_time_ns: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureTarget {
+    /// A detected meeting's app pid, or any audio-producing process pid.
+    Process { pid: u32 },
+    /// The whole system mix. Records silence while output is muted.
+    System,
 }
 
-type AudioHandler = Box<dyn FnMut(AudioBuffer<'_>) + Send + 'static>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophoneSource {
+    Default,
+}
 
-static AUDIO_HANDLER: Mutex<Option<AudioHandler>> = Mutex::new(None);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureOptions {
+    /// Mono mixdown for system audio. Defaults to true.
+    pub mono: bool,
+    /// Optional microphone track. Defaults to none.
+    pub microphone: Option<MicrophoneSource>,
+}
 
-/// Realtime audio thread.
-///
-/// `try_lock` rather than `lock`: the handler is set before capture starts and
-/// cleared after it stops, so the lock is uncontended, and a realtime thread must
-/// not block. Handlers should forward into a queue and return.
+impl Default for CaptureOptions {
+    fn default() -> Self {
+        Self {
+            mono: true,
+            microphone: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureState {
+    /// Audio frames are available from the tracks.
+    Recording,
+    /// Incoming frames are discarded. No silence is synthesized.
+    Paused,
+    Stopped,
+}
+
+#[derive(Debug)]
+pub struct AudioChunk {
+    pub frames: Vec<f32>,
+}
+
+const TRACK_CAPACITY: usize = 1 << 20;
+const STATE_RECORDING: u8 = 0;
+const STATE_PAUSED: u8 = 1;
+const STATE_STOPPED: u8 = 2;
+
+struct TrackQueue {
+    buffer: Box<[UnsafeCell<f32>]>,
+    mask: usize,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    dropped: AtomicUsize,
+    writing: AtomicBool,
+    closed: AtomicBool,
+    read_lock: Mutex<()>,
+    wake_lock: Mutex<()>,
+    wake: Condvar,
+}
+
+// SAFETY: producers are serialized by `writing`, consumers by `read_lock`, and
+// published regions are transferred with the atomic head and tail positions.
+unsafe impl Sync for TrackQueue {}
+
+impl TrackQueue {
+    fn new() -> Self {
+        let buffer = (0..TRACK_CAPACITY)
+            .map(|_| UnsafeCell::new(0.0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            buffer,
+            mask: TRACK_CAPACITY - 1,
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            dropped: AtomicUsize::new(0),
+            writing: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            read_lock: Mutex::new(()),
+            wake_lock: Mutex::new(()),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn write(&self, frames: &[f32], state: &AtomicU8) {
+        if self
+            .writing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            self.dropped.fetch_add(frames.len(), Ordering::Relaxed);
+            return;
+        }
+
+        if state.load(Ordering::Acquire) != STATE_RECORDING {
+            self.writing.store(false, Ordering::Release);
+            return;
+        }
+
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        let used = head.wrapping_sub(tail);
+        if frames.len() <= TRACK_CAPACITY.saturating_sub(used) {
+            for (offset, sample) in frames.iter().enumerate() {
+                unsafe { *self.buffer[(head + offset) & self.mask].get() = *sample };
+            }
+            self.head
+                .store(head.wrapping_add(frames.len()), Ordering::Release);
+            self.wake.notify_one();
+        } else {
+            self.dropped.fetch_add(frames.len(), Ordering::Relaxed);
+        }
+        self.writing.store(false, Ordering::Release);
+    }
+
+    fn recv(&self) -> Option<AudioChunk> {
+        loop {
+            {
+                let _read = self
+                    .read_lock
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let tail = self.tail.load(Ordering::Relaxed);
+                let head = self.head.load(Ordering::Acquire);
+                let available = head.wrapping_sub(tail);
+                if available > 0 {
+                    let mut frames = Vec::with_capacity(available);
+                    for offset in 0..available {
+                        frames.push(unsafe { *self.buffer[(tail + offset) & self.mask].get() });
+                    }
+                    self.tail
+                        .store(tail.wrapping_add(available), Ordering::Release);
+                    return Some(AudioChunk { frames });
+                }
+            }
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+
+            let guard = self
+                .wake_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _ = self
+                .wake
+                .wait_timeout(guard, Duration::from_millis(100))
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    fn clear(&self) {
+        while self
+            .writing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            thread::yield_now();
+        }
+        let _read = self
+            .read_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.tail
+            .store(self.head.load(Ordering::Acquire), Ordering::Release);
+        self.writing.store(false, Ordering::Release);
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.wake.notify_all();
+    }
+}
+
+/// One interleaved float32 PCM track.
+pub struct AudioTrack {
+    sample_rate: f64,
+    channels: u32,
+    queue: Arc<TrackQueue>,
+}
+
+impl AudioTrack {
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+
+    /// Number of interleaved samples discarded because the bounded queue could not accept them.
+    pub fn dropped_samples(&self) -> usize {
+        self.queue.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Wait for the next chunk, or return `None` after the recording stops.
+    pub fn recv(&self) -> Option<AudioChunk> {
+        self.queue.recv()
+    }
+}
+
+struct TrackCallbackContext {
+    queue: Arc<TrackQueue>,
+    state: Arc<AtomicU8>,
+}
+
+struct CaptureCallbackContexts {
+    system_audio: Box<TrackCallbackContext>,
+    microphone: Option<Box<TrackCallbackContext>>,
+}
+
+static CAPTURE_CONTEXTS: Mutex<Option<CaptureCallbackContexts>> = Mutex::new(None);
+
 unsafe extern "C" fn audio_trampoline(
     frames: *const f32,
     frame_count: u32,
     channels: u32,
-    sample_rate: f64,
-    host_time_ns: u64,
-    _user_data: *mut c_void,
+    _sample_rate: f64,
+    _host_time_ns: u64,
+    user_data: *mut c_void,
 ) {
-    if frames.is_null() || frame_count == 0 {
+    if frames.is_null() || frame_count == 0 || user_data.is_null() {
+        return;
+    }
+    let context = &*(user_data as *const TrackCallbackContext);
+    if context.state.load(Ordering::Acquire) != STATE_RECORDING {
         return;
     }
     let len = frame_count as usize * channels.max(1) as usize;
-    let slice = std::slice::from_raw_parts(frames, len);
+    context
+        .queue
+        .write(slice::from_raw_parts(frames, len), &context.state);
+}
 
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Ok(mut guard) = AUDIO_HANDLER.try_lock() {
-            if let Some(handler) = guard.as_mut() {
-                handler(AudioBuffer {
-                    frames: slice,
-                    channels,
-                    sample_rate,
-                    host_time_ns,
-                });
+/// Owns both audio tracks and their shared recording lifecycle.
+#[must_use = "capture stops when this session is dropped"]
+pub struct CaptureSession {
+    system_audio: AudioTrack,
+    microphone: Option<AudioTrack>,
+    state: Arc<AtomicU8>,
+}
+
+impl CaptureSession {
+    pub fn system_audio(&self) -> &AudioTrack {
+        &self.system_audio
+    }
+
+    pub fn microphone(&self) -> Option<&AudioTrack> {
+        self.microphone.as_ref()
+    }
+
+    pub fn state(&self) -> CaptureState {
+        match self.state.load(Ordering::Acquire) {
+            STATE_PAUSED => CaptureState::Paused,
+            STATE_STOPPED => CaptureState::Stopped,
+            _ => CaptureState::Recording,
+        }
+    }
+
+    /// Discard incoming frames until [`CaptureSession::resume`] is called.
+    ///
+    /// Paused time is omitted from the recording; silence is not synthesized.
+    pub fn pause(&self) {
+        if self
+            .state
+            .compare_exchange(
+                STATE_RECORDING,
+                STATE_PAUSED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.system_audio.queue.clear();
+            if let Some(microphone) = &self.microphone {
+                microphone.queue.clear();
             }
         }
-    }));
-}
+    }
 
-/// What to capture.
-#[derive(Debug, Clone, Default)]
-pub struct CaptureOptions {
-    /// Specific processes.
-    pub pids: Vec<u32>,
-    /// Or the whole system mix. Records silence while output is muted, so prefer
-    /// `pids` or [`record`].
-    pub system_wide: bool,
-    /// Mono mixdown. Defaults to true via [`CaptureOptions::mono`].
-    pub stereo: bool,
-    /// Also silence the captured processes' own output.
-    pub mute_captured_output: bool,
-}
-
-/// Stops capture when dropped.
-#[must_use = "capture stops when this guard is dropped"]
-pub struct Capture {
-    pub sample_rate: f64,
-    pub channels: u32,
-}
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        unsafe { sys::mrec_stop() };
-        if let Ok(mut guard) = AUDIO_HANDLER.lock() {
-            *guard = None;
+    /// Resume delivering incoming frames.
+    pub fn resume(&self) {
+        if self.state.load(Ordering::Acquire) != STATE_PAUSED {
+            return;
         }
+        self.system_audio.queue.clear();
+        if let Some(microphone) = &self.microphone {
+            microphone.queue.clear();
+        }
+        let _ = self.state.compare_exchange(
+            STATE_PAUSED,
+            STATE_RECORDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// Stop both tracks. Dropping the session has the same effect.
+    pub fn stop(&self) {
+        if self.state.swap(STATE_STOPPED, Ordering::AcqRel) == STATE_STOPPED {
+            return;
+        }
+        unsafe { sys::mrec_stop() };
+        self.system_audio.queue.close();
+        if let Some(microphone) = &self.microphone {
+            microphone.queue.close();
+        }
+        *CAPTURE_CONTEXTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
     }
 }
 
-fn install_handler<F>(handler: F) -> Result<(), Error>
-where
-    F: FnMut(AudioBuffer<'_>) + Send + 'static,
-{
-    *AUDIO_HANDLER
-        .lock()
-        .map_err(|e| Error::Internal(e.to_string()))? = Some(Box::new(handler));
-    Ok(())
-}
-
-fn finish_start(status: i32) -> Result<Capture, Error> {
-    if status != sys::MREC_OK {
-        *AUDIO_HANDLER.lock().unwrap() = None;
-        check(status)?;
+impl Drop for CaptureSession {
+    fn drop(&mut self) {
+        self.stop();
     }
-    let mut sample_rate = 0.0f64;
-    let mut channels = 0u32;
-    unsafe { sys::mrec_current_format(&mut sample_rate, &mut channels) };
-    Ok(Capture {
-        sample_rate,
-        channels,
-    })
 }
 
-/// Capture specific processes, or the system mix.
-///
-/// The handler runs on a realtime audio thread: no allocation, locks, or I/O.
+fn resolve_process_target(pid: u32) -> Result<Vec<u32>, Error> {
+    if pid == 0 {
+        return Err(Error::Capture("process pid must be non-zero".to_owned()));
+    }
+
+    let mut meetings = [unsafe { mem::zeroed::<RawMeeting>() }; 16];
+    let mut count = 0usize;
+    unsafe { sys::mrec_scan(meetings.as_mut_ptr(), meetings.len(), &mut count) };
+
+    let mut resolved = meetings
+        .iter()
+        .take(count)
+        .find(|meeting| meeting.pid == pid)
+        .map(|meeting| {
+            meeting.audio_pids[..meeting.audio_pid_count.min(sys::MREC_MAX_AUDIO_PIDS)].to_vec()
+        })
+        .unwrap_or_default();
+    resolved.retain(|candidate| *candidate != 0);
+    if resolved.is_empty() {
+        resolved.push(pid);
+    }
+    Ok(resolved)
+}
+
+/// Capture one process target or the system mix.
 ///
 /// Blocks for up to six seconds while the permission grant is undetermined, so do
 /// not call from a UI thread.
-pub fn capture<F>(options: CaptureOptions, handler: F) -> Result<Capture, Error>
-where
-    F: FnMut(AudioBuffer<'_>) + Send + 'static,
-{
+fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<CaptureSession, Error> {
     if unsafe { sys::mrec_is_running() } != 0 {
         return Err(Error::AlreadyRunning);
     }
-    install_handler(handler)?;
+
+    let (pids, system_wide) = match target {
+        CaptureTarget::Process { pid } => (resolve_process_target(pid)?, false),
+        CaptureTarget::System => (Vec::new(), true),
+    };
+
+    let state = Arc::new(AtomicU8::new(STATE_RECORDING));
+    let system_queue = Arc::new(TrackQueue::new());
+    let microphone_queue = options.microphone.map(|_| Arc::new(TrackQueue::new()));
+    let mut contexts = CaptureCallbackContexts {
+        system_audio: Box::new(TrackCallbackContext {
+            queue: Arc::clone(&system_queue),
+            state: Arc::clone(&state),
+        }),
+        microphone: microphone_queue.as_ref().map(|queue| {
+            Box::new(TrackCallbackContext {
+                queue: Arc::clone(queue),
+                state: Arc::clone(&state),
+            })
+        }),
+    };
+    let system_context = (&mut *contexts.system_audio) as *mut TrackCallbackContext as *mut c_void;
+    let microphone_context = contexts
+        .microphone
+        .as_mut()
+        .map(|context| (&mut **context) as *mut TrackCallbackContext as *mut c_void)
+        .unwrap_or(ptr::null_mut());
+    let mut context_slot = CAPTURE_CONTEXTS
+        .lock()
+        .map_err(|error| Error::Internal(error.to_string()))?;
+    if context_slot.is_some() {
+        return Err(Error::AlreadyRunning);
+    }
+    *context_slot = Some(contexts);
+    drop(context_slot);
 
     let status = unsafe {
-        sys::mrec_start_raw(
-            if options.pids.is_empty() {
-                std::ptr::null()
+        sys::mrec_start_tracks_raw(
+            if pids.is_empty() {
+                ptr::null()
             } else {
-                options.pids.as_ptr()
+                pids.as_ptr()
             },
-            options.pids.len(),
-            options.system_wide as i32,
-            !options.stereo as i32,
-            options.mute_captured_output as i32,
+            pids.len(),
+            system_wide as i32,
+            options.mono as i32,
+            0,
+            match options.microphone {
+                Some(MicrophoneSource::Default) => 1,
+                None => 0,
+            },
             Some(audio_trampoline),
-            std::ptr::null_mut(),
+            system_context,
+            options
+                .microphone
+                .map(|_| audio_trampoline as RawAudioCallback),
+            microphone_context,
         )
     };
-    finish_start(status)
-}
-
-/// Capture a detected meeting, without handling pids.
-pub fn record<F>(meeting: &Meeting, handler: F) -> Result<Capture, Error>
-where
-    F: FnMut(AudioBuffer<'_>) + Send + 'static,
-{
-    if unsafe { sys::mrec_is_running() } != 0 {
-        return Err(Error::AlreadyRunning);
+    if status != sys::MREC_OK {
+        *CAPTURE_CONTEXTS.lock().unwrap() = None;
+        system_queue.close();
+        if let Some(queue) = &microphone_queue {
+            queue.close();
+        }
+        check(status)?;
     }
-    install_handler(handler)?;
-    let status =
-        unsafe { sys::mrec_start_meeting(&meeting.raw, Some(audio_trampoline), std::ptr::null_mut()) };
-    finish_start(status)
+
+    let mut system_sample_rate = 0.0f64;
+    let mut system_channels = 0u32;
+    let system_format_status =
+        unsafe { sys::mrec_current_format(&mut system_sample_rate, &mut system_channels) };
+    if let Err(error) = check(system_format_status) {
+        unsafe { sys::mrec_stop() };
+        system_queue.close();
+        if let Some(queue) = &microphone_queue {
+            queue.close();
+        }
+        *CAPTURE_CONTEXTS.lock().unwrap() = None;
+        return Err(error);
+    }
+    let microphone = if let Some(queue) = microphone_queue {
+        let mut sample_rate = 0.0f64;
+        let mut channels = 0u32;
+        let microphone_format_status =
+            unsafe { sys::mrec_current_microphone_format(&mut sample_rate, &mut channels) };
+        if let Err(error) = check(microphone_format_status) {
+            unsafe { sys::mrec_stop() };
+            system_queue.close();
+            queue.close();
+            *CAPTURE_CONTEXTS.lock().unwrap() = None;
+            return Err(error);
+        }
+        Some(AudioTrack {
+            sample_rate,
+            channels,
+            queue,
+        })
+    } else {
+        None
+    };
+
+    Ok(CaptureSession {
+        system_audio: AudioTrack {
+            sample_rate: system_sample_rate,
+            channels: system_channels,
+            queue: system_queue,
+        },
+        microphone,
+        state,
+    })
 }
 
-pub fn is_capturing() -> bool {
-    unsafe { sys::mrec_is_running() != 0 }
+fn capture_running() -> bool {
+    (unsafe { sys::mrec_is_running() != 0 })
+        || CAPTURE_CONTEXTS
+            .lock()
+            .map(|contexts| contexts.is_some())
+            .unwrap_or(true)
 }
 
-pub fn is_watching() -> bool {
+fn meetings_watching() -> bool {
     unsafe { sys::mrec_is_watching() != 0 }
+}
+
+pub mod meetings {
+    use super::{AudioProcess, Error, Meeting, MeetingEvent, Watcher};
+
+    /// Every live process doing audio IO.
+    pub fn audio_processes() -> Vec<AudioProcess> {
+        super::list_audio_processes()
+    }
+
+    /// Point-in-time scan, highest confidence first.
+    pub fn scan() -> Vec<Meeting> {
+        super::scan_meetings()
+    }
+
+    /// Watch for meetings starting, changing and ending.
+    ///
+    /// The handler runs on an internal serial queue, so it may allocate and block.
+    pub fn watch<F>(handler: F) -> Result<Watcher, Error>
+    where
+        F: FnMut(MeetingEvent, &Meeting) + Send + 'static,
+    {
+        super::watch_meetings(handler)
+    }
+
+    pub fn watching() -> bool {
+        super::meetings_watching()
+    }
+}
+
+pub mod capture {
+    use super::{CaptureOptions, CaptureSession, CaptureTarget, Error};
+
+    /// Start capturing one process target or the system mix.
+    pub fn start(target: CaptureTarget, options: CaptureOptions) -> Result<CaptureSession, Error> {
+        super::start_capture(target, options)
+    }
+
+    pub fn running() -> bool {
+        super::capture_running()
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use std::sync::atomic::AtomicU8;
+
+    use super::{TrackQueue, STATE_PAUSED, STATE_RECORDING};
+
+    #[test]
+    fn track_queue_delivers_interleaved_samples() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        queue.write(&[0.25, -0.5, 0.75], &state);
+        assert_eq!(queue.recv().unwrap().frames, [0.25, -0.5, 0.75]);
+        queue.close();
+        assert!(queue.recv().is_none());
+    }
+
+    #[test]
+    fn track_queue_drops_paused_samples() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_PAUSED);
+        queue.write(&[1.0], &state);
+        queue.close();
+        assert!(queue.recv().is_none());
+    }
+
+    #[test]
+    fn track_queue_clears_buffered_samples() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        queue.write(&[2.0], &state);
+        queue.clear();
+        queue.close();
+        assert!(queue.recv().is_none());
+    }
 }

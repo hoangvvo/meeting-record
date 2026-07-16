@@ -4,39 +4,35 @@
 //
 // Start some audio first.
 import { writeFileSync } from 'node:fs'
-import mrec from '../dist/index.js'
+import * as MeetingRecord from '../dist/index.js'
 
 const seconds = Number(process.argv[2] ?? 10)
 
-if (mrec.permissions.status('system-audio') !== 'granted') {
+if (MeetingRecord.permissions.status('system-audio') !== 'granted') {
   console.log('requesting system audio permission — approve the dialog')
-  const status = await mrec.permissions.request('system-audio')
+  const status = await MeetingRecord.permissions.request('system-audio')
   if (status !== 'granted') {
     console.error(`permission ${status}; cannot record`)
     process.exit(1)
   }
 }
 
-const playing = mrec.meetings.audioProcesses().filter((p) => p.isPlayingAudio)
-if (playing.length === 0) {
-  console.error('nothing is playing audio right now — start some audio and retry')
-  process.exit(1)
-}
-console.log(`recording: ${playing.map((p) => p.name).join(', ')}`)
+console.log('recording the system mix')
 
-const session = await mrec.capture.start({ pids: playing.map((p) => p.pid), mono: true })
-console.log(`format: ${session.sampleRate}Hz ${session.channels}ch`)
+const session = await MeetingRecord.capture.start({ type: 'system' })
+const track = session.systemAudio
+console.log(`format: ${track.sampleRate}Hz ${track.channels}ch`)
 
 const chunks = []
 let dropped = 0
-session.on('drop', (n) => (dropped += n))
-session.on('data', (chunk) => chunks.push(chunk))
+track.on('drop', (n) => (dropped += n))
+track.on('data', (chunk) => chunks.push(chunk))
 
 for (let i = seconds; i > 0; i--) {
   process.stdout.write(`\r${i}s remaining `)
   await new Promise((r) => setTimeout(r, 1000))
 }
-await session.stop()
+await session.stopRecording()
 process.stdout.write('\r                    \r')
 
 const pcm = Buffer.concat(chunks)
@@ -73,9 +69,9 @@ function wav(samples, sampleRate, channels) {
 }
 
 const file = `recording-${Date.now()}.wav`
-writeFileSync(file, wav(samples, session.sampleRate, session.channels))
+writeFileSync(file, wav(samples, track.sampleRate, track.channels))
 
-const duration = samples.length / session.channels / session.sampleRate
+const duration = samples.length / track.channels / track.sampleRate
 console.log(`wrote ${file}`)
 console.log(`  ${duration.toFixed(1)}s, peak ${peak.toFixed(3)}${dropped ? `, dropped ${dropped}` : ''}`)
 console.log(peak > 0.0001 ? `\nopen it:  open ${file}` : '\nsilent — is your output muted?')

@@ -27,6 +27,14 @@ static void *run_test(void *unused) {
     }
   }
 
+  if (mrec_microphone_permission_status() != MREC_PERM_GRANTED) {
+    mrec_request_microphone_permission();
+    for (int i = 0; i < 60; i++) {
+      if (mrec_microphone_permission_status() == MREC_PERM_GRANTED) break;
+      [NSThread sleepForTimeInterval:1.0];
+    }
+  }
+
   int rc = mrec_selftest_run();
   exit(rc);
 }

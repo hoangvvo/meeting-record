@@ -102,6 +102,33 @@ enum Permissions {
         }
         return 0
     }
+
+    static func microphoneStatus() -> Int32 {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return 1
+        case .denied, .restricted:
+            return 2
+        case .notDetermined:
+            return 0
+        @unknown default:
+            return 0
+        }
+    }
+
+    static func requestMicrophone() -> Int32 {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return 0
+        case .denied, .restricted:
+            return 0
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            return 0
+        @unknown default:
+            return -9
+        }
+    }
 }
 
 /// Only whether IO starts matters, not the samples.

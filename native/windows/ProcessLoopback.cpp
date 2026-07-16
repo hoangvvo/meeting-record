@@ -99,6 +99,11 @@ struct LoopbackStream {
   uint32_t channels = 0;
 };
 
+struct MicrophoneStream {
+  ComPtr<IAudioClient> client;
+  ComPtr<IAudioCaptureClient> capture;
+};
+
 class Session {
 public:
   static Session &Instance() {
@@ -107,21 +112,34 @@ public:
   }
 
   mrec_status Start(const uint32_t *pids, size_t pid_count, int32_t global_mixdown,
-                      int32_t mono, mrec_audio_callback cb, void *user_data) {
+                    int32_t mono, int32_t microphone,
+                    mrec_audio_callback system_callback,
+                    void *system_user_data,
+                    mrec_audio_callback microphone_callback,
+                    void *microphone_user_data) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (running_) {
       SetLastErrorMessage("capture already running");
       return MREC_ERR_ALREADY_RUNNING;
     }
 
-    std::vector<uint32_t> targets(pids, pids + pid_count);
+    std::vector<uint32_t> targets;
+    if (pids && pid_count > 0) targets.assign(pids, pids + pid_count);
     if (targets.empty() && !global_mixdown) {
       SetLastErrorMessage("no pids supplied and global_mixdown not set");
       return MREC_ERR_NO_PROCESSES;
     }
 
-    callback_ = cb;
-    user_data_ = user_data;
+    if (microphone != MREC_MICROPHONE_NONE &&
+        microphone != MREC_MICROPHONE_DEFAULT) {
+      SetLastErrorMessage("unknown microphone source");
+      return MREC_ERR_INTERNAL;
+    }
+
+    callback_ = system_callback;
+    user_data_ = system_user_data;
+    microphone_callback_ = microphone_callback;
+    microphone_user_data_ = microphone_user_data;
     channels_ = mono ? 1 : 2;
 
     /* One client per target process; pid 0 with EXCLUDE semantics is system-wide. */
@@ -144,6 +162,15 @@ public:
       }
     }
 
+    if (microphone == MREC_MICROPHONE_DEFAULT) {
+      auto stream = ActivateMicrophone();
+      if (!stream) {
+        streams_.clear();
+        return MREC_ERR_DEVICE_FAILED;
+      }
+      microphone_ = std::move(*stream);
+    }
+
     running_ = true;
     stop_requested_ = false;
     for (size_t i = 0; i < streams_.size(); i++) {
@@ -154,6 +181,15 @@ public:
         return MREC_ERR_IOPROC_FAILED;
       }
       workers_.emplace_back([this, i] { Drain(i); });
+    }
+    if (microphone_) {
+      HRESULT hr = microphone_->client->Start();
+      if (FAILED(hr)) {
+        SetLastErrorMessage(HResultMessage("microphone IAudioClient::Start", hr));
+        StopLocked();
+        return MREC_ERR_IOPROC_FAILED;
+      }
+      microphone_worker_ = std::thread([this] { DrainMicrophone(); });
     }
     SetLastErrorMessage("no error");
     return MREC_OK;
@@ -175,6 +211,14 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if (rate) *rate = kSampleRate;
     if (channels) *channels = channels_;
+  }
+
+  bool MicrophoneFormat(double *rate, uint32_t *channels) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_ || !microphone_) return false;
+    if (rate) *rate = kSampleRate;
+    if (channels) *channels = 1;
+    return true;
   }
 
 private:
@@ -254,6 +298,66 @@ private:
     return stream;
   }
 
+  std::optional<MicrophoneStream> ActivateMicrophone() {
+    HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                  CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+    if (FAILED(hr)) {
+      if (SUCCEEDED(initialized)) CoUninitialize();
+      SetLastErrorMessage(HResultMessage("create audio device enumerator", hr));
+      return std::nullopt;
+    }
+
+    ComPtr<IMMDevice> device;
+    hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
+    if (FAILED(hr)) {
+      if (SUCCEEDED(initialized)) CoUninitialize();
+      SetLastErrorMessage(HResultMessage("get default microphone", hr));
+      return std::nullopt;
+    }
+
+    MicrophoneStream stream;
+    hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                          reinterpret_cast<void **>(stream.client.GetAddressOf()));
+    if (FAILED(hr)) {
+      if (SUCCEEDED(initialized)) CoUninitialize();
+      SetLastErrorMessage(HResultMessage("activate default microphone", hr));
+      return std::nullopt;
+    }
+
+    WAVEFORMATEX format{};
+    format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    format.nChannels = 1;
+    format.nSamplesPerSec = kSampleRate;
+    format.wBitsPerSample = 32;
+    format.nBlockAlign = format.nChannels * format.wBitsPerSample / 8;
+    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+
+    constexpr REFERENCE_TIME kBufferDuration = 20 * 10000;
+    hr = stream.client->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        kBufferDuration, 0, &format, nullptr);
+    if (FAILED(hr)) {
+      if (SUCCEEDED(initialized)) CoUninitialize();
+      SetLastErrorMessage(HResultMessage("initialize default microphone", hr));
+      return std::nullopt;
+    }
+
+    hr = stream.client->GetService(
+        __uuidof(IAudioCaptureClient),
+        reinterpret_cast<void **>(stream.capture.GetAddressOf()));
+    if (SUCCEEDED(initialized)) CoUninitialize();
+    if (FAILED(hr)) {
+      SetLastErrorMessage(HResultMessage("get microphone capture client", hr));
+      return std::nullopt;
+    }
+    return stream;
+  }
+
   void Drain(size_t index) {
     /* Each drain thread needs its own COM apartment. */
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -275,8 +379,9 @@ private:
       if (frames > 0 && callback_ != nullptr) {
         /* SILENT means the buffer contents are undefined; emit zeros instead. */
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-          silence_.assign(static_cast<size_t>(frames) * stream.channels, 0.0f);
-          callback_(silence_.data(), frames, stream.channels, kSampleRate,
+          std::vector<float> silence(static_cast<size_t>(frames) * stream.channels,
+                                     0.0f);
+          callback_(silence.data(), frames, stream.channels, kSampleRate,
                     qpc * 100, user_data_);
         } else {
           callback_(reinterpret_cast<const float *>(data), frames, stream.channels,
@@ -288,18 +393,56 @@ private:
     CoUninitialize();
   }
 
+  void DrainMicrophone() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
+      UINT32 packet = 0;
+      if (!microphone_ ||
+          FAILED(microphone_->capture->GetNextPacketSize(&packet)) || packet == 0) {
+        Sleep(5);
+        continue;
+      }
+      BYTE *data = nullptr;
+      UINT32 frames = 0;
+      DWORD flags = 0;
+      UINT64 position = 0, qpc = 0;
+      if (FAILED(microphone_->capture->GetBuffer(&data, &frames, &flags, &position,
+                                                 &qpc))) {
+        continue;
+      }
+      if (frames > 0 && microphone_callback_ != nullptr) {
+        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+          std::vector<float> silence(frames, 0.0f);
+          microphone_callback_(silence.data(), frames, 1, kSampleRate, qpc * 100,
+                               microphone_user_data_);
+        } else {
+          microphone_callback_(reinterpret_cast<const float *>(data), frames, 1,
+                               kSampleRate, qpc * 100, microphone_user_data_);
+        }
+      }
+      microphone_->capture->ReleaseBuffer(frames);
+    }
+    CoUninitialize();
+  }
+
   void StopLocked() {
     stop_requested_ = true;
     for (auto &worker : workers_) {
       if (worker.joinable()) worker.join();
     }
     workers_.clear();
+    if (microphone_worker_.joinable()) microphone_worker_.join();
     for (auto &stream : streams_) {
       if (stream.client) stream.client->Stop();
     }
     streams_.clear();
+    if (microphone_ && microphone_->client) microphone_->client->Stop();
+    microphone_.reset();
     callback_ = nullptr;
     user_data_ = nullptr;
+    microphone_callback_ = nullptr;
+    microphone_user_data_ = nullptr;
     running_ = false;
   }
 
@@ -308,9 +451,12 @@ private:
   std::atomic<bool> stop_requested_{false};
   std::vector<LoopbackStream> streams_;
   std::vector<std::thread> workers_;
-  std::vector<float> silence_;
+  std::optional<MicrophoneStream> microphone_;
+  std::thread microphone_worker_;
   mrec_audio_callback callback_ = nullptr;
   void *user_data_ = nullptr;
+  mrec_audio_callback microphone_callback_ = nullptr;
+  void *microphone_user_data_ = nullptr;
   uint32_t channels_ = 1;
 };
 
@@ -327,6 +473,12 @@ mrec_permission mrec_audio_permission_status(void) {
 }
 
 mrec_status mrec_request_audio_permission(void) { return MREC_OK; }
+
+mrec_permission mrec_microphone_permission_status(void) {
+  return MREC_PERM_NOT_REQUIRED;
+}
+
+mrec_status mrec_request_microphone_permission(void) { return MREC_OK; }
 
 mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
                                           size_t *out_count) {
@@ -367,10 +519,21 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
                          int32_t global_mixdown, int32_t mono,
                          int32_t mute_captured_output,
                          mrec_audio_callback cb, void *user_data) {
+  return mrec_start_tracks_raw(
+      pids, pid_count, global_mixdown, mono, mute_captured_output,
+      MREC_MICROPHONE_NONE, cb, user_data, nullptr, nullptr);
+}
+
+int32_t mrec_start_tracks_raw(
+    const uint32_t *pids, size_t pid_count, int32_t global_mixdown, int32_t mono,
+    int32_t mute_captured_output, int32_t microphone,
+    mrec_audio_callback system_audio_cb, void *system_audio_user_data,
+    mrec_audio_callback microphone_cb, void *microphone_user_data) {
   /* Process loopback cannot mute the process it captures. */
   (void)mute_captured_output;
-  return Session::Instance().Start(pids, pid_count, global_mixdown, mono, cb,
-                                   user_data);
+  return Session::Instance().Start(
+      pids, pid_count, global_mixdown, mono, microphone, system_audio_cb,
+      system_audio_user_data, microphone_cb, microphone_user_data);
 }
 
 mrec_status mrec_stop(void) { return Session::Instance().Stop(); }
@@ -381,6 +544,13 @@ mrec_status mrec_current_format(double *sample_rate, uint32_t *channels) {
   if (!Session::Instance().running()) return MREC_ERR_NOT_RUNNING;
   Session::Instance().Format(sample_rate, channels);
   return MREC_OK;
+}
+
+mrec_status mrec_current_microphone_format(double *sample_rate,
+                                           uint32_t *channels) {
+  return Session::Instance().MicrophoneFormat(sample_rate, channels)
+             ? MREC_OK
+             : MREC_ERR_NOT_RUNNING;
 }
 
 const char *mrec_last_error(void) {

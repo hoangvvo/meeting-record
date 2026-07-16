@@ -1,8 +1,8 @@
 {
   "name": "meeting-record-monorepo",
   "private": true,
-  "description": "System-audio capture and meeting detection — monorepo root",
-  "workspaces": ["node"],
+  "description": "System-audio and microphone capture with meeting detection — monorepo root",
+  "workspaces": ["node", "apps/*"],
   "scripts": {
     "build:native": "./scripts/build-macos.sh",
     "build:node": "npm run build --workspace meeting-record",

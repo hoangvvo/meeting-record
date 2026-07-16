@@ -3,7 +3,7 @@
 //   node node/examples/watch.mjs
 //
 // Prints detection state as it changes. Needs no permission.
-import mrec from '../dist/index.js'
+import * as MeetingRecord from '../dist/index.js'
 
 const stamp = () => new Date().toLocaleTimeString()
 
@@ -24,26 +24,26 @@ function describe(m) {
 }
 
 console.log('meeting-record — live monitor')
-console.log(`accessibility: ${mrec.permissions.status('accessibility')} ` +
+console.log(`accessibility: ${MeetingRecord.permissions.status('accessibility')} ` +
             `(titles and URLs are blank without it)`)
-console.log('system audio:  ' + mrec.permissions.status('system-audio'))
+console.log('system audio:  ' + MeetingRecord.permissions.status('system-audio'))
 console.log('\nwatching. open or join a call. ctrl-c to stop.\n')
 
-const initial = mrec.meetings.scan()
+const initial = MeetingRecord.meetings.scan()
 if (initial.length === 0) {
   console.log('nothing detected right now')
 } else {
   for (const m of initial) console.log(`[${stamp()}] already active\n${describe(m)}\n`)
 }
 
-mrec.meetings.on('started', (m) => console.log(`[${stamp()}] STARTED\n${describe(m)}\n`))
-mrec.meetings.on('updated', (m) => console.log(`[${stamp()}] UPDATED\n${describe(m)}\n`))
-mrec.meetings.on('ended', (m) => console.log(`[${stamp()}] ENDED   ${m.platform}\n`))
-mrec.meetings.watch()
+MeetingRecord.meetings.on('started', (m) => console.log(`[${stamp()}] STARTED\n${describe(m)}\n`))
+MeetingRecord.meetings.on('updated', (m) => console.log(`[${stamp()}] UPDATED\n${describe(m)}\n`))
+MeetingRecord.meetings.on('ended', (m) => console.log(`[${stamp()}] ENDED   ${m.platform}\n`))
+MeetingRecord.meetings.watch()
 
 // The processes producing audio, which is what detection keys off.
 setInterval(() => {
-  const active = mrec.meetings
+  const active = MeetingRecord.meetings
     .audioProcesses()
     .filter((p) => p.isPlayingAudio || p.isUsingMic)
   if (active.length) {
@@ -55,7 +55,7 @@ setInterval(() => {
 }, 10_000)
 
 process.on('SIGINT', () => {
-  mrec.meetings.unwatch()
+  MeetingRecord.meetings.unwatch()
   console.log('\nstopped')
   process.exit(0)
 })

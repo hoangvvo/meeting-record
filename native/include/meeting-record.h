@@ -1,5 +1,5 @@
 /*
- * meeting-record — background system-audio capture for macOS and Windows.
+ * meeting-record — system-audio and microphone capture for macOS and Windows.
  *
  * One C ABI, two backends:
  *   macOS   : CoreAudio process taps (CATapDescription + private aggregate device)
@@ -18,7 +18,6 @@
 extern "C" {
 #endif
 
-/* ---- status codes ---------------------------------------------------- */
 typedef enum {
   MREC_OK = 0,
   MREC_ERR_UNSUPPORTED_OS = -1, /* macOS < 14.2 / Windows < 10 20348 */
@@ -33,7 +32,6 @@ typedef enum {
   MREC_ERR_BUFFER_TOO_SMALL = -10,
 } mrec_status;
 
-/* ---- permissions ----------------------------------------------------- */
 typedef enum {
   MREC_PERM_UNKNOWN = 0,
   MREC_PERM_GRANTED = 1,
@@ -62,7 +60,10 @@ mrec_permission mrec_audio_permission_status(void);
  */
 mrec_status mrec_request_audio_permission(void);
 
-/* ---- audio process enumeration --------------------------------------- */
+/* macOS microphone permission. Windows currently reports NOT_REQUIRED. */
+mrec_permission mrec_microphone_permission_status(void);
+mrec_status mrec_request_microphone_permission(void);
+
 /*
  * A process the OS knows is doing audio IO. `pid` is what you pass to
  * mrec_start(); `bundle_id` may be empty for helper processes.
@@ -79,7 +80,6 @@ typedef struct {
 mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
                                           size_t *out_count);
 
-/* ---- capture --------------------------------------------------------- */
 /*
  * Called on a realtime audio thread. `frames` is interleaved float32, valid only
  * for the duration of the call.
@@ -115,6 +115,21 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
                          int32_t mute_captured_output, mrec_audio_callback cb,
                          void *user_data);
 
+typedef enum {
+  MREC_MICROPHONE_NONE = 0,
+  MREC_MICROPHONE_DEFAULT = 1,
+} mrec_microphone_source;
+
+/*
+ * Extended entry point used by the Rust and Node bindings. System audio and the
+ * microphone remain separate tracks and may negotiate different formats.
+ */
+int32_t mrec_start_tracks_raw(
+    const uint32_t *pids, size_t pid_count, int32_t global_mixdown, int32_t mono,
+    int32_t mute_captured_output, int32_t microphone,
+    mrec_audio_callback system_audio_cb, void *system_audio_user_data,
+    mrec_audio_callback microphone_cb, void *microphone_user_data);
+
 static inline void mrec_config_defaults(mrec_config *cfg) {
   if (!cfg) return;
   cfg->pids = NULL;
@@ -141,6 +156,8 @@ int32_t mrec_is_running(void);
 
 /* Actual negotiated format, valid once running. */
 mrec_status mrec_current_format(double *sample_rate, uint32_t *channels);
+mrec_status mrec_current_microphone_format(double *sample_rate,
+                                               uint32_t *channels);
 
 /* Human-readable detail for the last failure. Never NULL. */
 const char *mrec_last_error(void);

@@ -1,40 +1,83 @@
 //! Record every meeting to a raw float32 file.
 //!
-//! The audio callback forwards into a channel; writing happens on another thread.
+//! Track data is drained on a writer thread so meeting detection stays responsive.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-fn main() -> Result<(), meeting_record::Error> {
-    if meeting_record::audio_permission() != meeting_record::Permission::Granted {
-        meeting_record::request_audio_permission();
+use meeting_record::{
+    capture, meetings, permissions, AudioTrack, CaptureOptions, CaptureTarget, Error, MeetingEvent,
+    MicrophoneSource, Permission, PermissionStatus,
+};
+
+fn write_track(track: &AudioTrack, path: &str) {
+    let mut output = BufWriter::new(File::create(path).unwrap());
+    while let Some(chunk) = track.recv() {
+        for sample in chunk.frames {
+            output.write_all(&sample.to_le_bytes()).unwrap();
+        }
+    }
+}
+
+fn main() -> Result<(), Error> {
+    if permissions::status(Permission::SystemAudio) != PermissionStatus::Granted {
+        permissions::request(Permission::SystemAudio)?;
         eprintln!("grant system audio recording, then rerun");
         return Ok(());
     }
+    if permissions::status(Permission::Microphone) != PermissionStatus::Granted {
+        permissions::request(Permission::Microphone)?;
+        eprintln!("grant microphone access, then rerun");
+        return Ok(());
+    }
 
-    let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    std::thread::spawn(move || {
-        let mut out = BufWriter::new(File::create("meeting.f32").unwrap());
-        while let Ok(chunk) = rx.recv() {
-            for sample in chunk {
-                out.write_all(&sample.to_le_bytes()).unwrap();
-            }
-        }
-    });
+    let _watcher = meetings::watch(move |event, meeting| {
+        if event == MeetingEvent::Started && meeting.should_record {
+            println!(
+                "recording {} ({})",
+                meeting.platform.as_str(),
+                meeting.app_name
+            );
+            match capture::start(
+                CaptureTarget::Process { pid: meeting.pid },
+                CaptureOptions {
+                    microphone: Some(MicrophoneSource::Default),
+                    ..CaptureOptions::default()
+                },
+            ) {
+                Ok(recording) => {
+                    let recording = Arc::new(recording);
+                    println!(
+                        "  system: {}Hz {}ch",
+                        recording.system_audio().sample_rate(),
+                        recording.system_audio().channels()
+                    );
+                    let microphone = recording.microphone().expect("microphone was requested");
+                    println!(
+                        "  microphone: {}Hz {}ch",
+                        microphone.sample_rate(),
+                        microphone.channels()
+                    );
 
-    let _watcher = meeting_record::watch(move |event, meeting| {
-        if event == meeting_record::MeetingEvent::Started && meeting.should_record {
-            println!("recording {} ({})", meeting.platform.as_str(), meeting.app_name);
-            let tx = tx.clone();
-            // Realtime thread.
-            match meeting_record::record(meeting, move |buffer| {
-                let _ = tx.send(buffer.frames.to_vec());
-            }) {
-                Ok(capture) => {
-                    println!("  {}Hz {}ch", capture.sample_rate, capture.channels);
-                    // Dropping the guard would stop capture.
-                    std::mem::forget(capture);
+                    let system_path = format!("{}-system.f32", meeting.platform.as_str());
+                    let system_recording = Arc::clone(&recording);
+                    thread::spawn(move || {
+                        write_track(system_recording.system_audio(), &system_path);
+                    });
+
+                    let microphone_path = format!("{}-microphone.f32", meeting.platform.as_str());
+                    let microphone_recording = Arc::clone(&recording);
+                    thread::spawn(move || {
+                        write_track(
+                            microphone_recording
+                                .microphone()
+                                .expect("microphone was requested"),
+                            &microphone_path,
+                        );
+                    });
                 }
                 Err(e) => eprintln!("  failed: {e}"),
             }
@@ -42,6 +85,6 @@ fn main() -> Result<(), meeting_record::Error> {
     })?;
 
     println!("watching for meetings; ctrl-c to stop");
-    std::thread::sleep(std::time::Duration::from_secs(3600));
+    thread::sleep(Duration::from_secs(3600));
     Ok(())
 }

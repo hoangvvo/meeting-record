@@ -31,8 +31,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-/* ---- catalog ---------------------------------------------------------- */
-
 struct NativeApp {
   const char *exe; /* lowercased executable name */
   mrec_platform platform;
@@ -118,8 +116,6 @@ mrec_platform PlatformForText(const std::string &text) {
   return MREC_PLATFORM_UNKNOWN;
 }
 
-/* ---- audio sessions --------------------------------------------------- */
-
 struct AudioActivity {
   bool rendering = false;
   bool capturing = false;
@@ -186,8 +182,6 @@ std::map<DWORD, AudioActivity> CollectAudioActivity() {
   return activity;
 }
 
-/* ---- window titles ---------------------------------------------------- */
-
 struct TitleSearch {
   DWORD pid;
   std::string title;
@@ -231,8 +225,6 @@ std::string ExecutableName(DWORD pid) {
   CloseHandle(process);
   return name;
 }
-
-/* ---- detection -------------------------------------------------------- */
 
 struct Detected {
   mrec_platform platform = MREC_PLATFORM_UNKNOWN;
@@ -338,8 +330,6 @@ void Fill(mrec_meeting *out, const Detected &d) {
                                   static_cast<uint64_t>(freq.QuadPart)
                             : 0;
 }
-
-/* ---- watcher ---------------------------------------------------------- */
 
 class Watcher {
 public:
@@ -481,6 +471,5 @@ const char *mrec_platform_id(mrec_platform platform) {
   }
   return "unknown";
 }
-
 
 } // extern "C"

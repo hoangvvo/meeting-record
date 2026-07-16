@@ -33,6 +33,10 @@ final class TapCapture {
         self.stateBox = stateBox
     }
 
+    deinit {
+        teardown()
+    }
+
     // MARK: - Lifecycle
 
     func start(pids: [pid_t],
@@ -192,6 +196,8 @@ enum CaptureError: Error {
     case deviceFailed(OSStatus)
     case ioProcFailed(OSStatus)
     case noProcesses
+    case microphonePermission
+    case microphoneFailed(String)
 
     var status: Int32 {
         switch self {
@@ -199,6 +205,8 @@ enum CaptureError: Error {
         case .deviceFailed: return -7   // MREC_ERR_DEVICE_FAILED
         case .ioProcFailed: return -8   // MREC_ERR_IOPROC_FAILED
         case .noProcesses: return -5    // MREC_ERR_NO_PROCESSES
+        case .microphonePermission: return -2
+        case .microphoneFailed: return -7
         }
     }
 
@@ -208,6 +216,8 @@ enum CaptureError: Error {
         case .deviceFailed(let e): return "aggregate device setup failed: \(fourCC(e))"
         case .ioProcFailed(let e): return "IOProc setup failed: \(fourCC(e))"
         case .noProcesses: return "none of the requested pids are doing audio IO"
+        case .microphonePermission: return "microphone permission is not granted"
+        case .microphoneFailed(let message): return "microphone setup failed: \(message)"
         }
     }
 

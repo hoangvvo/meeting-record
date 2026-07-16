@@ -14,8 +14,6 @@ pub const MREC_ERR_NO_PROCESSES: i32 = -5;
 pub const MREC_ERR_TAP_FAILED: i32 = -6;
 pub const MREC_ERR_DEVICE_FAILED: i32 = -7;
 pub const MREC_ERR_IOPROC_FAILED: i32 = -8;
-pub const MREC_ERR_INTERNAL: i32 = -9;
-pub const MREC_ERR_BUFFER_TOO_SMALL: i32 = -10;
 
 pub const MREC_MAX_AUDIO_PIDS: usize = 16;
 
@@ -44,16 +42,6 @@ pub struct Process {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Config {
-    pub pids: *const u32,
-    pub pid_count: usize,
-    pub global_mixdown: i32,
-    pub mono: i32,
-    pub mute_captured_output: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 pub struct Meeting {
     pub platform: i32,
     pub pid: u32,
@@ -72,6 +60,8 @@ pub struct Meeting {
 extern "C" {
     pub fn mrec_audio_permission_status() -> c_int;
     pub fn mrec_request_audio_permission() -> c_int;
+    pub fn mrec_microphone_permission_status() -> c_int;
+    pub fn mrec_request_microphone_permission() -> c_int;
     pub fn mrec_accessibility_permission_status() -> c_int;
     pub fn mrec_request_accessibility_permission() -> c_int;
 
@@ -81,31 +71,81 @@ extern "C" {
         out_count: *mut usize,
     ) -> c_int;
 
-    /// `mrec_start` is `static inline`, so only this is a real symbol.
-    pub fn mrec_start_raw(
+    pub fn mrec_start_tracks_raw(
         pids: *const u32,
         pid_count: usize,
         global_mixdown: i32,
         mono: i32,
         mute_captured_output: i32,
-        cb: Option<AudioCallback>,
-        user_data: *mut c_void,
+        microphone: i32,
+        system_audio_cb: Option<AudioCallback>,
+        system_audio_user_data: *mut c_void,
+        microphone_cb: Option<AudioCallback>,
+        microphone_user_data: *mut c_void,
     ) -> i32;
-
-    pub fn mrec_start_meeting(
-        meeting: *const Meeting,
-        cb: Option<AudioCallback>,
-        user_data: *mut c_void,
-    ) -> c_int;
 
     pub fn mrec_stop() -> c_int;
     pub fn mrec_is_running() -> i32;
     pub fn mrec_current_format(sample_rate: *mut c_double, channels: *mut u32) -> c_int;
+    pub fn mrec_current_microphone_format(sample_rate: *mut c_double, channels: *mut u32) -> c_int;
     pub fn mrec_last_error() -> *const c_char;
 
     pub fn mrec_scan(out: *mut Meeting, capacity: usize, out_count: *mut usize) -> c_int;
     pub fn mrec_watch_start(cb: Option<MeetingCallback>, user_data: *mut c_void) -> c_int;
     pub fn mrec_watch_stop() -> c_int;
     pub fn mrec_is_watching() -> i32;
-    pub fn mrec_platform_id(platform: i32) -> *const c_char;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem;
+
+    use super::{Meeting, Process};
+
+    #[test]
+    fn meeting_layout_matches_header() {
+        assert_eq!(mem::size_of::<Meeting>(), 1768, "sizeof(mrec_meeting)");
+        assert_eq!(mem::align_of::<Meeting>(), 8);
+
+        let meeting = unsafe { mem::zeroed::<Meeting>() };
+        let base = &meeting as *const _ as usize;
+        let offset = |field: *const _| field as usize - base;
+
+        assert_eq!(offset(&meeting.platform as *const _ as *const u8), 0);
+        assert_eq!(offset(&meeting.pid as *const _ as *const u8), 4);
+        assert_eq!(offset(&meeting.audio_pids as *const _ as *const u8), 8);
+        assert_eq!(
+            offset(&meeting.audio_pid_count as *const _ as *const u8),
+            72
+        );
+        assert_eq!(offset(&meeting.app_name as *const _ as *const u8), 80);
+        assert_eq!(offset(&meeting.title as *const _ as *const u8), 208);
+        assert_eq!(offset(&meeting.url as *const _ as *const u8), 720);
+        assert_eq!(offset(&meeting.is_using_mic as *const _ as *const u8), 1744);
+        assert_eq!(
+            offset(&meeting.is_playing_audio as *const _ as *const u8),
+            1748
+        );
+        assert_eq!(offset(&meeting.confidence as *const _ as *const u8), 1752);
+        assert_eq!(
+            offset(&meeting.should_record as *const _ as *const u8),
+            1756
+        );
+        assert_eq!(
+            offset(&meeting.detected_at_ns as *const _ as *const u8),
+            1760
+        );
+    }
+
+    #[test]
+    fn process_layout_matches_header() {
+        assert_eq!(mem::size_of::<Process>(), 524);
+        let process = unsafe { mem::zeroed::<Process>() };
+        let base = &process as *const _ as usize;
+        assert_eq!(&process.pid as *const _ as usize - base, 0);
+        assert_eq!(&process.is_running_output as *const _ as usize - base, 4);
+        assert_eq!(&process.is_running_input as *const _ as usize - base, 8);
+        assert_eq!(&process.bundle_id as *const _ as usize - base, 12);
+        assert_eq!(&process.name as *const _ as usize - base, 268);
+    }
 }

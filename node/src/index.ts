@@ -1,8 +1,8 @@
 /**
- * meeting-record — system-audio capture and meeting detection.
+ * meeting-record — system-audio and microphone capture with meeting detection.
  *
- * Wraps the native addon so callers never see pids, status codes, or the realtime
- * callback. The addon itself is not re-exported.
+ * Wraps the native addon so callers never see helper-process pids, status codes,
+ * or the realtime callback. The addon itself is not re-exported.
  */
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
@@ -11,7 +11,7 @@ import { createRequire } from 'node:module'
 // Native addons cannot be imported under ESM. Resolved relative to dist/index.js.
 const native = createRequire(import.meta.url)('../build/Release/meeting_record.node')
 
-export type Permission = 'system-audio' | 'accessibility'
+export type Permission = 'system-audio' | 'microphone' | 'accessibility'
 export type PermissionStatus = 'granted' | 'denied' | 'unknown' | 'not-required'
 
 /**
@@ -31,7 +31,7 @@ export type Platform =
 
 export interface Meeting {
   readonly platform: Platform
-  /** The application the user sees. Not necessarily where the audio comes from. */
+  /** The visible app. Use it in `CaptureTarget` when starting capture. */
   readonly pid: number
   readonly appName: string
   /** Requires the accessibility permission; empty string otherwise. */
@@ -53,31 +53,77 @@ export interface AudioProcess {
   readonly isUsingMic: boolean
 }
 
+export type CaptureTarget =
+  | {
+      /** A detected meeting's app pid, or any audio-producing process pid. */
+      type: 'process'
+      pid: number
+    }
+  | {
+      /** The whole system mix. Records silence while output is muted. */
+      type: 'system'
+    }
+
+export type MicrophoneSource = 'default'
+
 export interface CaptureOptions {
-  /** Record the processes this meeting is using. */
-  meeting?: Meeting
-  /** Or specific processes. */
-  pids?: number[]
-  /** Or the whole system mix. Records silence while output is muted. */
-  systemWide?: boolean
-  /** Default true. */
+  /** Mono mixdown for system audio. Default true. */
   mono?: boolean
+  /** Capture the default microphone as a separate track. Default off. */
+  microphone?: MicrophoneSource
 }
 
 export class MeetingRecordError extends Error {
   constructor(message: string, readonly code: number) {
     super(message)
-    this.name = 'MeetingRecordError'
+    this.name = new.target.name
   }
 }
 
-/* ---- permissions ------------------------------------------------------- */
+export class UnsupportedOsError extends MeetingRecordError {}
+export class PermissionError extends MeetingRecordError {}
+export class AlreadyRunningError extends MeetingRecordError {}
+export class CaptureError extends MeetingRecordError {}
+export class InternalError extends MeetingRecordError {}
+
+function errorFromStatus(message: string, code: number): MeetingRecordError {
+  switch (code) {
+    case -1:
+      return new UnsupportedOsError(message, code)
+    case -2:
+      return new PermissionError(message, code)
+    case -3:
+      return new AlreadyRunningError(message, code)
+    case -4:
+    case -5:
+    case -6:
+    case -7:
+    case -8:
+      return new CaptureError(message, code)
+    default:
+      return new InternalError(message, code)
+  }
+}
+
+function asLibraryError(error: unknown): Error {
+  if (error instanceof TypeError) return error
+  const message = error instanceof Error ? error.message : String(error)
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'number' ? errorFromStatus(message, code) : new InternalError(message, -9)
+}
 
 export const permissions = {
   status(permission: Permission): PermissionStatus {
-    return permission === 'accessibility'
-      ? native.accessibilityPermissionStatus()
-      : native.audioPermissionStatus()
+    if (
+      permission !== 'system-audio' &&
+      permission !== 'microphone' &&
+      permission !== 'accessibility'
+    ) {
+      throw new TypeError(`unknown permission: ${String(permission)}`)
+    }
+    if (permission === 'accessibility') return native.accessibilityPermissionStatus()
+    if (permission === 'microphone') return native.microphonePermissionStatus()
+    return native.audioPermissionStatus()
   },
 
   /**
@@ -94,11 +140,18 @@ export const permissions = {
     if (current === 'granted' || current === 'not-required') return current
 
     if (permission === 'accessibility') {
-      native.requestAccessibilityPermission()
+      const status = native.requestAccessibilityPermission()
+      if (status !== 0) throw errorFromStatus('failed to request accessibility permission', status)
       return permissions.status(permission)
     }
 
-    native.requestAudioPermission()
+    const requestStatus =
+      permission === 'microphone'
+        ? native.requestMicrophonePermission()
+        : native.requestAudioPermission()
+    if (requestStatus !== 0) {
+      throw errorFromStatus(`failed to request ${permission} permission`, requestStatus)
+    }
 
     // The dialog is modal to the user, not to this process.
     const deadline = Date.now() + timeoutMs
@@ -111,29 +164,8 @@ export const permissions = {
   },
 }
 
-/* ---- meeting detection ------------------------------------------------- */
-
-/** Kept off the public `Meeting` type: callers pass the meeting object back. */
-const audioPidsOf = new WeakMap<Meeting, number[]>()
-
 function toMeeting(raw: any): Meeting {
-  const { _audioPids, platformCode, ...rest } = raw
-  const meeting = rest as Meeting
-  // Needed to hand the meeting back to the C layer, but not part of the public shape.
-  Object.defineProperty(meeting, '__platformCode', {
-    value: platformCode,
-    enumerable: false,
-  })
-  audioPidsOf.set(meeting, _audioPids ?? [])
-  return meeting
-}
-
-function toNative(meeting: Meeting): any {
-  return {
-    platformCode: (meeting as any).__platformCode ?? 0,
-    pid: meeting.pid,
-    _audioPids: audioPidsOf.get(meeting) ?? [],
-  }
+  return raw as Meeting
 }
 
 export interface MeetingEvents {
@@ -154,7 +186,7 @@ class Meetings extends EventEmitter {
     const status = native.watchStart((event: keyof MeetingEvents, raw: any) => {
       this.emit(event, toMeeting(raw))
     })
-    if (status !== 0) throw new MeetingRecordError('failed to start watching', status)
+    if (status !== 0) throw errorFromStatus('failed to start watching', status)
   }
 
   unwatch(): void {
@@ -177,111 +209,202 @@ export const meetings = new Meetings() as Meetings & {
   off<E extends keyof MeetingEvents>(event: E, listener: MeetingEvents[E]): Meetings
 }
 
-/* ---- capture ----------------------------------------------------------- */
-
 /**
  * Interleaved float32 PCM.
  *
- * A stream rather than an event: the underlying callback runs on a realtime thread
- * and does not wait for a slow consumer. If the stream is not read, the native ring
- * buffer overwrites its oldest samples and emits `drop`.
+ * The native callback never waits for a slow consumer. If this stream is not read,
+ * its preallocated ring buffer drops samples and emits `drop`.
  */
-export class CaptureSession extends Readable {
-  constructor(
-    readonly sampleRate: number,
-    readonly channels: number,
-  ) {
+export type CaptureState = 'recording' | 'paused' | 'stopped'
+
+export interface AudioTrack extends Readable {
+  readonly sampleRate: number
+  readonly channels: number
+  /** Interleaved samples discarded because the bounded queue could not accept them. */
+  readonly droppedSamples: number
+}
+
+export interface CaptureSession {
+  readonly systemAudio: AudioTrack
+  readonly microphone?: AudioTrack
+  readonly state: CaptureState
+  pauseRecording(): void
+  resumeRecording(): void
+  stopRecording(): Promise<void>
+}
+
+class AudioTrackImpl extends Readable implements AudioTrack {
+  readonly #sampleRate: number
+  readonly #channels: number
+  #droppedSamples = 0
+
+  constructor(sampleRate: number, channels: number) {
     super({ objectMode: false, highWaterMark: 1 << 20 })
+    this.#sampleRate = sampleRate
+    this.#channels = channels
   }
 
   /** Required by Readable; data arrives from the native side, not on demand. */
   override _read(): void {}
 
-  async stop(): Promise<void> {
-    native.captureStop()
+  get sampleRate(): number {
+    return this.#sampleRate
+  }
+
+  get channels(): number {
+    return this.#channels
+  }
+
+  get droppedSamples(): number {
+    return this.#droppedSamples
+  }
+
+  pushAudio(chunk: Buffer, dropped: number): void {
+    if (dropped > 0) {
+      this.#droppedSamples += dropped
+      this.emit('drop', dropped)
+    }
+    this.push(chunk)
+  }
+
+  finish(): void {
     this.push(null)
   }
 }
 
-export const capture = {
-  async start(options: CaptureOptions = {}): Promise<CaptureSession> {
-    let session: CaptureSession | undefined
-    let pendingDrops = 0
+class CaptureSessionImpl implements CaptureSession {
+  #state: CaptureState = 'recording'
+  readonly #systemAudio: AudioTrackImpl
+  readonly #microphone?: AudioTrackImpl
 
-    const onData = (chunk: Buffer, info: { dropped: number }) => {
-      if (info.dropped > 0) {
-        pendingDrops += info.dropped
-        session?.emit('drop', info.dropped)
+  constructor(systemAudio: AudioTrackImpl, microphone?: AudioTrackImpl) {
+    this.#systemAudio = systemAudio
+    this.#microphone = microphone
+  }
+
+  get systemAudio(): AudioTrackImpl {
+    return this.#systemAudio
+  }
+
+  get microphone(): AudioTrackImpl | undefined {
+    return this.#microphone
+  }
+
+  get state(): CaptureState {
+    return this.#state
+  }
+
+  pauseRecording(): void {
+    if (this.#state === 'stopped') return
+    if (this.#state !== 'paused') {
+      native.capturePause()
+      this.#state = 'paused'
+    }
+  }
+
+  resumeRecording(): void {
+    if (this.#state === 'stopped') return
+    if (this.#state !== 'recording') {
+      native.captureResume()
+      this.#state = 'recording'
+    }
+  }
+
+  async stopRecording(): Promise<void> {
+    if (this.#state === 'stopped') return
+    native.captureStop()
+    this.#state = 'stopped'
+    this.systemAudio.finish()
+    this.microphone?.finish()
+  }
+}
+
+let captureStarting = false
+
+export const capture = {
+  async start(
+    target: CaptureTarget,
+    options: CaptureOptions = {},
+  ): Promise<CaptureSession> {
+    if (captureStarting || native.isRunning()) {
+      throw new AlreadyRunningError('capture already running', -3)
+    }
+    captureStarting = true
+    let session: CaptureSessionImpl | undefined
+    const pendingSystemAudio: Array<{ chunk: Buffer; dropped: number }> = []
+    const pendingMicrophone: Array<{ chunk: Buffer; dropped: number }> = []
+
+    const receive = (
+      track: 'systemAudio' | 'microphone',
+      pending: Array<{ chunk: Buffer; dropped: number }>,
+      chunk: Buffer,
+      info: { dropped: number },
+    ) => {
+      if (!session) {
+        pending.push({ chunk, dropped: info.dropped })
+        return
       }
-      // The native ring buffer, not this stream, absorbs a slow consumer.
-      session?.push(chunk)
+      if (session.state !== 'recording') return
+      session[track]?.pushAudio(chunk, info.dropped)
     }
 
-    const nativeOptions = {
-      ...options,
-      meeting: options.meeting ? toNative(options.meeting) : undefined,
+    const onSystemAudio = (chunk: Buffer, info: { dropped: number }) => {
+      receive('systemAudio', pendingSystemAudio, chunk, info)
+    }
+    const onMicrophone = (chunk: Buffer, info: { dropped: number }) => {
+      receive('microphone', pendingMicrophone, chunk, info)
     }
 
     try {
-      const format = await native.captureStart(nativeOptions, onData)
-      session = new CaptureSession(format.sampleRate, format.channels)
-      if (pendingDrops > 0) session.emit('drop', pendingDrops)
+      let nativeTarget: { pid: number } | { systemWide: true }
+      if (target.type === 'process') {
+        if (!Number.isInteger(target.pid) || target.pid <= 0) {
+          throw new TypeError('process pid must be a positive integer')
+        }
+        nativeTarget = { pid: target.pid }
+      } else if (target.type === 'system') {
+        nativeTarget = { systemWide: true }
+      } else {
+        throw new TypeError(`unknown capture target: ${(target as any).type}`)
+      }
+      if (options.mono !== undefined && typeof options.mono !== 'boolean') {
+        throw new TypeError('mono must be a boolean')
+      }
+      if (options.microphone !== undefined && options.microphone !== 'default') {
+        throw new TypeError('microphone must be "default"')
+      }
+      const formats = await native.captureStart(
+        {
+          ...nativeTarget,
+          mono: options.mono ?? true,
+          microphone: options.microphone === 'default',
+        },
+        onSystemAudio,
+        onMicrophone,
+      )
+      const systemAudio = new AudioTrackImpl(
+        formats.systemAudio.sampleRate,
+        formats.systemAudio.channels,
+      )
+      const microphone = formats.microphone
+        ? new AudioTrackImpl(formats.microphone.sampleRate, formats.microphone.channels)
+        : undefined
+      session = new CaptureSessionImpl(systemAudio, microphone)
+      for (const { chunk, dropped } of pendingSystemAudio) {
+        systemAudio.pushAudio(chunk, dropped)
+      }
+      for (const { chunk, dropped } of pendingMicrophone) {
+        microphone?.pushAudio(chunk, dropped)
+      }
       return session
-    } catch (error: any) {
-      throw new MeetingRecordError(error.message ?? String(error), error.code ?? -9)
+    } catch (error) {
+      throw asLibraryError(error)
+    } finally {
+      captureStarting = false
     }
   },
 
   get running(): boolean {
-    return native.isRunning()
+    return captureStarting || native.isRunning()
   },
 }
-
-/* ---- convenience ------------------------------------------------------- */
-
-export interface AutoRecordOptions {
-  /** Called when a meeting that should be recorded starts. */
-  onStart: (session: CaptureSession, meeting: Meeting) => void
-  onStop?: (meeting: Meeting) => void
-  onError?: (error: Error, meeting: Meeting) => void
-  /** Overrides `meeting.shouldRecord`. */
-  shouldRecord?: (meeting: Meeting) => boolean
-}
-
-/** Record every meeting automatically. */
-export function autoRecord(options: AutoRecordOptions): { stop(): void } {
-  const active = new Map<number, Meeting>()
-
-  const onStarted = async (meeting: Meeting) => {
-    const wanted = options.shouldRecord?.(meeting) ?? meeting.shouldRecord
-    if (!wanted || capture.running) return
-    try {
-      const session = await capture.start({ meeting })
-      active.set(meeting.pid, meeting)
-      options.onStart(session, meeting)
-    } catch (error) {
-      options.onError?.(error as Error, meeting)
-    }
-  }
-
-  const onEnded = async (meeting: Meeting) => {
-    if (!active.delete(meeting.pid)) return
-    if (capture.running) native.captureStop()
-    options.onStop?.(meeting)
-  }
-
-  meetings.on('started', onStarted)
-  meetings.on('ended', onEnded)
-  meetings.watch()
-
-  return {
-    stop() {
-      meetings.off('started', onStarted)
-      meetings.off('ended', onEnded)
-      meetings.unwatch()
-      if (capture.running) native.captureStop()
-    },
-  }
-}
-
-export default { permissions, meetings, capture, autoRecord }

@@ -2,8 +2,8 @@
  * End-to-end check: enumerate audio processes, capture the ones playing, report
  * how much non-silent PCM arrived.
  *
- * Requires a signed .app bundle with NSAudioCaptureUsageDescription and a running
- * NSApplication (see selftest_main.m).
+ * Requires a signed .app bundle with audio and microphone usage descriptions and
+ * a running NSApplication (see selftest_main.m).
  */
 #include "meeting-record.h"
 
@@ -13,29 +13,46 @@
 #include <string.h>
 #include <unistd.h>
 
-static struct {
+struct metrics {
   unsigned long long frames;
   double peak;
   double sum_squares;
   unsigned long long samples;
   double sample_rate;
   unsigned channels;
-} g;
+};
+
+static struct metrics g_system;
+static struct metrics g_microphone;
+
+static void update_metrics(struct metrics *metrics, const float *frames,
+                           uint32_t frame_count, uint32_t channels,
+                           double sample_rate) {
+  metrics->frames += frame_count;
+  metrics->sample_rate = sample_rate;
+  metrics->channels = channels;
+  size_t n = (size_t)frame_count * channels;
+  for (size_t i = 0; i < n; i++) {
+    double v = fabs((double)frames[i]);
+    if (v > metrics->peak) metrics->peak = v;
+    metrics->sum_squares += v * v;
+    metrics->samples++;
+  }
+}
 
 static void on_audio(const float *frames, uint32_t frame_count, uint32_t channels,
                      double sample_rate, uint64_t host_time_ns, void *user_data) {
   (void)host_time_ns;
   (void)user_data;
-  g.frames += frame_count;
-  g.sample_rate = sample_rate;
-  g.channels = channels;
-  size_t n = (size_t)frame_count * channels;
-  for (size_t i = 0; i < n; i++) {
-    double v = fabs((double)frames[i]);
-    if (v > g.peak) g.peak = v;
-    g.sum_squares += v * v;
-    g.samples++;
-  }
+  update_metrics(&g_system, frames, frame_count, channels, sample_rate);
+}
+
+static void on_microphone(const float *frames, uint32_t frame_count,
+                          uint32_t channels, double sample_rate,
+                          uint64_t host_time_ns, void *user_data) {
+  (void)host_time_ns;
+  (void)user_data;
+  update_metrics(&g_microphone, frames, frame_count, channels, sample_rate);
 }
 
 int mrec_selftest_run(void) {
@@ -45,6 +62,8 @@ int mrec_selftest_run(void) {
 
   fprintf(log, "permission status: %d (1=granted 2=denied 0=unknown)\n",
           mrec_audio_permission_status());
+  fprintf(log, "microphone permission: %d (1=granted 2=denied 0=unknown)\n",
+          mrec_microphone_permission_status());
 
   static mrec_process procs[128];
   size_t count = 0;
@@ -98,8 +117,11 @@ int mrec_selftest_run(void) {
   }
   /* NULL pids captures every actively-playing process. */
 
-  st = mrec_start(&cfg, on_audio, NULL);
-  fprintf(log, "mrec_start -> %d (%s)\n", st, mrec_last_error());
+  st = (mrec_status)mrec_start_tracks_raw(
+      cfg.pids, cfg.pid_count, cfg.global_mixdown, cfg.mono,
+      cfg.mute_captured_output, MREC_MICROPHONE_DEFAULT, on_audio, NULL,
+      on_microphone, NULL);
+  fprintf(log, "mrec_start_tracks_raw -> %d (%s)\n", st, mrec_last_error());
   if (st != MREC_OK) {
     fclose(log);
     return 2;
@@ -108,24 +130,44 @@ int mrec_selftest_run(void) {
   double rate = 0;
   uint32_t ch = 0;
   mrec_current_format(&rate, &ch);
-  fprintf(log, "negotiated format: %.0f Hz, %u ch, running=%d\n", rate, ch,
+  fprintf(log, "system format: %.0f Hz, %u ch, running=%d\n", rate, ch,
           mrec_is_running());
+  mrec_current_microphone_format(&rate, &ch);
+  fprintf(log, "microphone format: %.0f Hz, %u ch\n", rate, ch);
 
-  for (int s = 1; s <= 6; s++) {
-    sleep(1);
-    fprintf(log, "  t=%ds frames=%llu peak=%.6f\n", s, g.frames, g.peak);
-  }
+  fprintf(log, "capturing for 6 seconds; play audio and speak now\n");
+  sleep(6);
 
   fprintf(log, "mrec_stop -> %d\n", mrec_stop());
 
-  double rms = g.samples ? sqrt(g.sum_squares / (double)g.samples) : 0.0;
-  double seconds = g.sample_rate > 0 ? (double)g.frames / g.sample_rate : 0.0;
-  fprintf(log, "RESULT frames=%llu seconds=%.2f channels=%u peak=%.6f rms=%.6f\n",
-          g.frames, seconds, g.channels, g.peak, rms);
-  fprintf(log, "VERDICT %s\n",
-          (g.frames > 0 && g.peak > 0.0) ? "PASS (real audio captured)"
-                                         : (g.frames > 0 ? "FRAMES BUT SILENT"
-                                                         : "NO FRAMES"));
+  double system_rms = g_system.samples
+                          ? sqrt(g_system.sum_squares / (double)g_system.samples)
+                          : 0.0;
+  double system_seconds = g_system.sample_rate > 0
+                              ? (double)g_system.frames / g_system.sample_rate
+                              : 0.0;
+  double microphone_rms = g_microphone.samples
+                              ? sqrt(g_microphone.sum_squares /
+                                     (double)g_microphone.samples)
+                              : 0.0;
+  double microphone_seconds =
+      g_microphone.sample_rate > 0
+          ? (double)g_microphone.frames / g_microphone.sample_rate
+          : 0.0;
+  fprintf(log, "SYSTEM frames=%llu seconds=%.2f channels=%u peak=%.6f rms=%.6f\n",
+          g_system.frames, system_seconds, g_system.channels, g_system.peak,
+          system_rms);
+  fprintf(log, "MICROPHONE frames=%llu seconds=%.2f channels=%u peak=%.6f rms=%.6f\n",
+          g_microphone.frames, microphone_seconds, g_microphone.channels,
+          g_microphone.peak, microphone_rms);
+  fprintf(log, "SYSTEM VERDICT %s\n",
+          (g_system.frames > 0 && g_system.peak > 0.0)
+              ? "PASS (real audio captured)"
+              : (g_system.frames > 0 ? "FRAMES BUT SILENT" : "NO FRAMES"));
+  fprintf(log, "MICROPHONE VERDICT %s\n",
+          (g_microphone.frames > 0 && g_microphone.peak > 0.0)
+              ? "PASS (speak during the test)"
+              : (g_microphone.frames > 0 ? "FRAMES BUT SILENT" : "NO FRAMES"));
   fclose(log);
   return 0;
 }

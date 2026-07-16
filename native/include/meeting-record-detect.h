@@ -96,8 +96,6 @@ mrec_status mrec_scan(mrec_meeting *out, size_t capacity,
 mrec_status mrec_start_meeting(const mrec_meeting *meeting, mrec_audio_callback cb,
                                void *user_data);
 
-/* ---- event-driven watching -------------------------------------------- */
-
 typedef enum {
   MREC_MEETING_STARTED = 0,
   MREC_MEETING_UPDATED = 1, /* title changed, mic toggled, ... */
@@ -121,7 +119,6 @@ mrec_status mrec_watch_start(mrec_meeting_callback cb,
 mrec_status mrec_watch_stop(void);
 int32_t mrec_is_watching(void);
 
-/* ---- Accessibility permission (macOS) --------------------------------- */
 /*
  * Needed only for titles, URLs and participants, never for deciding whether to
  * record. Backed by AXIsProcessTrusted, so this is a real preflight check.
