@@ -38,6 +38,12 @@ swiftc -O -o "$BUILD/catalog_test" \
   "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses}.swift
 "$BUILD/catalog_test" | tail -2
 
+echo "==> tap description tests"
+swiftc -O -parse-as-library -o "$BUILD/tap_description_test" \
+  "$ROOT/native/tests/tap_description_test.swift" \
+  "$ROOT/native/macos/"{TapCapture,CaptureState,AudioProcesses}.swift
+"$BUILD/tap_description_test" | tail -2
+
 echo "==> meetingtest"
 clang -O2 \
   -I"$ROOT/native/include" \

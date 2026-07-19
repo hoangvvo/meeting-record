@@ -45,10 +45,10 @@ final class TapCapture {
                muteCapturedOutput: Bool) throws {
         precondition(!started, "already started")
 
-        let description = try makeTapDescription(pids: pids,
-                                                 globalMixdown: globalMixdown,
-                                                 mono: mono,
-                                                 muteCapturedOutput: muteCapturedOutput)
+        let description = try Self.makeTapDescription(pids: pids,
+                                                      globalMixdown: globalMixdown,
+                                                      mono: mono,
+                                                      muteCapturedOutput: muteCapturedOutput)
 
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapErr = AudioHardwareCreateProcessTap(description, &tap)
@@ -143,13 +143,14 @@ final class TapCapture {
 
     // MARK: - Helpers
 
-    private func makeTapDescription(pids: [pid_t],
+    static func makeTapDescription(pids: [pid_t],
                                    globalMixdown: Bool,
                                    mono: Bool,
                                    muteCapturedOutput: Bool) throws -> CATapDescription {
         let description: CATapDescription
+        let capturesGlobalMix = globalMixdown || pids.isEmpty
 
-        if globalMixdown || pids.isEmpty {
+        if capturesGlobalMix {
             // Empty exclusion list taps everything the system plays.
             description = mono
                 ? CATapDescription(monoGlobalTapButExcludeProcesses: [])
@@ -169,8 +170,10 @@ final class TapCapture {
         description.uuid = UUID()
         description.name = "meeting-record-tap"
         description.muteBehavior = muteCapturedOutput ? .muted : .unmuted
-        // Non-exclusive so other processes can tap the same audio concurrently.
-        description.isExclusive = false
+        // `isExclusive` selects how `processes` is interpreted; it does not
+        // control whether other taps may coexist. An empty exclusive list means
+        // "all processes", while an empty non-exclusive list captures silence.
+        description.isExclusive = capturesGlobalMix
         // A private tap is not published for UID lookup, so the aggregate binds a
         // stream that only ever delivers zeros. The aggregate itself stays private.
         description.isPrivate = false

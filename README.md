@@ -30,6 +30,11 @@ For C, build the static library (`./scripts/build-macos.sh` or compile `native/w
 import { createWriteStream } from "node:fs";
 import * as MeetingRecord from "meeting-record";
 
+MeetingRecord.meetings.on("started", (meeting) => console.log("started", meeting));
+MeetingRecord.meetings.on("updated", (meeting) => console.log("updated", meeting));
+MeetingRecord.meetings.on("ended", (meeting) => console.log("ended", meeting));
+MeetingRecord.meetings.watch();
+
 await MeetingRecord.permissions.request("system-audio");
 await MeetingRecord.permissions.request("microphone");
 
@@ -47,6 +52,7 @@ recording.microphone.pipe(createWriteStream(`${meeting.platform}-microphone.f32`
 recording.pauseRecording();
 recording.resumeRecording();
 await recording.stopRecording();
+MeetingRecord.meetings.unwatch();
 ```
 
 ### Rust
@@ -76,6 +82,10 @@ if permissions::status(Permission::Microphone) != PermissionStatus::Granted {
     permissions::request(Permission::Microphone)?;
     return Ok(());
 }
+
+let watcher = meetings::watch(|event, meeting| {
+    println!("{event:?}: {:?}", meeting.platform);
+})?;
 
 let Some(meeting) = meetings::scan()
     .into_iter()
@@ -111,6 +121,7 @@ recording.resume();
 recording.stop();
 system_writer.join().unwrap();
 microphone_writer.join().unwrap();
+drop(watcher);
 
 ```
 
@@ -151,6 +162,7 @@ static void on_meeting(const mrec_meeting *m, mrec_event event, void *ud) {
 // Trap signals so we don't exit mid-capture.
 // Hard-killing without mrec_stop() leaks audio state and wedges coreaudiod.
 static void handle_shutdown(int sig) {
+  mrec_watch_stop();
   mrec_stop();
   exit(0);
 }
@@ -181,12 +193,24 @@ int main(void) {
 
 Microphone capture is opt-in. It uses the current default input device and stays separate from `systemAudio` / `system_audio`; the library never mixes the two tracks together.
 
-## Detection & Capture
+## Detection
 
 Watch for meetings using event-driven callbacks (`mrec_watch_start`). The watcher runs on a safe serial queue.
 
+| ID        | Name                         |
+| --------- | ---------------------------- |
+| `zoom`    | Zoom                         |
+| `teams`   | Microsoft Teams              |
+| `meet`    | Google Meet                  |
+| `webex`   | Webex                        |
+| `slack`   | Slack                        |
+| `discord` | Discord                      |
+| `browser` | Other browser-based meetings |
+
 **Confidence & `should_record`:**
 Always rely on the `should_record` flag. A meeting triggers `should_record = 1` when there is active two-way audio or remote audio. Idle conferencing apps return `0`.
+
+## Capture
 
 **Process Targeting vs. Global Mixdown:**
 
