@@ -1,0 +1,21 @@
+{
+  "name": "meeting-record-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Desktop test app for the meeting-record Rust binding",
+  "license": "MIT",
+  "scripts": {
+    "start": "tauri dev",
+    "package": "tauri build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^5.9.0",
+    "vite": "^8.1.5"
+  }
+}

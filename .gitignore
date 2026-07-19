@@ -1,7 +1,16 @@
-native/build/
-node/build/
-node/dist/
-node_modules/
+# Build output, wherever it lands. Unanchored on purpose: node-gyp writes to
+# node/build when run from node/ and to ./build when run from the repo root.
+build/
+dist/
+out/
 target/
+.vite/
+
+# Compiled addons. Force-add if prebuilts ever ship deliberately.
+*.node
+
+node_modules/
+
 *.log
 *.f32
+.DS_Store

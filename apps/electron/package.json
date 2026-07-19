@@ -1,0 +1,28 @@
+{
+  "name": "meeting-record-electron",
+  "productName": "mrec-electron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop test app for the meeting-record Node binding",
+  "license": "MIT",
+  "main": ".vite/build/main.mjs",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "meeting-record": "*"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^8.0.0-alpha.10",
+    "@electron-forge/plugin-auto-unpack-natives": "^8.0.0-alpha.10",
+    "@electron-forge/plugin-vite": "^8.0.0-alpha.10",
+    "@electron-forge/shared-types": "^8.0.0-alpha.10",
+    "@electron/rebuild": "^4.0.1",
+    "@types/node": "^24.0.0",
+    "electron": "43.2.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.1.5"
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+edition = "2021"
+license = "MIT"
+name = "meeting-record-tauri"
+publish = false
+version = "0.1.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ctrlc = "3.5"
+hound = "3.5"
+meeting-record = { path = "../../../rust" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }

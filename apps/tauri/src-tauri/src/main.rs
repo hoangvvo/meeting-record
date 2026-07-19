@@ -1,27 +1,25 @@
 // Prevents an extra console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod mix;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::process::{self, Command};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hound::{SampleFormat, WavSpec, WavWriter};
 use meeting_record::{
-    capture, meetings, permissions, AudioBuffer, CaptureOptions, CaptureSession, CaptureTarget,
-    Meeting, MeetingEvent, Permission, PermissionStatus, Watcher,
+    capture, meetings, permissions, AudioTrack, CaptureOptions, CaptureSession, CaptureState,
+    CaptureTarget, Meeting, MeetingEvent, MicrophoneSource, Permission, PermissionStatus, Watcher,
 };
-use rtrb::RingBuffer;
 use serde::Serialize;
 use tauri::async_runtime;
 use tauri::{AppHandle, Builder, Emitter, Manager, RunEvent, State};
 
-/// ~1.4s of mono 48k. Only has to cover the gap between writer-thread polls.
-const RING_SAMPLES: usize = 1 << 16;
-const POLL: Duration = Duration::from_millis(10);
 const METER_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Serialize, Clone)]
@@ -50,12 +48,15 @@ struct RecordingStarted {
     path: String,
     sample_rate: f64,
     channels: u32,
+    microphone: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RecordingStopped {
     path: String,
+    system_path: String,
+    mic_path: Option<String>,
     seconds: f64,
     peak: f32,
     dropped: u64,
@@ -81,10 +82,13 @@ struct Inner {
 }
 
 struct Recording {
-    capture: CaptureSession,
-    stop: Arc<AtomicBool>,
-    writer: JoinHandle<Summary>,
-    path: PathBuf,
+    capture: Arc<CaptureSession>,
+    system: JoinHandle<Summary>,
+    microphone: Option<JoinHandle<Summary>>,
+    meter: JoinHandle<()>,
+    system_path: PathBuf,
+    mic_path: Option<PathBuf>,
+    mixed_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -94,6 +98,22 @@ struct Summary {
     dropped: u64,
 }
 
+/// Loudest sample since the meter last read it, shared by both writer threads.
+/// f32 bits compare like the floats do for non-negative values, so `fetch_max`
+/// on the bit pattern is a max on magnitudes.
+#[derive(Default)]
+struct WindowPeak(AtomicU32);
+
+impl WindowPeak {
+    fn offer(&self, magnitude: f32) {
+        self.0.fetch_max(magnitude.to_bits(), Ordering::Relaxed);
+    }
+
+    fn take(&self) -> f32 {
+        f32::from_bits(self.0.swap(0, Ordering::Relaxed))
+    }
+}
+
 fn id_of(meeting: &Meeting) -> String {
     format!("{}:{}", meeting.platform.as_str(), meeting.pid)
 }
@@ -101,7 +121,6 @@ fn id_of(meeting: &Meeting) -> String {
 fn view(meeting: &Meeting) -> MeetingView {
     MeetingView {
         id: id_of(meeting),
-        // stable identifier, not a label. the window maps it for display
         platform: meeting.platform.as_str().to_owned(),
         app_name: meeting.app_name.clone(),
         title: meeting.title.clone(),
@@ -114,10 +133,10 @@ fn view(meeting: &Meeting) -> MeetingView {
 }
 
 fn permission_of(name: &str) -> Permission {
-    if name == "accessibility" {
-        Permission::Accessibility
-    } else {
-        Permission::SystemAudio
+    match name {
+        "accessibility" => Permission::Accessibility,
+        "microphone" => Permission::Microphone,
+        _ => Permission::SystemAudio,
     }
 }
 
@@ -224,7 +243,8 @@ fn watch(app: &AppHandle) {
     }
 }
 
-fn wav_path(app: &AppHandle) -> PathBuf {
+/// `(mixed, system stem, mic stem)` for one recording.
+fn wav_paths(app: &AppHandle) -> (PathBuf, PathBuf, PathBuf) {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis())
@@ -233,17 +253,23 @@ fn wav_path(app: &AppHandle) -> PathBuf {
         .path()
         .download_dir()
         .unwrap_or_else(|_| PathBuf::from("."));
-    downloads.join(format!("meeting-record-tauri-{millis}.wav"))
+    let name = format!("meeting-record-tauri-{millis}");
+    (
+        downloads.join(format!("{name}.wav")),
+        downloads.join(format!("{name}-system.wav")),
+        downloads.join(format!("{name}-mic.wav")),
+    )
 }
 
 #[tauri::command]
 async fn start_recording(
     app: AppHandle,
     target_id: Option<String>,
+    microphone: bool,
 ) -> Result<RecordingStarted, String> {
     // first call can block ~6s while the permission grant is undetermined, so keep
     // it off the UI thread
-    async_runtime::spawn_blocking(move || start_blocking(&app, target_id))
+    async_runtime::spawn_blocking(move || start_blocking(&app, target_id, microphone))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -259,7 +285,83 @@ fn playing_pid() -> Result<u32, String> {
         .ok_or_else(|| "nothing is playing audio".to_string())
 }
 
-fn start_blocking(app: &AppHandle, target_id: Option<String>) -> Result<RecordingStarted, String> {
+/// Picks one track out of the session. A plain fn pointer so the writer thread
+/// can re-borrow the track from the `Arc` it owns.
+type TrackOf = fn(&CaptureSession) -> Option<&AudioTrack>;
+
+/// Drains one track to its own WAV until the capture stops.
+fn spawn_writer(
+    capture: Arc<CaptureSession>,
+    track_of: TrackOf,
+    path: PathBuf,
+    window: Arc<WindowPeak>,
+) -> Result<JoinHandle<Summary>, String> {
+    let track = track_of(&capture).ok_or("track is not available")?;
+    let sample_rate = track.sample_rate();
+    let spec = WavSpec {
+        channels: track.channels().max(1) as u16,
+        sample_rate: sample_rate.round() as u32,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    // on the error path `capture` drops here, which stops the tap
+    let mut wav = WavWriter::create(&path, spec).map_err(|error| error.to_string())?;
+
+    Ok(thread::spawn(move || {
+        let track = track_of(&capture).expect("track was resolved before the thread started");
+        let mut peak = 0f32;
+
+        while let Some(chunk) = track.recv() {
+            for sample in chunk.frames {
+                let magnitude = sample.abs();
+                if magnitude > peak {
+                    peak = magnitude;
+                }
+                window.offer(magnitude);
+                // clamp before scaling: a tap mixing several processes
+                // can exceed 1.0 and the wrap sounds like loud clicks
+                let scaled = sample.clamp(-1.0, 1.0) * 32767.0;
+                let _ = wav.write_sample(scaled.round() as i16);
+            }
+        }
+
+        let frames = wav.duration();
+        let _ = wav.finalize();
+        Summary {
+            seconds: f64::from(frames) / sample_rate.max(1.0),
+            peak,
+            dropped: track.dropped_samples() as u64,
+        }
+    }))
+}
+
+/// Ticks off a timer rather than off arriving audio, so the elapsed clock keeps
+/// moving through silence.
+fn spawn_meter(
+    app: AppHandle,
+    capture: Arc<CaptureSession>,
+    window: Arc<WindowPeak>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let started = Instant::now();
+        while capture.state() != CaptureState::Stopped {
+            thread::sleep(METER_INTERVAL);
+            let _ = app.emit(
+                "recording:meter",
+                Meter {
+                    seconds: started.elapsed().as_secs_f64(),
+                    level: window.take(),
+                },
+            );
+        }
+    })
+}
+
+fn start_blocking(
+    app: &AppHandle,
+    target_id: Option<String>,
+    microphone: bool,
+) -> Result<RecordingStarted, String> {
     let session = app.state::<Session>();
 
     let pid = {
@@ -277,123 +379,56 @@ fn start_blocking(app: &AppHandle, target_id: Option<String>) -> Result<Recordin
         }
     };
 
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(RING_SAMPLES);
-    let dropped = Arc::new(AtomicU64::new(0));
-
-    let capture = {
-        let dropped = Arc::clone(&dropped);
-        // realtime audio thread. copy into the ring and return: no allocation, no
-        // locks, no emit. write_chunk_uninit fails rather than blocking when the
-        // writer thread has fallen behind.
-        let handler =
-            move |buffer: AudioBuffer<'_>| match producer.write_chunk_uninit(buffer.frames.len()) {
-                Ok(chunk) => {
-                    chunk.fill_from_iter(buffer.frames.iter().copied());
-                }
-                Err(_) => {
-                    dropped.fetch_add(buffer.frames.len() as u64, Ordering::Relaxed);
-                }
-            };
-
-        capture::start(
-            CaptureTarget::Process { pid },
-            CaptureOptions::default(),
-            handler,
-        )
-    }
-    .map_err(|error| error.to_string())?;
-
-    let sample_rate = capture.sample_rate;
-    let channels = capture.channels.max(1);
-    let path = wav_path(app);
-
-    let spec = WavSpec {
-        channels: channels as u16,
-        sample_rate: sample_rate.round() as u32,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
+    let options = CaptureOptions {
+        microphone: microphone.then_some(MicrophoneSource::Default),
+        ..CaptureOptions::default()
     };
-    // on the error path `capture` drops here, which stops the tap
-    let mut wav = WavWriter::create(&path, spec).map_err(|error| error.to_string())?;
+    let capture = Arc::new(
+        capture::start(CaptureTarget::Process { pid }, options)
+            .map_err(|error| error.to_string())?,
+    );
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let writer = {
-        let app = app.clone();
-        let stop = Arc::clone(&stop);
-        let dropped = Arc::clone(&dropped);
+    let sample_rate = capture.system_audio().sample_rate();
+    let channels = capture.system_audio().channels().max(1);
+    let (mixed_path, system_path, mic_path) = wav_paths(app);
+    let mic_path = capture.microphone().map(|_| mic_path);
 
-        thread::spawn(move || {
-            let started = Instant::now();
-            let mut last_emit = Instant::now();
-            let mut window_peak = 0f32;
-            let mut peak = 0f32;
+    let window = Arc::new(WindowPeak::default());
+    let system = spawn_writer(
+        Arc::clone(&capture),
+        |capture| Some(capture.system_audio()),
+        system_path.clone(),
+        Arc::clone(&window),
+    )?;
+    let microphone = match &mic_path {
+        Some(path) => Some(spawn_writer(
+            Arc::clone(&capture),
+            CaptureSession::microphone,
+            path.clone(),
+            Arc::clone(&window),
+        )?),
+        None => None,
+    };
+    let meter = spawn_meter(app.clone(), Arc::clone(&capture), window);
 
-            loop {
-                // read the flag first, so the drain below is the final one
-                let finishing = stop.load(Ordering::Acquire);
-
-                let slots = consumer.slots();
-                if slots > 0 {
-                    if let Ok(chunk) = consumer.read_chunk(slots) {
-                        let (head, tail) = chunk.as_slices();
-                        for &sample in head.iter().chain(tail) {
-                            let magnitude = sample.abs();
-                            if magnitude > window_peak {
-                                window_peak = magnitude;
-                            }
-                            // clamp before scaling: a tap mixing several processes
-                            // can exceed 1.0 and the wrap sounds like loud clicks
-                            let scaled = sample.clamp(-1.0, 1.0) * 32767.0;
-                            let _ = wav.write_sample(scaled.round() as i16);
-                        }
-                        chunk.commit_all();
-                    }
-                }
-                if window_peak > peak {
-                    peak = window_peak;
-                }
-
-                if last_emit.elapsed() >= METER_INTERVAL {
-                    // aggregates only, at 10Hz
-                    let _ = app.emit(
-                        "recording:meter",
-                        Meter {
-                            seconds: started.elapsed().as_secs_f64(),
-                            level: window_peak,
-                        },
-                    );
-                    window_peak = 0.0;
-                    last_emit = Instant::now();
-                }
-
-                if finishing {
-                    break;
-                }
-                thread::sleep(POLL);
-            }
-
-            let frames = wav.duration();
-            let _ = wav.finalize();
-            Summary {
-                seconds: f64::from(frames) / sample_rate.max(1.0),
-                peak,
-                dropped: dropped.load(Ordering::Relaxed),
-            }
-        })
+    let started = RecordingStarted {
+        path: system_path.to_string_lossy().into_owned(),
+        sample_rate,
+        channels,
+        microphone: microphone.is_some(),
     };
 
     session.inner.lock().unwrap().recording = Some(Recording {
         capture,
-        stop,
-        writer,
-        path: path.clone(),
+        system,
+        microphone,
+        meter,
+        system_path,
+        mic_path,
+        mixed_path,
     });
 
-    Ok(RecordingStarted {
-        path: path.to_string_lossy().into_owned(),
-        sample_rate,
-        channels,
-    })
+    Ok(started)
 }
 
 #[tauri::command]
@@ -416,21 +451,56 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingStopped, String> {
 fn finish(recording: Recording) -> RecordingStopped {
     let Recording {
         capture,
-        stop,
-        writer,
-        path,
+        system,
+        microphone,
+        meter,
+        system_path,
+        mic_path,
+        mixed_path,
     } = recording;
 
-    drop(capture); // stop the tap before touching the file
-    stop.store(true, Ordering::Release);
-    let summary = writer.join().unwrap_or_default();
+    capture.stop();
+    // the stems are only complete once their writers have joined, and the mix
+    // reads them straight back off disk
+    let system_summary = system.join().unwrap_or_default();
+    let mic_summary = microphone.map(|handle| handle.join().unwrap_or_default());
+    let _ = meter.join();
+
+    let seconds = system_summary
+        .seconds
+        .max(mic_summary.as_ref().map_or(0.0, |summary| summary.seconds));
+    let dropped =
+        system_summary.dropped + mic_summary.as_ref().map_or(0, |summary| summary.dropped);
+    let stem_peak = system_summary
+        .peak
+        .max(mic_summary.as_ref().map_or(0.0, |summary| summary.peak));
+
+    let (path, peak) = match mix::mix(&system_path, mic_path.as_deref(), &mixed_path) {
+        Ok(peak) => (mixed_path, peak),
+        // the stems survive a failed mix, so hand back the one that is definitely playable
+        Err(error) => {
+            eprintln!("could not mix the stems: {error}");
+            (system_path.clone(), stem_peak)
+        }
+    };
 
     RecordingStopped {
         path: path.to_string_lossy().into_owned(),
-        seconds: summary.seconds,
-        peak: summary.peak,
-        dropped: summary.dropped,
+        system_path: system_path.to_string_lossy().into_owned(),
+        mic_path: mic_path.map(|path| path.to_string_lossy().into_owned()),
+        seconds,
+        peak,
+        dropped,
     }
+}
+
+#[tauri::command]
+fn reveal(path: String) -> Result<(), String> {
+    Command::new("open")
+        .args(["-R", &path])
+        .spawn()
+        .map(drop)
+        .map_err(|error| error.to_string())
 }
 
 /// Both guards have to be released before the process goes away: leaking a
@@ -458,7 +528,8 @@ fn main() {
             request_permission,
             scan,
             start_recording,
-            stop_recording
+            stop_recording,
+            reveal
         ])
         .setup(|app| {
             let handle = app.handle().clone();

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>meeting-record</title>
+    <script type="module" src="/src/app.ts" defer></script>
+  </head>
+
+  <body>
+    <main>
+      <section class="notices" id="notices" hidden>
+        <div class="notice" id="audio-notice" hidden>
+          <span id="audio-text"></span>
+          <button id="audio-request">Allow</button>
+        </div>
+        <div class="notice" id="microphone-notice" hidden>
+          <span id="microphone-text"></span>
+          <button id="microphone-request">Allow</button>
+        </div>
+        <div class="notice" id="accessibility-notice" hidden>
+          <span id="accessibility-text"></span>
+          <button id="accessibility-request">Allow</button>
+        </div>
+      </section>
+
+      <section class="recorder">
+        <div class="timer" id="elapsed" data-live="false">0:00</div>
+        <div class="level"><div class="level-fill" id="level"></div></div>
+        <button class="primary large" id="record">Record system audio</button>
+        <button class="large" id="stop" hidden>Stop</button>
+        <label class="toggle" id="microphone-toggle">
+          <input type="checkbox" id="microphone" checked />
+          Include microphone
+        </label>
+        <p class="detail" id="detail"></p>
+      </section>
+
+      <section>
+        <ul class="meetings" id="meetings"></ul>
+        <p class="empty" id="meetings-empty">No meetings detected</p>
+      </section>
+
+      <section>
+        <ol class="log" id="log"></ol>
+      </section>
+    </main>
+  </body>
+</html>
