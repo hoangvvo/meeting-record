@@ -7,10 +7,13 @@
         "<!@(node -p \"require('node-addon-api').include\")",
         "../native/include"
       ],
-      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
+      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS", "NAPI_VERSION=8"],
       "cflags_cc": ["-std=c++17"],
       "conditions": [
         ["OS=='mac'", {
+          "variables": {
+            "xcode_path": "<!(xcode-select -p)"
+          },
           # The Swift core is built by ../scripts/build-macos.sh; this only links it.
           # Run `npm run build:native` first.
           "libraries": [
@@ -21,7 +24,7 @@
             "-framework Foundation",
             "-framework AppKit",
             "-framework ApplicationServices",
-            "-L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx",
+            "-L<(xcode_path)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx",
             "-lswiftCore"
           ],
           "xcode_settings": {

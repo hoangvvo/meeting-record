@@ -2,6 +2,16 @@
   "name": "meeting-record",
   "version": "0.1.0",
   "description": "System-audio and microphone capture with meeting detection for macOS and Windows",
+  "author": {
+    "name": "Hoang Vo",
+    "url": "https://hoangvvo.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hoangvvo/meeting-record.git",
+    "directory": "node"
+  },
+  "bugs": "https://github.com/hoangvvo/meeting-record/issues",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,31 +21,28 @@
       "default": "./dist/index.js"
     }
   },
-  "gypfile": true,
+  "gypfile": false,
   "files": [
     "dist",
-    "src",
-    "binding.gyp"
+    "prebuilds"
   ],
+  "os": ["darwin", "win32"],
+  "cpu": ["arm64", "x64"],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build:native": "cd .. && ./scripts/build-macos.sh",
+    "build:native": "node ../scripts/build-native.mjs",
     "build:addon": "node-gyp rebuild",
+    "build:prebuild": "npm run build:native && prebuildify --napi",
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:native && npm run build:addon && npm run build:ts",
-    "install": "node-gyp rebuild",
+    "prepack": "npm run build:ts",
     "test": "node --test test/*.test.mjs",
     "example": "node examples/record.mjs"
   },
   "dependencies": {
-    "node-addon-api": "^8.0.0"
-  },
-  "devDependencies": {
-    "node-gyp": "^11.0.0",
-    "typescript": "^5.4.0",
-    "@types/node": "^20.0.0"
+    "node-gyp-build": "^4.8.4"
   },
   "license": "MIT"
 }

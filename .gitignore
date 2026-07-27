@@ -9,6 +9,9 @@ target/
 # Compiled addons. Force-add if prebuilts ever ship deliberately.
 *.node
 
+# Generated only while assembling the crates.io source package.
+rust/native/
+
 node_modules/
 
 *.log

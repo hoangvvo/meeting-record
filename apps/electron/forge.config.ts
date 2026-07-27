@@ -45,7 +45,7 @@ const config: ForgeConfig = {
   },
   rebuildConfig: {},
   hooks: {
-    // runs for both `start` and `package`. force, because `npm run build:node`
+    // runs for both `start` and `package`. force, because `npm run build`
     // leaves a node-ABI build behind and a stale .forge-meta would let it through
     async generateAssets() {
       await rebuild({

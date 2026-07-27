@@ -20,7 +20,7 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 
 ### Architecture & realtime constraints
 
-The native audio callbacks produce interleaved float32. The Rust and Node bindings copy each track into its own bounded queue before user code runs. C consumers still receive the native callback directly and must not allocate memory, acquire locks, or enter a managed runtime there.
+The native audio callbacks produce interleaved float32. The Rust and Node bindings copy each track into its own bounded queue before user code runs.
 
 macOS pipeline:
 
@@ -35,7 +35,7 @@ System audio and microphone stay separate. They can negotiate different sample r
 
 The HAL will return `noErr` and deliver empty streams or permanent hangs.
 
-- **The block API is broken:** `AudioDeviceCreateIOProcIDWithBlock` doesn't work on tap-backed aggregates. The block never fires. Use the C-function-pointer version.
+- **The block API is broken:** `AudioDeviceCreateIOProcIDWithBlock` doesn't work on tap-backed aggregates. The block never fires. Use the function-pointer callback.
 - **TCC deadlocks:** If you lack the TCC grant, CoreAudio blocks indefinitely waiting for a GUI prompt. If you call this on a non-GUI main thread, your app deadlocks permanently. Wrap it in a timeout.
 - **Zombie audio:** Dead processes keep `kAudioProcessPropertyIsRunningOutput == true` in the HAL. Tapping them yields infinite zeros. Filter by actual process liveness.
 - **Global tap == post-mute:** Tapping the system mix yields digital silence if the user mutes their speakers. Use per-process taps to grab audio earlier in the graph.

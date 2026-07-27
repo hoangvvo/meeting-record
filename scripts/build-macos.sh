@@ -16,6 +16,13 @@ mkdir -p "$BUILD"
 # Codesigning identity; override with MREC_IDENTITY to ship.
 IDENTITY="${MREC_IDENTITY:--}"
 
+ARCH="${MREC_ARCH:-$(uname -m)}"
+case "$ARCH" in
+  arm64) SWIFT_TARGET="arm64-apple-macos14.2" ;;
+  x86_64) SWIFT_TARGET="x86_64-apple-macos14.2" ;;
+  *) echo "unsupported macOS architecture: $ARCH" >&2; exit 1 ;;
+esac
+
 # Fails if meeting-record-detect.h drifts from the offsets Swift hardcodes.
 echo "==> struct layout check"
 clang -I"$ROOT/native/include" -o "$BUILD/layout_check" "$ROOT/native/tests/layout_check.c"
@@ -25,7 +32,7 @@ echo "==> swiftc: libmeetingrecord_macos.a"
 swiftc -O \
   -parse-as-library \
   -emit-library -static \
-  -target arm64-apple-macos14.2 \
+  -target "$SWIFT_TARGET" \
   -o "$BUILD/libmeetingrecord_macos.a" \
   "$ROOT"/native/macos/*.swift
 

@@ -27,4 +27,4 @@ open apps/electron/out/mrec-electron-darwin-arm64/mrec-electron.app
 Notes:
 
 - Dev mode can't do permissions or recording. TCC reads Electron.app's plist, so no prompt ever shows up. Detection works fine.
-- That leaves `node/build/Release/*.node` on Electron's ABI. Run `npm run build:node` before going back to `node/examples/*.mjs`.
+- That leaves `node/build/Release/*.node` on Electron's ABI. Run `npm run build` before going back to `node/examples/*.mjs`.

@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/your-org/meeting-record"
+repository = "https://github.com/hoangvvo/meeting-record"
 version = "0.1.0"
 
 [profile.release]

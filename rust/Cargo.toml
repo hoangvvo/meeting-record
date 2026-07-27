@@ -1,12 +1,25 @@
 [package]
-name = "meeting-record"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
 description = "System-audio and microphone capture with meeting detection for macOS and Windows"
+edition.workspace = true
+include = [
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/native/**",
+    "/build.rs",
+    "/README.md",
+    "/LICENSE.md",
+]
+license.workspace = true
 links = "meetingrecord"
+name = "meeting-record"
+readme = "README.md"
+repository.workspace = true
+version.workspace = true
 
 [dependencies]
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]

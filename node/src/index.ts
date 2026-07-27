@@ -7,9 +7,12 @@
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 
-// Native addons cannot be imported under ESM. Resolved relative to dist/index.js.
-const native = createRequire(import.meta.url)('../build/Release/meeting_record.node')
+// Native addons cannot be imported under ESM. node-gyp-build selects the
+// bundled binary for the current platform; local builds remain usable in-repo.
+const loadNative = createRequire(import.meta.url)('node-gyp-build') as (root: string) => any
+const native = loadNative(fileURLToPath(new URL('..', import.meta.url)))
 
 export type Permission = 'system-audio' | 'microphone' | 'accessibility'
 export type PermissionStatus = 'granted' | 'denied' | 'unknown' | 'not-required'
