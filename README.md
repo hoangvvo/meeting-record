@@ -53,12 +53,11 @@ Always rely on `shouldRecord` / `should_record`. It becomes true when there is a
 
 ## Capture
 
-- **Process target:** Recommended. Captures the selected meeting process and its audio helpers. Continues capturing if the user mutes their system speakers.
-- **System target:** Captures the whole system mix, but records silence if system output is muted.
+- **Process target:** Recommended. Captures the selected meeting process and its audio helpers.
+- **System target:** Captures all application audio.
 
 ## Troubleshooting
 
 - **Capture start times out:** The permission grant is undetermined. Request permissions from a bundled GUI app, not a bare CLI executable.
-- **Capture runs but outputs zeroes:** The system target was used while output was muted, or the targeted processes exited.
+- **Capture runs but outputs zeroes:** The targeted processes may have exited.
 - **Titles/URLs are empty:** Accessibility permission was not granted, or the app was not restarted after granting it.
-- **Audio is broken machine-wide on macOS:** A crash or force-quit orphaned a process tap. Run `sudo killall coreaudiod` to reset it.

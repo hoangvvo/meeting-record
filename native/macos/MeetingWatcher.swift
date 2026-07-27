@@ -17,6 +17,7 @@ final class MeetingWatcher {
     private static let debounceInterval: TimeInterval = 0.4
 
     private let queue = DispatchQueue(label: "meetingrecord.watcher")
+    private let queueKey = DispatchSpecificKey<UInt8>()
     private let callback: MrecMeetingCallback
     private let userData: UnsafeMutableRawPointer?
 
@@ -26,10 +27,12 @@ final class MeetingWatcher {
     private var timer: DispatchSourceTimer?
     private var debounce: DispatchWorkItem?
     private var listenerBlock: AudioObjectPropertyListenerBlock?
+    private var stopped = false
 
     init(callback: MrecMeetingCallback, userData: UnsafeMutableRawPointer?) {
         self.callback = callback
         self.userData = userData
+        queue.setSpecific(key: queueKey, value: 1)
     }
 
     func start() {
@@ -66,35 +69,49 @@ final class MeetingWatcher {
         observers.forEach(center.removeObserver)
         observers.removeAll()
 
-        timer?.cancel()
-        timer = nil
-        debounce?.cancel()
-        debounce = nil
-
         if let block = listenerBlock {
             var address = HAL.address(kAudioHardwarePropertyProcessObjectList)
             AudioObjectRemovePropertyListenerBlock(HAL.system, &address, queue, block)
             listenerBlock = nil
         }
-        // No ENDED events on explicit stop.
-        queue.sync { active.removeAll() }
+        let cleanup = {
+            self.stopped = true
+            self.timer?.cancel()
+            self.timer = nil
+            self.debounce?.cancel()
+            self.debounce = nil
+            // No ENDED events on explicit stop.
+            self.active.removeAll()
+        }
+        if DispatchQueue.getSpecific(key: self.queueKey) != nil {
+            cleanup()
+        } else {
+            self.queue.sync(execute: cleanup)
+        }
     }
 
     // MARK: - Scanning
 
     private func scheduleRescan() {
-        debounce?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.rescan() }
-        debounce = work
-        queue.asyncAfter(deadline: .now() + Self.debounceInterval, execute: work)
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard !self.stopped else { return }
+            self.debounce?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.rescan() }
+            self.debounce = work
+            self.queue.asyncAfter(deadline: .now() + Self.debounceInterval,
+                                  execute: work)
+        }
     }
 
     private func rescan() {
+        guard !stopped else { return }
         let found = MeetingDetector.scan()
         var next: [pid_t: DetectedMeeting] = [:]
         for meeting in found { next[meeting.pid] = meeting }
 
         for (pid, meeting) in next {
+            guard !stopped else { return }
             if let previous = active[pid] {
                 if changed(previous, meeting) { emit(meeting, .updated) }
             } else {
@@ -102,8 +119,10 @@ final class MeetingWatcher {
             }
         }
         for (pid, meeting) in active where next[pid] == nil {
+            guard !stopped else { return }
             emit(meeting, .ended)
         }
+        guard !stopped else { return }
         active = next
     }
 

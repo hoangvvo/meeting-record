@@ -325,7 +325,15 @@ type MeetingHandler = Box<dyn FnMut(MeetingEvent, &Meeting) + Send + 'static>;
 
 // The watcher is a process-wide singleton, so the handler lives here rather than
 // in the C API's `void*`.
-static MEETING_HANDLER: Mutex<Option<MeetingHandler>> = Mutex::new(None);
+struct MeetingHandlerSlot {
+    handler: Option<MeetingHandler>,
+    generation: u64,
+}
+
+static MEETING_HANDLER: Mutex<MeetingHandlerSlot> = Mutex::new(MeetingHandlerSlot {
+    handler: None,
+    generation: 0,
+});
 
 unsafe extern "C" fn meeting_trampoline(
     meeting: *const RawMeeting,
@@ -338,14 +346,22 @@ unsafe extern "C" fn meeting_trampoline(
     let event = event.into();
     let parsed = Meeting::from(&*meeting);
 
-    // A panic must not cross the FFI boundary.
-    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-        if let Ok(mut guard) = MEETING_HANDLER.lock() {
-            if let Some(handler) = guard.as_mut() {
-                handler(event, &parsed);
+    let (handler, generation) = match MEETING_HANDLER.lock() {
+        Ok(mut slot) => (slot.handler.take(), slot.generation),
+        Err(_) => return,
+    };
+    let Some(mut handler) = handler else { return };
+
+    // A panic must not cross the FFI boundary. Invoke without holding the slot
+    // lock so a handler can drop its own watcher without deadlocking.
+    let result = panic::catch_unwind(AssertUnwindSafe(|| handler(event, &parsed)));
+    if result.is_ok() {
+        if let Ok(mut slot) = MEETING_HANDLER.lock() {
+            if slot.generation == generation && slot.handler.is_none() {
+                slot.handler = Some(handler);
             }
         }
-    }));
+    }
 }
 
 /// Stops watching when dropped.
@@ -357,8 +373,9 @@ pub struct Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         unsafe { sys::mrec_watch_stop() };
-        if let Ok(mut guard) = MEETING_HANDLER.lock() {
-            *guard = None;
+        if let Ok(mut slot) = MEETING_HANDLER.lock() {
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.handler = None;
         }
     }
 }
@@ -370,18 +387,22 @@ fn watch_meetings<F>(handler: F) -> Result<Watcher, Error>
 where
     F: FnMut(MeetingEvent, &Meeting) + Send + 'static,
 {
-    if unsafe { sys::mrec_is_watching() } != 0 {
+    let mut slot = MEETING_HANDLER
+        .lock()
+        .map_err(|error| Error::Internal(error.to_string()))?;
+    if slot.handler.is_some() || unsafe { sys::mrec_is_watching() } != 0 {
         return Err(Error::AlreadyRunning);
     }
-    *MEETING_HANDLER
-        .lock()
-        .map_err(|error| Error::Internal(error.to_string()))? = Some(Box::new(handler));
+    slot.generation = slot.generation.wrapping_add(1);
+    slot.handler = Some(Box::new(handler));
 
     let status = unsafe { sys::mrec_watch_start(Some(meeting_trampoline), ptr::null_mut()) };
     if status != sys::MREC_OK {
-        *MEETING_HANDLER.lock().unwrap() = None;
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.handler = None;
         return check(status).map(|_| unreachable!());
     }
+    drop(slot);
     Ok(Watcher { _private: () })
 }
 
@@ -389,7 +410,7 @@ where
 pub enum CaptureTarget {
     /// A detected meeting's app pid, or any audio-producing process pid.
     Process { pid: u32 },
-    /// The whole system mix. Records silence while output is muted.
+    /// All application output.
     System,
 }
 
@@ -424,22 +445,67 @@ pub enum CaptureState {
     Stopped,
 }
 
+/// Runtime health of the native audio devices, independent of pause/resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureHealth {
+    Stopped,
+    Running,
+    /// A device or format changed and the backend is retrying automatically.
+    Recovering,
+    /// Automatic recovery was exhausted. Stop or drop this session before retrying.
+    Failed,
+}
+
+fn capture_health() -> CaptureHealth {
+    match unsafe { sys::mrec_capture_health_status() } {
+        sys::MREC_CAPTURE_RUNNING => CaptureHealth::Running,
+        sys::MREC_CAPTURE_RECOVERING => CaptureHealth::Recovering,
+        sys::MREC_CAPTURE_FAILED => CaptureHealth::Failed,
+        _ => CaptureHealth::Stopped,
+    }
+}
+
 #[derive(Debug)]
 pub struct AudioChunk {
+    /// Interleaved float32 PCM.
     pub frames: Vec<f32>,
+    /// Capture time of the first frame on the host's monotonic clock.
+    pub host_time_ns: u64,
+    pub frame_count: u32,
+    pub channels: u32,
+    pub sample_rate: f64,
+    /// Samples discarded since the previous delivered chunk.
+    pub dropped_samples: usize,
 }
 
 const TRACK_CAPACITY: usize = 1 << 20;
+const TRACK_PACKET_CAPACITY: usize = 1 << 12;
 const STATE_RECORDING: u8 = 0;
 const STATE_PAUSED: u8 = 1;
 const STATE_STOPPED: u8 = 2;
 
+#[derive(Clone, Copy, Default)]
+struct PacketMeta {
+    sample_start: usize,
+    sample_count: usize,
+    frame_count: u32,
+    channels: u32,
+    sample_rate: f64,
+    host_time_ns: u64,
+    dropped_before: usize,
+}
+
 struct TrackQueue {
     buffer: Box<[UnsafeCell<f32>]>,
     mask: usize,
+    packets: Box<[UnsafeCell<PacketMeta>]>,
+    packet_mask: usize,
     head: AtomicUsize,
     tail: AtomicUsize,
+    packet_head: AtomicUsize,
+    packet_tail: AtomicUsize,
     dropped: AtomicUsize,
+    dropped_since_read: AtomicUsize,
     writing: AtomicBool,
     closed: AtomicBool,
     read_lock: Mutex<()>,
@@ -460,9 +526,17 @@ impl TrackQueue {
         Self {
             buffer,
             mask: TRACK_CAPACITY - 1,
+            packets: (0..TRACK_PACKET_CAPACITY)
+                .map(|_| UnsafeCell::new(PacketMeta::default()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            packet_mask: TRACK_PACKET_CAPACITY - 1,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
+            packet_head: AtomicUsize::new(0),
+            packet_tail: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
+            dropped_since_read: AtomicUsize::new(0),
             writing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             read_lock: Mutex::new(()),
@@ -471,13 +545,23 @@ impl TrackQueue {
         }
     }
 
-    fn write(&self, frames: &[f32], state: &AtomicU8) {
+    fn write(
+        &self,
+        frames: &[f32],
+        frame_count: u32,
+        channels: u32,
+        sample_rate: f64,
+        host_time_ns: u64,
+        state: &AtomicU8,
+    ) {
         if self
             .writing
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             self.dropped.fetch_add(frames.len(), Ordering::Relaxed);
+            self.dropped_since_read
+                .fetch_add(frames.len(), Ordering::Relaxed);
             return;
         }
 
@@ -489,15 +573,35 @@ impl TrackQueue {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
         let used = head.wrapping_sub(tail);
-        if frames.len() <= TRACK_CAPACITY.saturating_sub(used) {
+        let packet_head = self.packet_head.load(Ordering::Relaxed);
+        let packet_tail = self.packet_tail.load(Ordering::Acquire);
+        if !frames.is_empty()
+            && frames.len() <= TRACK_CAPACITY.saturating_sub(used)
+            && packet_head.wrapping_sub(packet_tail) < TRACK_PACKET_CAPACITY
+        {
             for (offset, sample) in frames.iter().enumerate() {
                 unsafe { *self.buffer[(head + offset) & self.mask].get() = *sample };
             }
+            unsafe {
+                *self.packets[packet_head & self.packet_mask].get() = PacketMeta {
+                    sample_start: head,
+                    sample_count: frames.len(),
+                    frame_count,
+                    channels,
+                    sample_rate,
+                    host_time_ns,
+                    dropped_before: self.dropped_since_read.swap(0, Ordering::Relaxed),
+                };
+            }
             self.head
                 .store(head.wrapping_add(frames.len()), Ordering::Release);
+            self.packet_head
+                .store(packet_head.wrapping_add(1), Ordering::Release);
             self.wake.notify_one();
         } else {
             self.dropped.fetch_add(frames.len(), Ordering::Relaxed);
+            self.dropped_since_read
+                .fetch_add(frames.len(), Ordering::Relaxed);
         }
         self.writing.store(false, Ordering::Release);
     }
@@ -509,20 +613,54 @@ impl TrackQueue {
                     .read_lock
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                let tail = self.tail.load(Ordering::Relaxed);
-                let head = self.head.load(Ordering::Acquire);
-                let available = head.wrapping_sub(tail);
-                if available > 0 {
-                    let mut frames = Vec::with_capacity(available);
-                    for offset in 0..available {
-                        frames.push(unsafe { *self.buffer[(tail + offset) & self.mask].get() });
+                let packet_tail = self.packet_tail.load(Ordering::Relaxed);
+                let packet_head = self.packet_head.load(Ordering::Acquire);
+                if packet_tail != packet_head {
+                    let first = unsafe { *self.packets[packet_tail & self.packet_mask].get() };
+                    let mut next_packet = packet_tail;
+                    let mut sample_count = 0usize;
+                    let mut frame_count = 0u32;
+                    while next_packet != packet_head {
+                        let packet = unsafe { *self.packets[next_packet & self.packet_mask].get() };
+                        if packet.channels != first.channels
+                            || packet.sample_rate != first.sample_rate
+                            || (next_packet != packet_tail
+                                && (packet.dropped_before != 0
+                                    || !Self::packets_are_contiguous(&first, frame_count, &packet)))
+                        {
+                            break;
+                        }
+                        sample_count += packet.sample_count;
+                        frame_count = frame_count.saturating_add(packet.frame_count);
+                        next_packet = next_packet.wrapping_add(1);
                     }
-                    self.tail
-                        .store(tail.wrapping_add(available), Ordering::Release);
-                    return Some(AudioChunk { frames });
+
+                    let mut frames = Vec::with_capacity(sample_count);
+                    for offset in 0..sample_count {
+                        frames.push(unsafe {
+                            *self.buffer[(first.sample_start + offset) & self.mask].get()
+                        });
+                    }
+                    self.tail.store(
+                        first.sample_start.wrapping_add(sample_count),
+                        Ordering::Release,
+                    );
+                    self.packet_tail.store(next_packet, Ordering::Release);
+                    return Some(AudioChunk {
+                        frames,
+                        host_time_ns: first.host_time_ns,
+                        frame_count,
+                        channels: first.channels,
+                        sample_rate: first.sample_rate,
+                        dropped_samples: first.dropped_before,
+                    });
                 }
             }
             if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            if capture_health() == CaptureHealth::Failed {
+                self.close();
                 return None;
             }
 
@@ -551,7 +689,24 @@ impl TrackQueue {
             .unwrap_or_else(|error| error.into_inner());
         self.tail
             .store(self.head.load(Ordering::Acquire), Ordering::Release);
+        self.packet_tail
+            .store(self.packet_head.load(Ordering::Acquire), Ordering::Release);
+        self.dropped_since_read.store(0, Ordering::Relaxed);
         self.writing.store(false, Ordering::Release);
+    }
+
+    fn packets_are_contiguous(
+        first: &PacketMeta,
+        preceding_frames: u32,
+        next: &PacketMeta,
+    ) -> bool {
+        if first.host_time_ns == 0 || next.host_time_ns == 0 || first.sample_rate <= 0.0 {
+            return true;
+        }
+        let elapsed =
+            (f64::from(preceding_frames) * 1_000_000_000.0 / first.sample_rate).round() as u64;
+        let expected = first.host_time_ns.saturating_add(elapsed);
+        expected.abs_diff(next.host_time_ns) <= 2_000_000
     }
 
     fn close(&self) {
@@ -568,10 +723,14 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
+    /// Initial negotiated rate. A recovered device may change it; each
+    /// [`AudioChunk::sample_rate`] is authoritative.
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
     }
 
+    /// Initial channel count. A recovered device may change it; each
+    /// [`AudioChunk::channels`] is authoritative.
     pub fn channels(&self) -> u32 {
         self.channels
     }
@@ -603,8 +762,8 @@ unsafe extern "C" fn audio_trampoline(
     frames: *const f32,
     frame_count: u32,
     channels: u32,
-    _sample_rate: f64,
-    _host_time_ns: u64,
+    sample_rate: f64,
+    host_time_ns: u64,
     user_data: *mut c_void,
 ) {
     if frames.is_null() || frame_count == 0 || user_data.is_null() {
@@ -615,9 +774,14 @@ unsafe extern "C" fn audio_trampoline(
         return;
     }
     let len = frame_count as usize * channels.max(1) as usize;
-    context
-        .queue
-        .write(slice::from_raw_parts(frames, len), &context.state);
+    context.queue.write(
+        slice::from_raw_parts(frames, len),
+        frame_count,
+        channels,
+        sample_rate,
+        host_time_ns,
+        &context.state,
+    );
 }
 
 /// Owns both audio tracks and their shared recording lifecycle.
@@ -626,6 +790,7 @@ pub struct CaptureSession {
     system_audio: AudioTrack,
     microphone: Option<AudioTrack>,
     state: Arc<AtomicU8>,
+    failure: Mutex<Option<String>>,
 }
 
 impl CaptureSession {
@@ -638,11 +803,35 @@ impl CaptureSession {
     }
 
     pub fn state(&self) -> CaptureState {
+        if self.health() == CaptureHealth::Failed {
+            return CaptureState::Stopped;
+        }
         match self.state.load(Ordering::Acquire) {
             STATE_PAUSED => CaptureState::Paused,
             STATE_STOPPED => CaptureState::Stopped,
             _ => CaptureState::Recording,
         }
+    }
+
+    /// Native device health. Transient interruptions are recovered automatically.
+    pub fn health(&self) -> CaptureHealth {
+        if self.state.load(Ordering::Acquire) == STATE_STOPPED {
+            CaptureHealth::Stopped
+        } else {
+            capture_health()
+        }
+    }
+
+    /// The terminal recovery error, if automatic recovery was exhausted.
+    pub fn failure(&self) -> Option<Error> {
+        let mut failure = self
+            .failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if failure.is_none() && self.health() == CaptureHealth::Failed {
+            *failure = Some(Self::failure_detail());
+        }
+        failure.clone().map(Error::Capture)
     }
 
     /// Discard incoming frames until [`CaptureSession::resume`] is called.
@@ -685,8 +874,16 @@ impl CaptureSession {
 
     /// Stop both tracks. Dropping the session has the same effect.
     pub fn stop(&self) {
+        let terminal_failure =
+            (capture_health() == CaptureHealth::Failed).then(Self::failure_detail);
         if self.state.swap(STATE_STOPPED, Ordering::AcqRel) == STATE_STOPPED {
             return;
+        }
+        if let Some(detail) = terminal_failure {
+            *self
+                .failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(detail);
         }
         unsafe { sys::mrec_stop() };
         self.system_audio.queue.close();
@@ -696,6 +893,15 @@ impl CaptureSession {
         *CAPTURE_CONTEXTS
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
+    }
+
+    fn failure_detail() -> String {
+        let detail = last_error();
+        if detail.is_empty() || detail == "no error" {
+            "automatic capture recovery failed".to_owned()
+        } else {
+            detail
+        }
     }
 }
 
@@ -710,23 +916,33 @@ fn resolve_process_target(pid: u32) -> Result<Vec<u32>, Error> {
         return Err(Error::Capture("process pid must be non-zero".to_owned()));
     }
 
-    let mut meetings = [unsafe { mem::zeroed::<RawMeeting>() }; 16];
-    let mut count = 0usize;
-    unsafe { sys::mrec_scan(meetings.as_mut_ptr(), meetings.len(), &mut count) };
-
-    let mut resolved = meetings
-        .iter()
-        .take(count)
-        .find(|meeting| meeting.pid == pid)
-        .map(|meeting| {
-            meeting.audio_pids[..meeting.audio_pid_count.min(sys::MREC_MAX_AUDIO_PIDS)].to_vec()
-        })
-        .unwrap_or_default();
-    resolved.retain(|candidate| *candidate != 0);
-    if resolved.is_empty() {
-        resolved.push(pid);
+    #[cfg(target_os = "windows")]
+    {
+        // WASAPI INCLUDE_PROCESS_TREE follows current and future helper children.
+        // Adding active helpers separately would record them twice.
+        return Ok(vec![pid]);
     }
-    Ok(resolved)
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut meetings = [unsafe { mem::zeroed::<RawMeeting>() }; 16];
+        let mut count = 0usize;
+        unsafe { sys::mrec_scan(meetings.as_mut_ptr(), meetings.len(), &mut count) };
+
+        let mut resolved = meetings
+            .iter()
+            .take(count)
+            .find(|meeting| meeting.pid == pid)
+            .map(|meeting| {
+                meeting.audio_pids[..meeting.audio_pid_count.min(sys::MREC_MAX_AUDIO_PIDS)].to_vec()
+            })
+            .unwrap_or_default();
+        resolved.retain(|candidate| *candidate != 0);
+        if resolved.is_empty() {
+            resolved.push(pid);
+        }
+        Ok(resolved)
+    }
 }
 
 /// Capture one process target or the system mix.
@@ -805,6 +1021,16 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
         check(status)?;
     }
 
+    if capture_health() == CaptureHealth::Failed {
+        unsafe { sys::mrec_stop() };
+        system_queue.close();
+        if let Some(queue) = &microphone_queue {
+            queue.close();
+        }
+        *CAPTURE_CONTEXTS.lock().unwrap() = None;
+        return Err(Error::Capture(last_error()));
+    }
+
     let mut system_sample_rate = 0.0f64;
     let mut system_channels = 0u32;
     let system_format_status =
@@ -847,6 +1073,7 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
         },
         microphone,
         state,
+        failure: Mutex::new(None),
     })
 }
 
@@ -913,8 +1140,14 @@ mod capture_tests {
     fn track_queue_delivers_interleaved_samples() {
         let queue = TrackQueue::new();
         let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[0.25, -0.5, 0.75], &state);
-        assert_eq!(queue.recv().unwrap().frames, [0.25, -0.5, 0.75]);
+        queue.write(&[0.25, -0.5, 0.75, -1.0], 2, 2, 48_000.0, 42, &state);
+        let chunk = queue.recv().unwrap();
+        assert_eq!(chunk.frames, [0.25, -0.5, 0.75, -1.0]);
+        assert_eq!(chunk.frame_count, 2);
+        assert_eq!(chunk.channels, 2);
+        assert_eq!(chunk.sample_rate, 48_000.0);
+        assert_eq!(chunk.host_time_ns, 42);
+        assert_eq!(chunk.dropped_samples, 0);
         queue.close();
         assert!(queue.recv().is_none());
     }
@@ -923,7 +1156,7 @@ mod capture_tests {
     fn track_queue_drops_paused_samples() {
         let queue = TrackQueue::new();
         let state = AtomicU8::new(STATE_PAUSED);
-        queue.write(&[1.0], &state);
+        queue.write(&[1.0], 1, 1, 48_000.0, 1, &state);
         queue.close();
         assert!(queue.recv().is_none());
     }
@@ -932,9 +1165,97 @@ mod capture_tests {
     fn track_queue_clears_buffered_samples() {
         let queue = TrackQueue::new();
         let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[2.0], &state);
+        queue.write(&[2.0], 1, 1, 48_000.0, 1, &state);
         queue.clear();
         queue.close();
         assert!(queue.recv().is_none());
+    }
+
+    #[test]
+    fn track_queue_coalesces_matching_packets_and_keeps_first_timestamp() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        queue.write(&[1.0, 2.0], 2, 1, 48_000.0, 1_000, &state);
+        queue.write(&[3.0, 4.0], 2, 1, 48_000.0, 1_042, &state);
+
+        let chunk = queue.recv().unwrap();
+        assert_eq!(chunk.frames, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(chunk.frame_count, 4);
+        assert_eq!(chunk.host_time_ns, 1_000);
+        queue.close();
+    }
+
+    #[test]
+    fn track_queue_never_coalesces_across_format_changes() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        queue.write(&[1.0], 1, 1, 48_000.0, 1, &state);
+        queue.write(&[2.0, 3.0], 1, 2, 44_100.0, 2, &state);
+
+        let first = queue.recv().unwrap();
+        assert_eq!(first.frames, [1.0]);
+        assert_eq!(first.sample_rate, 48_000.0);
+        assert_eq!(first.channels, 1);
+
+        let second = queue.recv().unwrap();
+        assert_eq!(second.frames, [2.0, 3.0]);
+        assert_eq!(second.sample_rate, 44_100.0);
+        assert_eq!(second.channels, 2);
+        queue.close();
+    }
+
+    #[test]
+    fn track_queue_never_coalesces_across_timestamp_gaps() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        queue.write(&[1.0], 1, 1, 48_000.0, 1_000_000, &state);
+        queue.write(&[2.0], 1, 1, 48_000.0, 20_000_000, &state);
+
+        assert_eq!(queue.recv().unwrap().frames, [1.0]);
+        assert_eq!(queue.recv().unwrap().frames, [2.0]);
+        queue.close();
+    }
+
+    #[test]
+    fn track_queue_reports_a_drop_on_the_first_packet_after_the_gap() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        queue.write(&[1.0], 1, 1, 48_000.0, 1_000_000, &state);
+        let oversized = vec![0.0; super::TRACK_CAPACITY + 1];
+        queue.write(
+            &oversized,
+            oversized.len() as u32,
+            1,
+            48_000.0,
+            2_000_000,
+            &state,
+        );
+        queue.write(&[2.0], 1, 1, 48_000.0, 3_000_000, &state);
+
+        let before_gap = queue.recv().unwrap();
+        assert_eq!(before_gap.frames, [1.0]);
+        assert_eq!(before_gap.dropped_samples, 0);
+        let after_gap = queue.recv().unwrap();
+        assert_eq!(after_gap.frames, [2.0]);
+        assert_eq!(after_gap.dropped_samples, oversized.len());
+        queue.close();
+    }
+
+    #[test]
+    fn track_queue_reports_bounded_buffer_drops() {
+        let queue = TrackQueue::new();
+        let state = AtomicU8::new(STATE_RECORDING);
+        let oversized = vec![0.0; super::TRACK_CAPACITY + 1];
+        queue.write(&oversized, oversized.len() as u32, 1, 48_000.0, 1, &state);
+        queue.write(&[1.0], 1, 1, 48_000.0, 2, &state);
+
+        let chunk = queue.recv().unwrap();
+        assert_eq!(chunk.frames, [1.0]);
+        assert_eq!(chunk.dropped_samples, oversized.len());
+        assert_eq!(
+            queue.dropped.load(std::sync::atomic::Ordering::Relaxed),
+            oversized.len()
+        );
+        queue.close();
     }
 }

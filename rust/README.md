@@ -41,7 +41,14 @@ fn main() -> Result<(), Error> {
     thread::scope(|scope| {
         scope.spawn(|| {
             while let Some(chunk) = recording.system_audio().recv() {
-                println!("{} samples", chunk.frames.len());
+                println!(
+                    "{} samples at {} ns ({} Hz, {} channels, {} dropped)",
+                    chunk.frames.len(),
+                    chunk.host_time_ns,
+                    chunk.sample_rate,
+                    chunk.channels,
+                    chunk.dropped_samples,
+                );
             }
         });
         thread::sleep(Duration::from_secs(10));

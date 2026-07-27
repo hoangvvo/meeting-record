@@ -63,3 +63,5 @@ jobs:
 
       - name: Test Rust package
         run: cargo test --locked -p meeting-record
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.2"

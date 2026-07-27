@@ -31,6 +31,21 @@ macOS pipeline:
 
 System audio and microphone stay separate. They can negotiate different sample rates; a session pauses, resumes, and stops both together.
 
+Both callbacks carry the first frame's timestamp on the host monotonic clock. The
+bindings retain packet boundaries and format metadata while coalescing compatible
+packets. Their sample and packet rings are fixed-size; they never queue one runtime
+wake per native callback.
+
+Default-device, tap-format, aggregate-device, and AVAudioEngine configuration
+changes are monitored. Recovery is serialized, retries three times, and moves the
+session through `RECOVERING` to `RUNNING` or terminal `FAILED`. Windows aligns all
+per-PID WASAPI clients on QPC and emits one ordered 10 ms mixed track.
+
+The native core intentionally exposes raw synchronized stems. Echo cancellation,
+gain control, and noise suppression belong in a downstream processing layer; use
+the system track as the AEC reference before mixing when building live-call or
+transcription products.
+
 ### CoreAudio failure modes
 
 The HAL will return `noErr` and deliver empty streams or permanent hangs.
@@ -38,9 +53,14 @@ The HAL will return `noErr` and deliver empty streams or permanent hangs.
 - **The block API is broken:** `AudioDeviceCreateIOProcIDWithBlock` doesn't work on tap-backed aggregates. The block never fires. Use the function-pointer callback.
 - **TCC deadlocks:** If you lack the TCC grant, CoreAudio blocks indefinitely waiting for a GUI prompt. If you call this on a non-GUI main thread, your app deadlocks permanently. Wrap it in a timeout.
 - **Zombie audio:** Dead processes keep `kAudioProcessPropertyIsRunningOutput == true` in the HAL. Tapping them yields infinite zeros. Filter by actual process liveness.
-- **Global tap == post-mute:** Tapping the system mix yields digital silence if the user mutes their speakers. Use per-process taps to grab audio earlier in the graph.
 - **Bad PIDs:** PIDs are not `AudioObjectID`s. Translate them via `kAudioHardwarePropertyTranslatePIDToProcessObject` or you get `kAudioHardwareBadObjectError`.
 - **Format lies:** `kAudioTapPropertyFormat` might say mono 48kHz while the device delivers stereo. Read the format directly from the aggregate's input stream.
+- **Non-interleaved stereo:** A tap may deliver two mono buffers. Interleave them
+  into preallocated scratch space; forwarding each buffer as if it were a complete
+  stereo frame corrupts the stream.
+- **Permission timeout lifetime:** Prepare the HAL objects under the timeout, but
+  do not arm the host callback or start realtime I/O until preparation succeeds.
+  A timed-out worker may finish later and must own no binding pointer.
 
 ### Meeting detection
 

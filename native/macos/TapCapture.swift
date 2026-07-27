@@ -12,8 +12,7 @@ import Foundation
 /// the TCC grant undetermined it blocks indefinitely. Use the C function pointer
 /// form.
 ///
-/// A global tap reads after the hardware mix and yields silence while output is
-/// muted. A process-list tap does not.
+/// A global tap captures every process except explicit exclusions.
 final class TapCapture {
     struct Format {
         var sampleRate: Double
@@ -25,12 +24,26 @@ final class TapCapture {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
+    private var prepared = false
     private var started = false
+    private var maximumFrameCount: UInt32 = 0
 
     private let stateBox: CaptureStateBox
+    let identifier = UUID()
+    private let onConfigurationChange: (UUID, String) -> Void
+    private let monitorQueue = DispatchQueue(label: "meetingrecord.capture-monitor")
+    private var monitors: [PropertyMonitor] = []
 
-    init(stateBox: CaptureStateBox) {
+    private struct PropertyMonitor {
+        var object: AudioObjectID
+        var address: AudioObjectPropertyAddress
+        var block: AudioObjectPropertyListenerBlock
+    }
+
+    init(stateBox: CaptureStateBox,
+         onConfigurationChange: @escaping (UUID, String) -> Void = { _, _ in }) {
         self.stateBox = stateBox
+        self.onConfigurationChange = onConfigurationChange
     }
 
     deinit {
@@ -43,7 +56,21 @@ final class TapCapture {
                globalMixdown: Bool,
                mono: Bool,
                muteCapturedOutput: Bool) throws {
-        precondition(!started, "already started")
+        try prepare(pids: pids,
+                    globalMixdown: globalMixdown,
+                    mono: mono,
+                    muteCapturedOutput: muteCapturedOutput)
+        try startPrepared()
+    }
+
+    /// Build the permission-gated HAL objects without starting realtime I/O.
+    /// This may block while TCC is undetermined, so initial capture runs it under
+    /// a timeout before installing any host callback pointer in `stateBox`.
+    func prepare(pids: [pid_t],
+                 globalMixdown: Bool,
+                 mono: Bool,
+                 muteCapturedOutput: Bool) throws {
+        precondition(!prepared && !started, "already prepared")
 
         let description = try Self.makeTapDescription(pids: pids,
                                                       globalMixdown: globalMixdown,
@@ -96,9 +123,17 @@ final class TapCapture {
             teardown()
             throw CaptureError.deviceFailed(kAudioDeviceUnsupportedFormatError)
         }
+        guard resolved.mFormatID == kAudioFormatLinearPCM,
+              resolved.mBitsPerChannel == 32,
+              resolved.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
+            teardown()
+            throw CaptureError.deviceFailed(kAudioDeviceUnsupportedFormatError)
+        }
         format = Format(sampleRate: resolved.mSampleRate, channels: resolved.mChannelsPerFrame)
-        stateBox.updateFormat(sampleRate: resolved.mSampleRate,
-                              channels: resolved.mChannelsPerFrame)
+        maximumFrameCount = max(
+            HAL.value(aggregate, kAudioDevicePropertyBufferFrameSize,
+                      default: UInt32(4096)),
+            4096)
 
         var proc: AudioDeviceIOProcID?
         let procErr = AudioDeviceCreateIOProcID(aggregate,
@@ -110,13 +145,25 @@ final class TapCapture {
             throw CaptureError.ioProcFailed(procErr)
         }
         ioProcID = proc
+        prepared = true
+    }
 
-        let startErr = AudioDeviceStart(aggregate, proc)
+    func startPrepared() throws {
+        precondition(prepared && !started, "capture is not prepared")
+        guard aggregateID != kAudioObjectUnknown, let proc = ioProcID else {
+            teardown()
+            throw CaptureError.ioProcFailed(kAudioHardwareBadObjectError)
+        }
+        stateBox.updateFormat(sampleRate: format.sampleRate,
+                              channels: format.channels,
+                              maximumFrameCount: maximumFrameCount)
+        let startErr = AudioDeviceStart(aggregateID, proc)
         guard startErr == noErr else {
             teardown()
             throw CaptureError.ioProcFailed(startErr)
         }
         started = true
+        installMonitors()
     }
 
     func stop() {
@@ -124,12 +171,15 @@ final class TapCapture {
     }
 
     private func teardown() {
+        removeMonitors()
         if let proc = ioProcID, aggregateID != kAudioObjectUnknown {
             if started { AudioDeviceStop(aggregateID, proc) }
             AudioDeviceDestroyIOProcID(aggregateID, proc)
         }
         ioProcID = nil
+        prepared = false
         started = false
+        maximumFrameCount = 0
 
         if aggregateID != kAudioObjectUnknown {
             AudioHardwareDestroyAggregateDevice(aggregateID)
@@ -139,6 +189,44 @@ final class TapCapture {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
+    }
+
+    private func installMonitors() {
+        addMonitor(object: HAL.system,
+                   address: HAL.address(kAudioHardwarePropertyDefaultOutputDevice),
+                   reason: "default output device changed")
+        addMonitor(object: aggregateID,
+                   address: HAL.address(kAudioDevicePropertyDeviceIsAlive),
+                   reason: "capture aggregate device changed")
+        addMonitor(object: aggregateID,
+                   address: HAL.address(kAudioDevicePropertyNominalSampleRate),
+                   reason: "capture sample rate changed")
+        addMonitor(object: tapID,
+                   address: HAL.address(kAudioTapPropertyFormat),
+                   reason: "process tap format changed")
+    }
+
+    private func addMonitor(object: AudioObjectID,
+                            address initialAddress: AudioObjectPropertyAddress,
+                            reason: String) {
+        guard object != kAudioObjectUnknown else { return }
+        var address = initialAddress
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            self.onConfigurationChange(self.identifier, reason)
+        }
+        if AudioObjectAddPropertyListenerBlock(object, &address, monitorQueue, block) == noErr {
+            monitors.append(PropertyMonitor(object: object, address: address, block: block))
+        }
+    }
+
+    private func removeMonitors() {
+        for monitor in monitors {
+            var address = monitor.address
+            AudioObjectRemovePropertyListenerBlock(monitor.object, &address,
+                                                   monitorQueue, monitor.block)
+        }
+        monitors.removeAll()
     }
 
     // MARK: - Helpers
@@ -239,20 +327,15 @@ enum CaptureError: Error {
 /// Runs on a CoreAudio realtime thread: no allocation, no locks. Forwards the
 /// buffer to the host's callback.
 private let captureIOProc: AudioDeviceIOProc = {
-    _, _, inInputData, _, _, _, clientData in
+    _, _, inInputData, inInputTime, _, _, clientData in
 
     guard let clientData else { return noErr }
     let state = Unmanaged<CaptureStateBox>.fromOpaque(clientData).takeUnretainedValue()
 
     let buffers = UnsafeMutableAudioBufferListPointer(
         UnsafeMutablePointer(mutating: inInputData))
-    for buffer in buffers {
-        guard let data = buffer.mData, buffer.mDataByteSize > 0 else { continue }
-        let channels = max(buffer.mNumberChannels, 1)
-        let frameCount = buffer.mDataByteSize / 4 / channels
-        state.emit(data.assumingMemoryBound(to: Float.self),
-                   frameCount: frameCount,
-                   channels: channels)
-    }
+    let hostTime = inInputTime.pointee.mFlags.contains(.hostTimeValid)
+        ? inInputTime.pointee.mHostTime : nil
+    state.emit(buffers, hostTime: hostTime)
     return noErr
 }

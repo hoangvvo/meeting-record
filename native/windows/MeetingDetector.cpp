@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -75,6 +76,7 @@ constexpr int32_t kScoreKnownApp = 40;
 constexpr int32_t kScorePlayingAudio = 30;
 constexpr int32_t kScoreUsingMic = 25;
 constexpr int32_t kScoreRecognisedUrl = 5;
+constexpr int32_t kRecordThreshold = 70;
 
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -87,10 +89,28 @@ std::string Narrow(const std::wstring &wide) {
   int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr,
                                  nullptr);
   if (size <= 1) return {};
-  std::string out(static_cast<size_t>(size - 1), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, out.data(), size, nullptr,
-                      nullptr);
+  /* `size` includes the terminating NUL. Reserve room for it before trimming it
+   * off; passing `size` into a `size - 1` string is a one-byte overwrite. */
+  std::string out(static_cast<size_t>(size), '\0');
+  const int written = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1,
+                                          out.data(), size, nullptr, nullptr);
+  if (written <= 1) return {};
+  out.resize(static_cast<size_t>(written - 1));
   return out;
+}
+
+uint64_t MonotonicTimeNs() {
+  LARGE_INTEGER frequency{};
+  LARGE_INTEGER counter{};
+  if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+      !QueryPerformanceCounter(&counter)) {
+    return GetTickCount64() * 1000000ull;
+  }
+  const uint64_t whole = static_cast<uint64_t>(counter.QuadPart / frequency.QuadPart);
+  const uint64_t remainder =
+      static_cast<uint64_t>(counter.QuadPart % frequency.QuadPart);
+  return whole * 1000000000ull +
+         remainder * 1000000000ull / static_cast<uint64_t>(frequency.QuadPart);
 }
 
 mrec_platform NativePlatformFor(const std::string &exe_lower) {
@@ -121,8 +141,20 @@ struct AudioActivity {
   bool capturing = false;
 };
 
+class ScopedComApartment {
+public:
+  ScopedComApartment() : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+  ~ScopedComApartment() {
+    if (SUCCEEDED(result_)) CoUninitialize();
+  }
+
+private:
+  HRESULT result_;
+};
+
 /* Per-process audio activity across every render and capture endpoint. */
 std::map<DWORD, AudioActivity> CollectAudioActivity() {
+  ScopedComApartment apartment;
   std::map<DWORD, AudioActivity> activity;
 
   ComPtr<IMMDeviceEnumerator> enumerator;
@@ -182,16 +214,24 @@ std::map<DWORD, AudioActivity> CollectAudioActivity() {
   return activity;
 }
 
-struct TitleSearch {
-  DWORD pid;
+struct VisibleWindow {
+  DWORD pid = 0;
+  std::string executable;
+  std::string executable_lower;
   std::string title;
+  uint64_t area = 0;
 };
 
-BOOL CALLBACK TitleProc(HWND window, LPARAM param) {
-  auto *search = reinterpret_cast<TitleSearch *>(param);
+std::string ExecutableName(DWORD pid);
+
+BOOL CALLBACK CollectWindowProc(HWND window, LPARAM param) {
+  auto *windows = reinterpret_cast<std::vector<VisibleWindow> *>(param);
+  if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) return TRUE;
+  if ((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return TRUE;
+
   DWORD pid = 0;
   GetWindowThreadProcessId(window, &pid);
-  if (pid != search->pid || !IsWindowVisible(window)) return TRUE;
+  if (pid == 0 || pid == GetCurrentProcessId()) return TRUE;
 
   const int length = GetWindowTextLengthW(window);
   if (length <= 0) return TRUE;
@@ -200,15 +240,24 @@ BOOL CALLBACK TitleProc(HWND window, LPARAM param) {
   buffer.resize(static_cast<size_t>(length));
 
   std::string title = Narrow(buffer);
-  /* Longest visible title: browsers name their real window last. */
-  if (title.size() > search->title.size()) search->title = std::move(title);
+  std::string executable = ExecutableName(pid);
+  if (title.empty() || executable.empty()) return TRUE;
+
+  RECT rect{};
+  uint64_t area = 0;
+  if (GetWindowRect(window, &rect) && rect.right > rect.left && rect.bottom > rect.top) {
+    area = static_cast<uint64_t>(rect.right - rect.left) *
+           static_cast<uint64_t>(rect.bottom - rect.top);
+  }
+  windows->push_back(
+      {pid, executable, ToLower(executable), std::move(title), area});
   return TRUE;
 }
 
-std::string WindowTitleFor(DWORD pid) {
-  TitleSearch search{pid, {}};
-  EnumWindows(TitleProc, reinterpret_cast<LPARAM>(&search));
-  return search.title;
+std::vector<VisibleWindow> CollectVisibleWindows() {
+  std::vector<VisibleWindow> windows;
+  EnumWindows(CollectWindowProc, reinterpret_cast<LPARAM>(&windows));
+  return windows;
 }
 
 std::string ExecutableName(DWORD pid) {
@@ -238,8 +287,23 @@ struct Detected {
   int32_t confidence = 0;
 };
 
+template <typename Predicate>
+const VisibleWindow *BestWindow(const std::vector<VisibleWindow> &windows,
+                                Predicate predicate) {
+  const VisibleWindow *best = nullptr;
+  for (const auto &window : windows) {
+    if (!predicate(window)) continue;
+    if (!best || window.area > best->area ||
+        (window.area == best->area && window.title.size() > best->title.size())) {
+      best = &window;
+    }
+  }
+  return best;
+}
+
 std::vector<Detected> Scan() {
   const auto activity = CollectAudioActivity();
+  const auto windows = CollectVisibleWindows();
   const DWORD self = GetCurrentProcessId();
 
   /* Group by platform (native) or by executable (browsers). */
@@ -276,14 +340,33 @@ std::vector<Detected> Scan() {
   std::vector<Detected> results;
 
   for (auto &[platform, entry] : native) {
-    entry.title = WindowTitleFor(entry.pid);
+    if (const auto *window = BestWindow(windows, [platform](const VisibleWindow &candidate) {
+          return NativePlatformFor(candidate.executable_lower) == platform;
+        })) {
+      entry.pid = window->pid;
+      entry.app_name = window->executable;
+      entry.title = window->title;
+    }
     entry.confidence = kScoreKnownApp + (entry.output ? kScorePlayingAudio : 0) +
                        (entry.mic ? kScoreUsingMic : 0);
     results.push_back(entry);
   }
 
   for (auto &[exe, entry] : browser) {
-    entry.title = WindowTitleFor(entry.pid);
+    const auto matching_executable = [&exe](const VisibleWindow &candidate) {
+      return candidate.executable_lower == exe;
+    };
+    const VisibleWindow *window = BestWindow(windows, [&matching_executable](
+                                                           const VisibleWindow &candidate) {
+      return matching_executable(candidate) &&
+             PlatformForText(candidate.title) != MREC_PLATFORM_UNKNOWN;
+    });
+    if (!window) window = BestWindow(windows, matching_executable);
+    if (window) {
+      entry.pid = window->pid;
+      entry.app_name = window->executable;
+      entry.title = window->title;
+    }
     /*
      * A video tab and a call tab are indistinguishable at the process level, so
      * require a recognised title or a live microphone.
@@ -321,14 +404,9 @@ void Fill(mrec_meeting *out, const Detected &d) {
   out->is_using_mic = d.mic ? 1 : 0;
   out->is_playing_audio = d.output ? 1 : 0;
   out->confidence = (std::min)(d.confidence, 100);
+  out->should_record = out->confidence >= kRecordThreshold ? 1 : 0;
 
-  LARGE_INTEGER freq, counter;
-  QueryPerformanceFrequency(&freq);
-  QueryPerformanceCounter(&counter);
-  out->detected_at_ns = freq.QuadPart
-                            ? static_cast<uint64_t>(counter.QuadPart) * 1000000000ull /
-                                  static_cast<uint64_t>(freq.QuadPart)
-                            : 0;
+  out->detected_at_ns = MonotonicTimeNs();
 }
 
 class Watcher {
@@ -345,16 +423,37 @@ public:
     user_data_ = user_data;
     running_ = true;
     stop_ = false;
-    thread_ = std::thread([this] { Loop(); });
+    const uint64_t generation =
+        generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    try {
+      thread_ = std::thread([this, generation] { Loop(generation); });
+    } catch (...) {
+      running_ = false;
+      callback_ = nullptr;
+      user_data_ = nullptr;
+      return MREC_ERR_INTERNAL;
+    }
     return MREC_OK;
   }
 
   mrec_status Stop() {
+    bool stopping_from_callback = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!running_) return MREC_ERR_NOT_RUNNING;
       stop_ = true;
+      generation_.fetch_add(1, std::memory_order_acq_rel);
+      stopping_from_callback =
+          thread_.joinable() && thread_.get_id() == std::this_thread::get_id();
+      if (stopping_from_callback) {
+        thread_.detach();
+        running_ = false;
+        active_.clear();
+        callback_ = nullptr;
+        user_data_ = nullptr;
+      }
     }
+    if (stopping_from_callback) return MREC_OK;
     if (thread_.joinable()) thread_.join();
     std::lock_guard<std::mutex> lock(mutex_);
     running_ = false;
@@ -373,24 +472,31 @@ private:
    * Polled: IAudioSessionNotification fires only on session creation, not on the
    * inactive->active transition that marks a call going live.
    */
-  void Loop() {
+  bool ShouldStop(uint64_t generation) const {
+    return stop_.load(std::memory_order_acquire) ||
+           generation_.load(std::memory_order_acquire) != generation;
+  }
+
+  void Loop(uint64_t generation) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    while (!stop_.load(std::memory_order_relaxed)) {
-      Rescan();
-      for (int i = 0; i < 20 && !stop_.load(std::memory_order_relaxed); i++) {
+    while (!ShouldStop(generation)) {
+      Rescan(generation);
+      for (int i = 0; i < 20 && !ShouldStop(generation); i++) {
         Sleep(100);
       }
     }
     CoUninitialize();
   }
 
-  void Rescan() {
+  void Rescan(uint64_t generation) {
+    if (ShouldStop(generation)) return;
     auto found = Scan();
     std::map<DWORD, Detected> next;
     for (auto &entry : found) next[entry.pid] = entry;
 
     mrec_meeting payload;
     for (const auto &[pid, entry] : next) {
+      if (ShouldStop(generation)) return;
       auto previous = active_.find(pid);
       if (previous == active_.end()) {
         Fill(&payload, entry);
@@ -399,13 +505,17 @@ private:
         Fill(&payload, entry);
         callback_(&payload, MREC_MEETING_UPDATED, user_data_);
       }
+      if (ShouldStop(generation)) return;
     }
     for (const auto &[pid, entry] : active_) {
+      if (ShouldStop(generation)) return;
       if (next.find(pid) == next.end()) {
         Fill(&payload, entry);
         callback_(&payload, MREC_MEETING_ENDED, user_data_);
+        if (ShouldStop(generation)) return;
       }
     }
+    if (ShouldStop(generation)) return;
     active_ = std::move(next);
   }
 
@@ -417,6 +527,7 @@ private:
   std::mutex mutex_;
   bool running_ = false;
   std::atomic<bool> stop_{false};
+  std::atomic<uint64_t> generation_{0};
   std::thread thread_;
   std::map<DWORD, Detected> active_;
   mrec_meeting_callback callback_ = nullptr;
@@ -435,6 +546,27 @@ mrec_status mrec_scan(mrec_meeting *out, size_t capacity,
   for (size_t i = 0; i < count; i++) Fill(&out[i], found[i]);
   *out_count = count;
   return found.size() > capacity ? MREC_ERR_BUFFER_TOO_SMALL : MREC_OK;
+}
+
+mrec_status mrec_start_meeting(const mrec_meeting *meeting,
+                               mrec_audio_callback callback,
+                               void *user_data) {
+  if (!meeting) return MREC_ERR_INTERNAL;
+
+  /* INCLUDE_PROCESS_TREE should start at the visible owner, not at each current
+   * audio helper: that follows helpers created later and prevents double capture.
+   * Refresh the owner because the caller may have held the meeting for a while. */
+  uint32_t target = meeting->pid;
+  const auto current = Scan();
+  const auto fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
+    return item.platform == meeting->platform;
+  });
+  if (fresh != current.end() && fresh->pid != 0) target = fresh->pid;
+  if (target == 0 && meeting->audio_pid_count > 0) target = meeting->audio_pids[0];
+  if (target == 0) return MREC_ERR_NO_PROCESSES;
+
+  return static_cast<mrec_status>(
+      mrec_start_raw(&target, 1, 0, 1, 0, callback, user_data));
 }
 
 mrec_status mrec_watch_start(mrec_meeting_callback cb,

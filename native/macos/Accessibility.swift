@@ -16,6 +16,8 @@ import Foundation
 enum Accessibility {
     /// Seconds before an AX request to another process gives up.
     private static let messagingTimeout: Float = 0.25
+    /// Bound the whole tree walk as well as each individual AX request.
+    private static let traversalTimeout: TimeInterval = 0.5
 
     /// Preflight check.
     static func isTrusted() -> Bool {
@@ -102,13 +104,16 @@ enum Accessibility {
         enableEnhancedInterface(app)
 
         let windows = elementsAttribute(app, kAXWindowsAttribute as String)
+        let deadline = ProcessInfo.processInfo.systemUptime + traversalTimeout
         for window in windows.prefix(3) {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
             AXUIElementSetMessagingTimeout(window, messagingTimeout)
 
             if let url = urlAttribute(window) { return url }
 
             var budget = 400
-            if let found = findURL(in: window, depth: 0, maxDepth: 8, budget: &budget) {
+            if let found = findURL(in: window, depth: 0, maxDepth: 8,
+                                   deadline: deadline, budget: &budget) {
                 return found
             }
         }
@@ -127,8 +132,10 @@ enum Accessibility {
     private static func findURL(in element: AXUIElement,
                                 depth: Int,
                                 maxDepth: Int,
+                                deadline: TimeInterval,
                                 budget: inout Int) -> String? {
-        guard depth <= maxDepth, budget > 0 else { return nil }
+        guard depth <= maxDepth, budget > 0,
+              ProcessInfo.processInfo.systemUptime < deadline else { return nil }
         budget -= 1
 
         if let url = urlAttribute(element) { return url }
@@ -148,9 +155,11 @@ enum Accessibility {
         }
 
         for child in elementsAttribute(element, kAXChildrenAttribute as String) {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
             AXUIElementSetMessagingTimeout(child, messagingTimeout)
             if let found = findURL(in: child, depth: depth + 1,
-                                   maxDepth: maxDepth, budget: &budget) {
+                                   maxDepth: maxDepth, deadline: deadline,
+                                   budget: &budget) {
                 return found
             }
         }

@@ -8,8 +8,6 @@ use std::process::Command;
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let native = native_root(&manifest);
-    println!("cargo:rerun-if-changed={}", native.display());
-
     // docs.rs has no macOS or Windows SDK. Rustdoc does not link the externs,
     // so it can still document the safe wrapper without building a backend.
     if env::var_os("DOCS_RS").is_some() {
@@ -25,22 +23,24 @@ fn main() {
 }
 
 fn native_root(manifest: &Path) -> PathBuf {
+    let workspace = manifest
+        .parent()
+        .expect("the development crate must be inside the workspace")
+        .join("native");
+    if workspace.is_dir() {
+        return workspace;
+    }
+
     let packaged = manifest.join("native");
     if packaged.is_dir() {
         return packaged;
     }
 
-    let workspace = manifest
-        .parent()
-        .expect("the development crate must be inside the workspace")
-        .join("native");
-    assert!(
-        workspace.is_dir(),
+    panic!(
         "native sources are missing from both {} and {}",
         packaged.display(),
         workspace.display()
-    );
-    workspace
+    )
 }
 
 fn build_macos(native: &Path) {
@@ -61,6 +61,15 @@ fn build_macos(native: &Path) {
         .collect::<Vec<_>>();
     sources.sort();
     assert!(!sources.is_empty(), "no bundled macOS sources were found");
+    for source in &sources {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    for header in ["meeting-record.h", "meeting-record-detect.h"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            native.join("include").join(header).display()
+        );
+    }
 
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("libmeetingrecord_macos.a");
     let mut swift = Command::new("xcrun");
@@ -96,20 +105,29 @@ fn build_macos(native: &Path) {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
 
-    let developer_dir = Command::new("xcode-select")
-        .arg("-p")
+    let sdk = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
         .output()
-        .expect("failed to run xcode-select");
-    assert!(developer_dir.status.success(), "xcode-select -p failed");
-    let developer_dir =
-        String::from_utf8(developer_dir.stdout).expect("xcode-select returned a non-UTF-8 path");
-    let swift_runtime = Path::new(developer_dir.trim())
-        .join("Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx");
-    println!("cargo:rustc-link-search=native={}", swift_runtime.display());
+        .expect("failed to locate the macOS SDK through xcrun");
+    assert!(sdk.status.success(), "xcrun --show-sdk-path failed");
+    let sdk = String::from_utf8(sdk.stdout).expect("xcrun returned a non-UTF-8 SDK path");
+    let swift_libraries = Path::new(sdk.trim()).join("usr/lib/swift");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        swift_libraries.display()
+    );
     println!("cargo:rustc-link-lib=dylib=swiftCore");
 }
 
 fn build_windows(native: &Path) {
+    for source in [
+        "include/meeting-record.h",
+        "include/meeting-record-detect.h",
+        "windows/ProcessLoopback.cpp",
+        "windows/MeetingDetector.cpp",
+    ] {
+        println!("cargo:rerun-if-changed={}", native.join(source).display());
+    }
     cc::Build::new()
         .cpp(true)
         .std("c++17")

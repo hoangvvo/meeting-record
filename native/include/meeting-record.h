@@ -42,8 +42,10 @@ typedef enum {
 /*
  * macOS: whether this app holds kTCCServiceAudioCapture.
  *
- * No preflight API exists, so this probes with a throwaway tap and aggregate
- * device. Around 10ms when granted; the result is cached internally.
+ * No preflight API exists, so this starts at most one throwaway tap probe. A
+ * status call waits briefly for that probe and otherwise returns UNKNOWN; the
+ * terminal result is cached. Repeated polling never creates extra blocked
+ * threads or taps.
  */
 mrec_permission mrec_audio_permission_status(void);
 
@@ -82,7 +84,9 @@ mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
 
 /*
  * Called on a realtime audio thread. `frames` is interleaved float32, valid only
- * for the duration of the call.
+ * for the duration of the call. `host_time_ns` is the capture time of the first
+ * frame on a process-wide monotonic clock shared by the system and microphone
+ * tracks. The callback's format fields are authoritative after device recovery.
  */
 typedef void (*mrec_audio_callback)(const float *frames, uint32_t frame_count,
                                      uint32_t channels, double sample_rate,
@@ -97,7 +101,7 @@ typedef struct {
   size_t pid_count;
 
   /*
-   * Capture the whole system mix instead. Yields silence while output is muted.
+   * Capture all application output instead.
    * Ignored when pid_count > 0.
    */
   int32_t global_mixdown;
@@ -154,7 +158,22 @@ static inline mrec_status mrec_start(const mrec_config *cfg,
 mrec_status mrec_stop(void);
 int32_t mrec_is_running(void);
 
-/* Actual negotiated format, valid once running. */
+/*
+ * Runtime health is separate from the caller-controlled recording state. A
+ * backend may briefly recover after an audio device or format change. FAILED is
+ * terminal for the current session: read mrec_last_error(), then call
+ * mrec_stop() to release the session before starting another one.
+ */
+typedef enum {
+  MREC_CAPTURE_STOPPED = 0,
+  MREC_CAPTURE_RUNNING = 1,
+  MREC_CAPTURE_RECOVERING = 2,
+  MREC_CAPTURE_FAILED = 3,
+} mrec_capture_health;
+
+mrec_capture_health mrec_capture_health_status(void);
+
+/* Initial negotiated format, valid once running. A recovery may renegotiate it. */
 mrec_status mrec_current_format(double *sample_rate, uint32_t *channels);
 mrec_status mrec_current_microphone_format(double *sample_rate,
                                                uint32_t *channels);

@@ -63,7 +63,7 @@ export type CaptureTarget =
       pid: number
     }
   | {
-      /** The whole system mix. Records silence while output is muted. */
+      /** All application output. */
       type: 'system'
     }
 
@@ -219,36 +219,80 @@ export const meetings = new Meetings() as Meetings & {
  * its preallocated ring buffer drops samples and emits `drop`.
  */
 export type CaptureState = 'recording' | 'paused' | 'stopped'
+export type CaptureHealth = 'running' | 'recovering' | 'failed' | 'stopped'
+
+export interface AudioFormat {
+  readonly sampleRate: number
+  readonly channels: number
+}
+
+/**
+ * A PCM buffer with the capture time of its first frame.
+ *
+ * `hostTimeNs` is monotonic (not Unix time) and uses the same host clock for the
+ * system and microphone tracks, so callers can align or echo-cancel them without
+ * relying on callback arrival order.
+ */
+export interface AudioChunk extends Buffer {
+  readonly hostTimeNs: bigint
+  readonly frameCount: number
+  readonly sampleRate: number
+  readonly channels: number
+  readonly droppedSamples: number
+}
 
 export interface AudioTrack extends Readable {
+  /** Current negotiated format; a `format` event announces changes. */
   readonly sampleRate: number
   readonly channels: number
   /** Interleaved samples discarded because the bounded queue could not accept them. */
   readonly droppedSamples: number
+  on(event: 'data', listener: (chunk: AudioChunk) => void): this
+  on(event: 'drop', listener: (droppedSamples: number) => void): this
+  /** Emitted before the first chunk in a newly negotiated device format. */
+  on(event: 'format', listener: (format: AudioFormat) => void): this
+  on(event: string | symbol, listener: (...args: any[]) => void): this
 }
 
-export interface CaptureSession {
+export interface CaptureSession extends EventEmitter {
   readonly systemAudio: AudioTrack
   readonly microphone?: AudioTrack
   readonly state: CaptureState
+  /** Native device health; independent of pause/resume state. */
+  readonly health: CaptureHealth
+  /** Set when automatic recovery exhausts its retries. */
+  readonly failure?: CaptureError
   pauseRecording(): void
   resumeRecording(): void
   stopRecording(): Promise<void>
+  on(event: 'interrupted', listener: () => void): this
+  on(event: 'recovered', listener: () => void): this
+  on(event: 'failed', listener: (error: CaptureError) => void): this
+  on(event: string | symbol, listener: (...args: any[]) => void): this
 }
 
 class AudioTrackImpl extends Readable implements AudioTrack {
-  readonly #sampleRate: number
-  readonly #channels: number
+  #sampleRate: number
+  #channels: number
+  readonly #microphone: boolean
   #droppedSamples = 0
+  #consumerReady = true
+  #finished = false
 
-  constructor(sampleRate: number, channels: number) {
+  constructor(sampleRate: number, channels: number, microphone: boolean) {
     super({ objectMode: false, highWaterMark: 1 << 20 })
     this.#sampleRate = sampleRate
     this.#channels = channels
+    this.#microphone = microphone
   }
 
   /** Required by Readable; data arrives from the native side, not on demand. */
-  override _read(): void {}
+  override _read(): void {
+    if (!this.#consumerReady && !this.#finished) {
+      this.#consumerReady = true
+      native.captureSetConsumerReady(this.#microphone, true)
+    }
+  }
 
   get sampleRate(): number {
     return this.#sampleRate
@@ -262,27 +306,50 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     return this.#droppedSamples
   }
 
-  pushAudio(chunk: Buffer, dropped: number): void {
-    if (dropped > 0) {
-      this.#droppedSamples += dropped
-      this.emit('drop', dropped)
+  pushAudio(chunk: Buffer, info: NativeAudioInfo): void {
+    if (info.dropped > 0) {
+      this.#droppedSamples += info.dropped
+      this.emit('drop', info.dropped)
     }
-    this.push(chunk)
+    if (info.sampleRate !== this.#sampleRate || info.channels !== this.#channels) {
+      this.#sampleRate = info.sampleRate
+      this.#channels = info.channels
+      this.emit('format', { sampleRate: info.sampleRate, channels: info.channels })
+    }
+    Object.defineProperties(chunk, {
+      hostTimeNs: { value: info.hostTimeNs, enumerable: false },
+      frameCount: { value: info.frameCount, enumerable: false },
+      sampleRate: { value: info.sampleRate, enumerable: false },
+      channels: { value: info.channels, enumerable: false },
+      droppedSamples: { value: info.dropped, enumerable: false },
+    })
+    if (!this.push(chunk as AudioChunk) && this.#consumerReady) {
+      this.#consumerReady = false
+      native.captureSetConsumerReady(this.#microphone, false)
+    }
   }
 
   finish(): void {
+    if (this.#finished) return
+    this.#finished = true
     this.push(null)
   }
 }
 
-class CaptureSessionImpl implements CaptureSession {
+class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   #state: CaptureState = 'recording'
+  #health: CaptureHealth = 'running'
+  #failure?: CaptureError
+  readonly #healthTimer: NodeJS.Timeout
   readonly #systemAudio: AudioTrackImpl
   readonly #microphone?: AudioTrackImpl
 
   constructor(systemAudio: AudioTrackImpl, microphone?: AudioTrackImpl) {
+    super()
     this.#systemAudio = systemAudio
     this.#microphone = microphone
+    this.#healthTimer = setInterval(() => this.#pollHealth(), 250)
+    this.#healthTimer.unref()
   }
 
   get systemAudio(): AudioTrackImpl {
@@ -295,6 +362,14 @@ class CaptureSessionImpl implements CaptureSession {
 
   get state(): CaptureState {
     return this.#state
+  }
+
+  get health(): CaptureHealth {
+    return this.#health
+  }
+
+  get failure(): CaptureError | undefined {
+    return this.#failure
   }
 
   pauseRecording(): void {
@@ -315,14 +390,50 @@ class CaptureSessionImpl implements CaptureSession {
 
   async stopRecording(): Promise<void> {
     if (this.#state === 'stopped') return
+    clearInterval(this.#healthTimer)
     native.captureStop()
     this.#state = 'stopped'
-    this.systemAudio.finish()
-    this.microphone?.finish()
+    this.#health = 'stopped'
+    this.#finishTracks()
+  }
+
+  #finishTracks(): void {
+    this.#systemAudio.finish()
+    this.#microphone?.finish()
+  }
+
+  #pollHealth(): void {
+    if (this.#state === 'stopped') return
+    const health = native.captureHealthStatus() as CaptureHealth
+    if (health === this.#health) return
+
+    const previous = this.#health
+    this.#health = health
+    if (health === 'recovering') {
+      this.emit('interrupted')
+    } else if (health === 'running' && previous === 'recovering') {
+      this.emit('recovered')
+    } else if (health === 'failed') {
+      const failure = new CaptureError(native.lastError(), -7)
+      this.#failure = failure
+      clearInterval(this.#healthTimer)
+      native.captureStop()
+      this.#state = 'stopped'
+      this.#finishTracks()
+      this.emit('failed', failure)
+    }
   }
 }
 
 let captureStarting = false
+
+interface NativeAudioInfo {
+  dropped: number
+  hostTimeNs: bigint
+  frameCount: number
+  sampleRate: number
+  channels: number
+}
 
 export const capture = {
   async start(
@@ -334,27 +445,27 @@ export const capture = {
     }
     captureStarting = true
     let session: CaptureSessionImpl | undefined
-    const pendingSystemAudio: Array<{ chunk: Buffer; dropped: number }> = []
-    const pendingMicrophone: Array<{ chunk: Buffer; dropped: number }> = []
+    const pendingSystemAudio: Array<{ chunk: Buffer; info: NativeAudioInfo }> = []
+    const pendingMicrophone: Array<{ chunk: Buffer; info: NativeAudioInfo }> = []
 
     const receive = (
       track: 'systemAudio' | 'microphone',
-      pending: Array<{ chunk: Buffer; dropped: number }>,
+      pending: Array<{ chunk: Buffer; info: NativeAudioInfo }>,
       chunk: Buffer,
-      info: { dropped: number },
+      info: NativeAudioInfo,
     ) => {
       if (!session) {
-        pending.push({ chunk, dropped: info.dropped })
+        pending.push({ chunk, info })
         return
       }
       if (session.state !== 'recording') return
-      session[track]?.pushAudio(chunk, info.dropped)
+      session[track]?.pushAudio(chunk, info)
     }
 
-    const onSystemAudio = (chunk: Buffer, info: { dropped: number }) => {
+    const onSystemAudio = (chunk: Buffer, info: NativeAudioInfo) => {
       receive('systemAudio', pendingSystemAudio, chunk, info)
     }
-    const onMicrophone = (chunk: Buffer, info: { dropped: number }) => {
+    const onMicrophone = (chunk: Buffer, info: NativeAudioInfo) => {
       receive('microphone', pendingMicrophone, chunk, info)
     }
 
@@ -388,16 +499,17 @@ export const capture = {
       const systemAudio = new AudioTrackImpl(
         formats.systemAudio.sampleRate,
         formats.systemAudio.channels,
+        false,
       )
       const microphone = formats.microphone
-        ? new AudioTrackImpl(formats.microphone.sampleRate, formats.microphone.channels)
+        ? new AudioTrackImpl(formats.microphone.sampleRate, formats.microphone.channels, true)
         : undefined
       session = new CaptureSessionImpl(systemAudio, microphone)
-      for (const { chunk, dropped } of pendingSystemAudio) {
-        systemAudio.pushAudio(chunk, dropped)
+      for (const { chunk, info } of pendingSystemAudio) {
+        systemAudio.pushAudio(chunk, info)
       }
-      for (const { chunk, dropped } of pendingMicrophone) {
-        microphone?.pushAudio(chunk, dropped)
+      for (const { chunk, info } of pendingMicrophone) {
+        microphone?.pushAudio(chunk, info)
       }
       return session
     } catch (error) {
@@ -408,6 +520,6 @@ export const capture = {
   },
 
   get running(): boolean {
-    return captureStarting || native.isRunning()
+    return captureStarting || native.captureHealthStatus() !== 'stopped'
   },
 }

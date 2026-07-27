@@ -1,6 +1,11 @@
 import CoreAudio
 import Foundation
 
+/// Scalar types that are safe to pass through CoreAudio's untyped property API.
+protocol HALScalar {}
+extension Int32: HALScalar {}
+extension UInt32: HALScalar {}
+
 /// Wrappers over the CoreAudio HAL property API, plus enumeration of the system's
 /// audio process objects.
 enum HAL {
@@ -26,14 +31,19 @@ enum HAL {
         return size
     }
 
-    static func value<T>(_ object: AudioObjectID,
-                         _ selector: AudioObjectPropertySelector,
-                         scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
-                         default def: T) -> T {
+    static func value<T: HALScalar>(_ object: AudioObjectID,
+                                    _ selector: AudioObjectPropertySelector,
+                                    scope: AudioObjectPropertyScope =
+                                        kAudioObjectPropertyScopeGlobal,
+                                    default def: T) -> T {
         var addr = address(selector, scope: scope)
         var size = UInt32(MemoryLayout<T>.size)
         var out = def
-        guard AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &out) == noErr else {
+        let status = withUnsafeMutableBytes(of: &out) { bytes in
+            AudioObjectGetPropertyData(object, &addr, 0, nil, &size,
+                                       bytes.baseAddress!)
+        }
+        guard status == noErr else {
             return def
         }
         return out

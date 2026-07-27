@@ -63,7 +63,11 @@ private func hostTimeNanoseconds() -> UInt64 {
     guard mach_timebase_info(&info) == KERN_SUCCESS, info.denom != 0 else {
         return mach_absolute_time()
     }
-    return mach_absolute_time() * UInt64(info.numer) / UInt64(info.denom)
+    let ticks = mach_absolute_time()
+    let numerator = UInt64(info.numer)
+    let denominator = UInt64(info.denom)
+    return (ticks / denominator) * numerator
+        + (ticks % denominator) * numerator / denominator
 }
 
 /// Serialise one meeting into a zeroed C struct and pass it to `body`.

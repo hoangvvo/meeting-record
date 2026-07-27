@@ -15,6 +15,10 @@ pub const MREC_ERR_TAP_FAILED: i32 = -6;
 pub const MREC_ERR_DEVICE_FAILED: i32 = -7;
 pub const MREC_ERR_IOPROC_FAILED: i32 = -8;
 
+pub const MREC_CAPTURE_RUNNING: i32 = 1;
+pub const MREC_CAPTURE_RECOVERING: i32 = 2;
+pub const MREC_CAPTURE_FAILED: i32 = 3;
+
 pub const MREC_MAX_AUDIO_PIDS: usize = 16;
 
 /// Interleaved float32 PCM on a realtime audio thread.
@@ -86,6 +90,7 @@ extern "C" {
 
     pub fn mrec_stop() -> c_int;
     pub fn mrec_is_running() -> i32;
+    pub fn mrec_capture_health_status() -> i32;
     pub fn mrec_current_format(sample_rate: *mut c_double, channels: *mut u32) -> c_int;
     pub fn mrec_current_microphone_format(sample_rate: *mut c_double, channels: *mut u32) -> c_int;
     pub fn mrec_last_error() -> *const c_char;

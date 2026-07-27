@@ -8,27 +8,180 @@ import Foundation
 
 private final class Session {
     static let shared = Session()
+    static let errorCapacity = 1024
 
     let lock = NSLock()
     let systemStateBox = CaptureStateBox()
     let microphoneStateBox = CaptureStateBox()
     var capture: TapCapture?
     var microphone: MicrophoneCapture?
-    var lastError = "no error"
+    var captureConfiguration: SystemCaptureConfiguration?
+    let restartQueue = DispatchQueue(label: "meetingrecord.capture-restart")
+    let healthLock = NSLock()
+    var health: Int32 = 0
+    let errorLock = NSLock()
+    let lastErrorStorage: UnsafeMutablePointer<CChar>
+
+    private init() {
+        lastErrorStorage = .allocate(capacity: Self.errorCapacity)
+        lastErrorStorage.initialize(repeating: 0, count: Self.errorCapacity)
+        let initial = Array("no error".utf8)
+        for (index, byte) in initial.enumerated() {
+            lastErrorStorage[index] = CChar(bitPattern: byte)
+        }
+    }
 }
 
-private var lastErrorStorage: UnsafeMutablePointer<CChar>?
+private func setCaptureHealth(_ value: Int32) {
+    let session = Session.shared
+    session.healthLock.lock()
+    session.health = value
+    session.healthLock.unlock()
+}
+
+private func captureHealth() -> Int32 {
+    let session = Session.shared
+    session.healthLock.lock()
+    let value = session.health
+    session.healthLock.unlock()
+    return value
+}
+
+private struct SystemCaptureConfiguration {
+    var pids: [pid_t]
+    var globalMixdown: Bool
+    var mono: Bool
+    var muteCapturedOutput: Bool
+}
 
 private func setLastError(_ message: String) {
-    Session.shared.lastError = message
-    if let old = lastErrorStorage { free(old) }
-    lastErrorStorage = strdup(message)
+    let session = Session.shared
+    session.errorLock.lock()
+    session.lastErrorStorage.update(repeating: 0, count: Session.errorCapacity)
+    for (index, byte) in message.utf8.prefix(Session.errorCapacity - 1).enumerated() {
+        session.lastErrorStorage[index] = CChar(bitPattern: byte)
+    }
+    session.errorLock.unlock()
+}
+
+private func makeTapCapture(_ configuration: SystemCaptureConfiguration) throws -> TapCapture {
+    let capture = TapCapture(stateBox: Session.shared.systemStateBox,
+                             onConfigurationChange: scheduleCaptureRestart)
+    try capture.start(pids: configuration.pids,
+                      globalMixdown: configuration.globalMixdown,
+                      mono: configuration.mono,
+                      muteCapturedOutput: configuration.muteCapturedOutput)
+    return capture
+}
+
+private func makeMicrophoneCapture() throws -> MicrophoneCapture {
+    let microphone = MicrophoneCapture(stateBox: Session.shared.microphoneStateBox,
+                                       onConfigurationChange: scheduleMicrophoneRestart)
+    try microphone.start()
+    return microphone
+}
+
+private func scheduleCaptureRestart(_ identifier: UUID, _ reason: String) {
+    let session = Session.shared
+    session.restartQueue.async {
+        session.lock.lock()
+        defer { session.lock.unlock() }
+        guard let current = session.capture,
+              current.identifier == identifier,
+              let configuration = session.captureConfiguration else { return }
+
+        setCaptureHealth(2) // MREC_CAPTURE_RECOVERING
+        setLastError("system audio interrupted: \(reason); restarting")
+        current.stop()
+        session.capture = nil
+
+        var lastFailure = "unknown error"
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                Thread.sleep(forTimeInterval: 0.1 * Double(attempt + 1))
+            }
+            do {
+                session.capture = try makeTapCapture(configuration)
+                setLastError("no error")
+                setCaptureHealth(1) // MREC_CAPTURE_RUNNING
+                return
+            } catch let error as CaptureError {
+                lastFailure = error.message
+            } catch {
+                lastFailure = String(describing: error)
+            }
+        }
+
+        session.microphone?.stop()
+        session.microphone = nil
+        session.captureConfiguration = nil
+        session.systemStateBox.clear()
+        session.microphoneStateBox.clear()
+        setLastError("system audio recovery failed after 3 attempts: \(lastFailure)")
+        setCaptureHealth(3) // MREC_CAPTURE_FAILED
+    }
+}
+
+private func scheduleMicrophoneRestart(_ identifier: UUID, _ reason: String) {
+    let session = Session.shared
+    session.restartQueue.async {
+        session.lock.lock()
+        defer { session.lock.unlock() }
+        guard let current = session.microphone,
+              current.identifier == identifier,
+              session.capture != nil else { return }
+
+        setCaptureHealth(2) // MREC_CAPTURE_RECOVERING
+        setLastError("microphone interrupted: \(reason); restarting")
+        current.stop()
+        session.microphone = nil
+
+        var lastFailure = "unknown error"
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                Thread.sleep(forTimeInterval: 0.1 * Double(attempt + 1))
+            }
+            do {
+                session.microphone = try makeMicrophoneCapture()
+                setLastError("no error")
+                setCaptureHealth(1) // MREC_CAPTURE_RUNNING
+                return
+            } catch let error as CaptureError {
+                lastFailure = error.message
+            } catch {
+                lastFailure = String(describing: error)
+            }
+        }
+
+        session.capture?.stop()
+        session.capture = nil
+        session.captureConfiguration = nil
+        session.systemStateBox.clear()
+        session.microphoneStateBox.clear()
+        setLastError("microphone recovery failed after 3 attempts: \(lastFailure)")
+        setCaptureHealth(3) // MREC_CAPTURE_FAILED
+    }
 }
 
 @_cdecl("mrec_last_error")
 public func mrec_last_error() -> UnsafePointer<CChar>? {
-    if lastErrorStorage == nil { lastErrorStorage = strdup(Session.shared.lastError) }
-    return UnsafePointer(lastErrorStorage)
+    let session = Session.shared
+    let key = "dev.meetingrecord.last-error"
+    let dictionary = Thread.current.threadDictionary
+    let snapshot: NSMutableData
+    if let existing = dictionary[key] as? NSMutableData,
+       existing.length == Session.errorCapacity {
+        snapshot = existing
+    } else {
+        snapshot = NSMutableData(length: Session.errorCapacity)!
+        dictionary[key] = snapshot
+    }
+
+    session.errorLock.lock()
+    snapshot.mutableBytes.copyMemory(from: session.lastErrorStorage,
+                                     byteCount: Session.errorCapacity)
+    session.errorLock.unlock()
+    return UnsafePointer(snapshot.mutableBytes.assumingMemoryBound(to: CChar.self))
 }
 
 @_cdecl("mrec_audio_permission_status")
@@ -121,7 +274,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     session.lock.lock()
     defer { session.lock.unlock() }
 
-    if session.capture != nil {
+    if session.capture != nil || captureHealth() != 0 {
         setLastError("capture already running")
         return -3
     }
@@ -132,6 +285,13 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     }
     if microphoneSource == 1, Permissions.microphoneStatus() != 1 {
         setLastError("microphone permission is not granted")
+        return -2
+    }
+    let audioPermission = Permissions.audioCaptureStatus(timeout: 0.25)
+    guard audioPermission == 1 else {
+        setLastError(audioPermission == 2
+            ? "system audio recording permission is denied"
+            : "system audio recording permission is not granted yet; request it first")
         return -2
     }
 
@@ -152,10 +312,13 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
         }
     }
 
-    session.systemStateBox.configure(callback: systemCallback, userData: systemUserData)
-    session.microphoneStateBox.configure(callback: microphoneCallback,
-                                         userData: microphoneUserData)
-    let capture = TapCapture(stateBox: session.systemStateBox)
+    let configuration = SystemCaptureConfiguration(
+        pids: pids,
+        globalMixdown: global,
+        mono: mono != 0,
+        muteCapturedOutput: muteCapturedOutput != 0)
+    let capture = TapCapture(stateBox: session.systemStateBox,
+                             onConfigurationChange: scheduleCaptureRestart)
 
     // Start under a timeout rather than probing permission first: a probe builds
     // and tears down a second tap moments before this one, and that teardown races
@@ -165,10 +328,10 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     // blocks instead of failing.
     let outcome: Int32? = withTimeout(seconds: 6) {
         do {
-            try capture.start(pids: pids,
-                              globalMixdown: global,
-                              mono: mono != 0,
-                              muteCapturedOutput: muteCapturedOutput != 0)
+            try capture.prepare(pids: configuration.pids,
+                                globalMixdown: configuration.globalMixdown,
+                                mono: configuration.mono,
+                                muteCapturedOutput: configuration.muteCapturedOutput)
             return 0
         } catch let error as CaptureError {
             setLastError(error.message)
@@ -195,12 +358,28 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
         return outcome
     }
 
+    session.systemStateBox.configure(callback: systemCallback, userData: systemUserData)
+    session.microphoneStateBox.configure(callback: microphoneCallback,
+                                         userData: microphoneUserData)
+    do {
+        try capture.startPrepared()
+    } catch let error as CaptureError {
+        session.systemStateBox.clear()
+        session.microphoneStateBox.clear()
+        setLastError(error.message)
+        return error.status
+    } catch {
+        session.systemStateBox.clear()
+        session.microphoneStateBox.clear()
+        setLastError("capture start failed: \(error)")
+        return -9
+    }
+    Permissions.noteAudioCaptureGranted()
+
     var microphone: MicrophoneCapture?
     if microphoneSource == 1 {
-        let candidate = MicrophoneCapture(stateBox: session.microphoneStateBox)
         do {
-            try candidate.start()
-            microphone = candidate
+            microphone = try makeMicrophoneCapture()
         } catch let error as CaptureError {
             capture.stop()
             session.systemStateBox.clear()
@@ -218,7 +397,9 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
 
     session.capture = capture
     session.microphone = microphone
+    session.captureConfiguration = configuration
     setLastError("no error")
+    setCaptureHealth(1) // MREC_CAPTURE_RUNNING
     return 0
 }
 
@@ -228,13 +409,26 @@ public func mrec_stop() -> Int32 {
     session.lock.lock()
     defer { session.lock.unlock() }
 
-    guard let capture = session.capture else { return -4 /* NOT_RUNNING */ }
+    guard let capture = session.capture else {
+        if captureHealth() == 3 {
+            session.microphone?.stop()
+            session.microphone = nil
+            session.captureConfiguration = nil
+            session.systemStateBox.clear()
+            session.microphoneStateBox.clear()
+            setCaptureHealth(0)
+            return 0
+        }
+        return -4 /* NOT_RUNNING */
+    }
     session.microphone?.stop()
     capture.stop()
     session.microphone = nil
     session.capture = nil
+    session.captureConfiguration = nil
     session.systemStateBox.clear()
     session.microphoneStateBox.clear()
+    setCaptureHealth(0) // MREC_CAPTURE_STOPPED
     return 0
 }
 
@@ -244,6 +438,11 @@ public func mrec_is_running() -> Int32 {
     session.lock.lock()
     defer { session.lock.unlock() }
     return session.capture != nil ? 1 : 0
+}
+
+@_cdecl("mrec_capture_health_status")
+public func mrec_capture_health_status() -> Int32 {
+    captureHealth()
 }
 
 @_cdecl("mrec_current_format")

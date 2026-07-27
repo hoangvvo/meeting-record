@@ -165,7 +165,18 @@ enum MeetingDetector {
     /// Executable name as reported by the kernel.
     private static func processName(of pid: pid_t,
                                     in processes: [AudioProcess]) -> String {
-        processes.first { $0.pid == pid }?.name ?? processes.first?.name ?? ""
+        if let process = processes.first(where: { $0.pid == pid }) {
+            return process.name
+        }
+        if let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.processIdentifier == pid
+        }) {
+            return app.localizedName
+                ?? app.bundleURL?.deletingPathExtension().lastPathComponent
+                ?? processes.first?.name
+                ?? ""
+        }
+        return processes.first?.name ?? ""
     }
 
     static var recordThreshold: Int32 { Score.recordThreshold }

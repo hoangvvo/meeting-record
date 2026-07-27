@@ -15,25 +15,29 @@ import Foundation
 /// draw it and the CoreAudio call blocks instead of failing; calling from the main
 /// thread deadlocks, since the prompt needs that run loop.
 enum Permissions {
-    /// A grant cannot be revoked without an app restart, so GRANTED is cached.
-    /// Probing builds and tears down a real tap, which can disturb a live capture.
+    /// A grant cannot be revoked without an app restart, so terminal states are
+    /// cached. Most importantly, only one probe may exist: an undetermined TCC
+    /// request can block indefinitely, and polling must not leak one thread and
+    /// tap per status check.
     private static let cacheLock = NSLock()
-    private static var cachedGranted = false
+    private static var cachedStatus: Int32 = 0
+    private static var probeInFlight = false
 
     /// Returns GRANTED or DENIED when knowable within `timeout`, UNKNOWN when the
     /// probe blocks — meaning TCC has not been asked and a GUI prompt is required.
-    static func audioCaptureStatus(timeout: TimeInterval = 4.0) -> Int32 {
+    static func audioCaptureStatus(timeout: TimeInterval = 0.05) -> Int32 {
         cacheLock.lock()
-        let granted = cachedGranted
+        let cached = cachedStatus
         cacheLock.unlock()
-        if granted { return 1 }
+        if cached != 0 { return cached }
 
-        let status = withTimeout(seconds: timeout) { probeBlocking() } ?? 0 /* UNKNOWN */
-        if status == 1 {
-            cacheLock.lock()
-            cachedGranted = true
-            cacheLock.unlock()
+        let completion = beginProbeIfNeeded()
+        if let completion {
+            _ = completion.wait(timeout: .now() + timeout)
         }
+        cacheLock.lock()
+        let status = cachedStatus
+        cacheLock.unlock()
         return status
     }
 
@@ -95,12 +99,39 @@ enum Permissions {
     /// `audioCaptureStatus()` for the answer.
     static func requestAudioCapture() -> Int32 {
         guard #available(macOS 14.2, *) else { return -1 /* UNSUPPORTED_OS */ }
-        // The blocking probe raises the prompt, and must not run on the main
-        // thread, which has to draw it.
-        Thread.detachNewThread {
-            _ = probeBlocking()
-        }
+        _ = beginProbeIfNeeded()
         return 0
+    }
+
+    static func noteAudioCaptureGranted() {
+        cacheLock.lock()
+        cachedStatus = 1
+        cacheLock.unlock()
+    }
+
+    /// Starts the one allowed blocking probe and returns a completion semaphore
+    /// to the caller that won the race. Other callers observe UNKNOWN immediately.
+    private static func beginProbeIfNeeded() -> DispatchSemaphore? {
+        cacheLock.lock()
+        if cachedStatus != 0 || probeInFlight {
+            cacheLock.unlock()
+            return nil
+        }
+        probeInFlight = true
+        cacheLock.unlock()
+
+        let completion = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            let status = probeBlocking()
+            cacheLock.lock()
+            if status == 1 || (status != 0 && cachedStatus == 0) {
+                cachedStatus = status
+            }
+            probeInFlight = false
+            cacheLock.unlock()
+            completion.signal()
+        }
+        return completion
     }
 
     static func microphoneStatus() -> Int32 {
