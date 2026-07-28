@@ -5,15 +5,19 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/rust.yml"
+      - ".github/workflows/release.yml"
       - "native/**"
       - "rust/**"
+      - "scripts/stage-rust-package.sh"
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
     paths:
       - ".github/workflows/rust.yml"
+      - ".github/workflows/release.yml"
       - "native/**"
       - "rust/**"
+      - "scripts/stage-rust-package.sh"
       - "Cargo.toml"
       - "Cargo.lock"
 
@@ -63,5 +67,18 @@ jobs:
 
       - name: Test Rust package
         run: cargo test --locked -p meeting-record
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.2"
+
+      - name: Stage bundled native sources
+        shell: bash
+        run: |
+          ./scripts/stage-rust-package.sh
+          for directory in include macos windows; do
+            diff -qr "native/$directory" "rust/native/$directory"
+          done
+
+      - name: Verify packaged Rust crate
+        run: cargo package --allow-dirty --locked -p meeting-record
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.2"
