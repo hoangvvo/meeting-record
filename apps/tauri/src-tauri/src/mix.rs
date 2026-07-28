@@ -1,14 +1,15 @@
 //! Offline mixdown of the two capture stems into one mono file.
 //!
-//! Streams the stems rather than loading them: an hour of 48 kHz audio is ~700 MB
-//! as f32, and meetings run that long. Costs a second read of each stem, because
-//! the peak has to be known before any sample can be scaled.
+//! Streams the stems rather than loading them: an hour of 48 kHz audio is ~700
+//! MB as f32, and meetings run that long. Costs a second read of each stem,
+//! because the peak has to be known before any sample can be scaled.
 
 use std::path::Path;
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 
-/// Sequential mono reader. Multi-channel stems are averaged down as they arrive.
+/// Sequential mono reader. Multi-channel stems are averaged down as they
+/// arrive.
 struct MonoReader {
     samples: Box<dyn Iterator<Item = Result<f32, hound::Error>>>,
     channels: usize,
@@ -128,8 +129,8 @@ fn each_frame(
 /// match. Returns the peak of the mix before any scaling.
 ///
 /// The two tracks run off independent clocks, so they are aligned at the start
-/// and drift apart by whatever those clocks disagree on. Fine to listen back to,
-/// not sample-accurate.
+/// and drift apart by whatever those clocks disagree on. Fine to listen back
+/// to, not sample-accurate.
 pub fn mix(system_path: &Path, mic_path: Option<&Path>, out: &Path) -> Result<f32, String> {
     let (_, system_rate, system_frames) = MonoReader::open(system_path)?;
     let rate = system_rate.max(1.0);
@@ -174,10 +175,7 @@ pub fn mix(system_path: &Path, mic_path: Option<&Path>, out: &Path) -> Result<f3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::f64::consts::TAU;
-    use std::fs;
-    use std::path::PathBuf;
+    use std::{env, f64::consts::TAU, fs, path::PathBuf};
 
     fn sine(name: &str, rate: u32, seconds: f64, hz: f64, amplitude: f32) -> PathBuf {
         let dir = env::temp_dir().join("mrec-mix-tests");

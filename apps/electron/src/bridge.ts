@@ -9,26 +9,26 @@ import type {
   PermissionStatus,
   RecordingStarted,
   RecordingStopped,
-} from './api'
+} from "./api";
 
 declare global {
   interface Window {
     /** Injected by src/preload.ts. */
     readonly MeetingRecord: {
-      permissionStatus(name: PermissionName): Promise<PermissionStatus>
-      requestPermission(name: PermissionName): Promise<PermissionStatus>
-      scan(): Promise<MeetingView[]>
-      startRecording(meetingId: string | null, microphone: boolean): Promise<RecordingStarted>
-      stopRecording(): Promise<RecordingStopped>
-      reveal(path: string): Promise<void>
-      onMeetingEvent(handler: (event: MeetingEvent) => void): void
-      onMeter(handler: (meter: Meter) => void): void
-    }
+      permissionStatus(name: PermissionName): Promise<PermissionStatus>;
+      requestPermission(name: PermissionName): Promise<PermissionStatus>;
+      scan(): Promise<MeetingView[]>;
+      startRecording(meetingId: string | null, microphone: boolean): Promise<RecordingStarted>;
+      stopRecording(): Promise<RecordingStopped>;
+      reveal(path: string): Promise<void>;
+      onMeetingEvent(handler: (event: MeetingEvent) => void): void;
+      onMeter(handler: (meter: Meter) => void): void;
+    };
   }
 }
 
 export const bridge: Bridge = {
-  binding: 'node',
+  binding: "node",
   permissionStatus: (name) => window.MeetingRecord.permissionStatus(name),
   requestPermission: (name) => window.MeetingRecord.requestPermission(name),
   scan: () => window.MeetingRecord.scan(),
@@ -38,4 +38,4 @@ export const bridge: Bridge = {
   reveal: (path) => window.MeetingRecord.reveal(path),
   onMeetingEvent: (handler) => window.MeetingRecord.onMeetingEvent(handler),
   onMeter: (handler) => window.MeetingRecord.onMeter(handler),
-}
+};

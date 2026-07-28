@@ -1,6 +1,5 @@
 {
   "name": "meeting-record-electron",
-  "productName": "mrec-electron",
   "version": "0.1.0",
   "private": true,
   "description": "Desktop test app for the meeting-record Node binding",
@@ -24,5 +23,6 @@
     "electron": "43.2.0",
     "typescript": "^5.9.0",
     "vite": "^8.1.5"
-  }
+  },
+  "productName": "mrec-electron"
 }

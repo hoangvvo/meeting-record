@@ -8,10 +8,12 @@
 //! - `MREC_MIN_PEAK`: minimum absolute sample peak (default: 0.0001).
 //! - `MREC_ALLOW_DROPS=1`: permit bounded-queue drops.
 
-use std::env;
-use std::error::Error as StdError;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    env,
+    error::Error as StdError,
+    thread,
+    time::{Duration, Instant},
+};
 
 use meeting_record::{capture, CaptureHealth, CaptureOptions, CaptureTarget, MicrophoneSource};
 

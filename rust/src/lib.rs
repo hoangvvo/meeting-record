@@ -1,4 +1,5 @@
-//! System-audio and microphone capture with meeting detection for macOS and Windows.
+//! System-audio and microphone capture with meeting detection for macOS and
+//! Windows.
 //!
 //! ```no_run
 //! use meeting_record::{meetings, Error, MeetingEvent, Platform};
@@ -22,20 +23,21 @@
 
 mod sys;
 
-use std::cell::UnsafeCell;
-use std::error::Error as StdError;
-use std::ffi::{c_char, c_int, c_void, CStr};
-use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::mem;
-use std::panic::{self, AssertUnwindSafe};
-use std::ptr;
-use std::slice;
-use std::sync::{
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-    Arc, Condvar, Mutex,
+use std::{
+    cell::UnsafeCell,
+    error::Error as StdError,
+    ffi::{c_char, c_int, c_void, CStr},
+    fmt::{Display, Formatter, Result as FmtResult},
+    mem,
+    panic::{self, AssertUnwindSafe},
+    ptr, slice,
+    sync::{
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    thread,
+    time::Duration,
 };
-use std::thread;
-use std::time::Duration;
 
 use sys::{AudioCallback as RawAudioCallback, Meeting as RawMeeting, Process as RawProcess};
 
@@ -147,8 +149,7 @@ impl From<i32> for PermissionStatus {
 }
 
 pub mod permissions {
-    use super::sys;
-    use super::{Error, Permission, PermissionStatus};
+    use super::{sys, Error, Permission, PermissionStatus};
 
     pub fn status(permission: Permission) -> PermissionStatus {
         match permission {
@@ -163,7 +164,8 @@ pub mod permissions {
     /// Show the system prompt for a permission.
     ///
     /// Audio requests return immediately; poll [`status`] for the answer.
-    /// Accessibility opens System Settings and takes effect after an app relaunch.
+    /// Accessibility opens System Settings and takes effect after an app
+    /// relaunch.
     pub fn request(permission: Permission) -> Result<(), Error> {
         let status = match permission {
             Permission::SystemAudio => unsafe { sys::mrec_request_audio_permission() },
@@ -323,8 +325,8 @@ impl From<i32> for MeetingEvent {
 
 type MeetingHandler = Box<dyn FnMut(MeetingEvent, &Meeting) + Send + 'static>;
 
-// The watcher is a process-wide singleton, so the handler lives here rather than
-// in the C API's `void*`.
+// The watcher is a process-wide singleton, so the handler lives here rather
+// than in the C API's `void*`.
 struct MeetingHandlerSlot {
     handler: Option<MeetingHandler>,
     generation: u64,
@@ -452,7 +454,8 @@ pub enum CaptureHealth {
     Running,
     /// A device or format changed and the backend is retrying automatically.
     Recovering,
-    /// Automatic recovery was exhausted. Stop or drop this session before retrying.
+    /// Automatic recovery was exhausted. Stop or drop this session before
+    /// retrying.
     Failed,
 }
 
@@ -735,7 +738,8 @@ impl AudioTrack {
         self.channels
     }
 
-    /// Number of interleaved samples discarded because the bounded queue could not accept them.
+    /// Number of interleaved samples discarded because the bounded queue could
+    /// not accept them.
     pub fn dropped_samples(&self) -> usize {
         self.queue.dropped.load(Ordering::Relaxed)
     }
@@ -813,7 +817,8 @@ impl CaptureSession {
         }
     }
 
-    /// Native device health. Transient interruptions are recovered automatically.
+    /// Native device health. Transient interruptions are recovered
+    /// automatically.
     pub fn health(&self) -> CaptureHealth {
         if self.state.load(Ordering::Acquire) == STATE_STOPPED {
             CaptureHealth::Stopped
@@ -947,8 +952,8 @@ fn resolve_process_target(pid: u32) -> Result<Vec<u32>, Error> {
 
 /// Capture one process target or the system mix.
 ///
-/// Blocks for up to six seconds while the permission grant is undetermined, so do
-/// not call from a UI thread.
+/// Blocks for up to six seconds while the permission grant is undetermined, so
+/// do not call from a UI thread.
 fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<CaptureSession, Error> {
     if unsafe { sys::mrec_is_running() } != 0 {
         return Err(Error::AlreadyRunning);
@@ -1104,7 +1109,8 @@ pub mod meetings {
 
     /// Watch for meetings starting, changing and ending.
     ///
-    /// The handler runs on an internal serial queue, so it may allocate and block.
+    /// The handler runs on an internal serial queue, so it may allocate and
+    /// block.
     pub fn watch<F>(handler: F) -> Result<Watcher, Error>
     where
         F: FnMut(MeetingEvent, &Meeting) + Send + 'static,

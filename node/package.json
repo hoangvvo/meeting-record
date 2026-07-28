@@ -2,6 +2,8 @@
   "name": "meeting-record",
   "version": "0.1.0",
   "description": "System-audio and microphone capture with meeting detection for macOS and Windows",
+  "bugs": "https://github.com/hoangvvo/meeting-record/issues",
+  "license": "MIT",
   "author": {
     "name": "Hoang Vo",
     "url": "https://hoangvvo.com"
@@ -11,7 +13,18 @@
     "url": "git+https://github.com/hoangvvo/meeting-record.git",
     "directory": "node"
   },
-  "bugs": "https://github.com/hoangvvo/meeting-record/issues",
+  "files": [
+    "dist",
+    "prebuilds"
+  ],
+  "os": [
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,16 +33,6 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
-  },
-  "gypfile": false,
-  "files": [
-    "dist",
-    "prebuilds"
-  ],
-  "os": ["darwin", "win32"],
-  "cpu": ["arm64", "x64"],
-  "engines": {
-    "node": ">=22.13.0 <23 || >=24"
   },
   "scripts": {
     "build:native": "node ../scripts/build-native.mjs",
@@ -43,5 +46,8 @@
   "dependencies": {
     "node-gyp-build": "^4.8.4"
   },
-  "license": "MIT"
+  "engines": {
+    "node": ">=22.13.0 <23 || >=24"
+  },
+  "gypfile": false
 }

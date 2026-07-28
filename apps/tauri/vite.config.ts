@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from "vite";
 
 export default defineConfig({
   // don't let vite's output bury rust compiler errors
@@ -6,6 +6,6 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    watch: { ignored: ['**/src-tauri/**'] },
+    watch: { ignored: ["**/src-tauri/**"] },
   },
-})
+});

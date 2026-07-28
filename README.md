@@ -66,7 +66,16 @@ Always rely on `shouldRecord` / `should_record`. It becomes true when there is a
 - **Capture runs but outputs zeroes:** The targeted processes may have exited.
 - **Titles/URLs are empty:** Accessibility permission was not granted, or the app was not restarted after granting it.
 
-## Testing
+## Development
+
+### Lint and format
+
+```sh
+npm run lint:fix && npm run fmt
+cargo +nightly clippy --all-targets --all-features --workspace && cargo +nightly fmt
+```
+
+### Testing
 
 Run unit tests:
 

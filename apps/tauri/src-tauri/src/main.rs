@@ -3,13 +3,17 @@
 
 mod mix;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::{self, Command};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::{self, Command},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use hound::{SampleFormat, WavSpec, WavWriter};
 use meeting_record::{
@@ -17,8 +21,7 @@ use meeting_record::{
     CaptureTarget, Meeting, MeetingEvent, MicrophoneSource, Permission, PermissionStatus, Watcher,
 };
 use serde::Serialize;
-use tauri::async_runtime;
-use tauri::{AppHandle, Builder, Emitter, Manager, RunEvent, State};
+use tauri::{async_runtime, AppHandle, Builder, Emitter, Manager, RunEvent, State};
 
 const METER_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -274,9 +277,9 @@ async fn start_recording(
         .map_err(|error| error.to_string())?
 }
 
-/// The system mix is silent whenever the default output device is muted or isn't
-/// the one actually playing, so aim at a process that is definitely producing
-/// audio. The library resolves helper pids from this one itself.
+/// The system mix is silent whenever the default output device is muted or
+/// isn't the one actually playing, so aim at a process that is definitely
+/// producing audio. The library resolves helper pids from this one itself.
 fn playing_pid() -> Result<u32, String> {
     meetings::audio_processes()
         .into_iter()

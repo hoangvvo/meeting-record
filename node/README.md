@@ -43,9 +43,7 @@ const recording = await MeetingRecord.capture.start(
   { microphone: "default" },
 );
 
-recording.on("interrupted", () =>
-  console.warn("audio device changed; recovering"),
-);
+recording.on("interrupted", () => console.warn("audio device changed; recovering"));
 recording.on("recovered", () => console.log("capture recovered"));
 recording.on("failed", (error) => console.error("capture failed", error));
 
@@ -54,9 +52,7 @@ recording.systemAudio.on("data", (chunk) => {
   console.log(chunk.length, chunk.hostTimeNs, chunk.sampleRate, chunk.channels);
 });
 recording.systemAudio.on("drop", (samples) => console.warn("dropped", samples));
-recording.systemAudio.on("format", (format) =>
-  console.log("new format", format),
-);
+recording.systemAudio.on("format", (format) => console.log("new format", format));
 
 // Process the microphone track if requested.
 recording.microphone?.on("data", (chunk) => {
