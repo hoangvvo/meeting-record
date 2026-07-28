@@ -2,10 +2,10 @@
 
 Rust binding test app. macOS 14.2+, arm64.
 
-Build the core first, from the repo root:
+Build the core first:
 
 ```sh
-npm run build
+npm run build --workspace meeting-record
 ```
 
 Dev:
@@ -19,7 +19,7 @@ Build and run the real thing:
 ```sh
 APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')" \
   npm run package --workspace meeting-record-tauri
-open target/release/bundle/macos/mrec-tauri.app
+open "$(git rev-parse --show-toplevel)/target/release/bundle/macos/mrec-tauri.app"
 ```
 
 `cargo tauri build` is the same tool if you have cargo-tauri installed.

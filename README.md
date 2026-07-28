@@ -1,6 +1,6 @@
 # meeting-record
 
-System-audio and microphone capture with meeting detection for macOS and Windows. Records call audio without virtual audio devices, kernel extensions, or screen recording.
+System-audio and microphone capture with meeting detection for macOS and Windows.
 
 ## Packages
 
@@ -9,7 +9,11 @@ System-audio and microphone capture with meeting detection for macOS and Windows
 
 ## Examples
 
+![Demo app](apps/electron/screenshots/demo.png)
+
 Check out the example apps for [Tauri](./apps/tauri/README.md) (Rust binding) and [Electron](./apps/electron/README.md) (Node.js binding).
+
+Need an AI Note-taker? Check out [fireflies.ai](https://fireflies.ai/?utm_source=github&utm_medium=referral&utm_campaign=hoangvvo_meeting-record).
 
 ## Platform support
 

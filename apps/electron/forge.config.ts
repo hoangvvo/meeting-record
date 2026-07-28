@@ -1,16 +1,19 @@
+import { AutoUnpackNativesPlugin } from "@electron-forge/plugin-auto-unpack-natives";
+import { VitePlugin } from "@electron-forge/plugin-vite";
+import type { ForgeConfig } from "@electron-forge/shared-types";
+import { rebuild } from "@electron/rebuild";
 import { cp, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import type { ForgeConfig } from "@electron-forge/shared-types";
-import { AutoUnpackNativesPlugin } from "@electron-forge/plugin-auto-unpack-natives";
-import { VitePlugin } from "@electron-forge/plugin-vite";
-import { rebuild } from "@electron/rebuild";
 
 // forge always runs with cwd set to the app directory
 const appDir = process.cwd();
 const repoRoot = path.resolve(appDir, "../..");
 const addonDir = path.join(repoRoot, "node");
 const requireFromApp = createRequire(path.join(appDir, "package.json"));
+const nodeGypBuildDir = path.dirname(
+  requireFromApp.resolve("node-gyp-build/package.json"),
+);
 const electronVersion: string = requireFromApp("electron/package.json").version;
 
 // An ad-hoc signature (`codesign -s -`) gets you no TCC prompt at all; an Apple
@@ -58,6 +61,8 @@ const config: ForgeConfig = {
     },
     // .forge-meta comes along so forge's own rebuild pass recognises the copy as
     // already built and skips it. it would fail here, away from ../native/build
+    //
+    // @see https://github.com/electron/forge/pull/4232
     async packageAfterCopy(_forgeConfig, buildPath) {
       const target = path.join(buildPath, "node_modules", "meeting-record");
       const entries = [
@@ -71,6 +76,17 @@ const config: ForgeConfig = {
         await mkdir(path.dirname(to), { recursive: true });
         await cp(path.join(addonDir, entry), to, { recursive: true });
       }
+
+      // meeting-record loads its native binary through this production
+      // dependency. npm hoists it to the workspace root too, so Forge does not
+      // discover it while walking this app's otherwise-empty node_modules.
+      await cp(
+        nodeGypBuildDir,
+        path.join(buildPath, "node_modules", "node-gyp-build"),
+        {
+          recursive: true,
+        },
+      );
     },
   },
   plugins: [
@@ -79,7 +95,11 @@ const config: ForgeConfig = {
     new VitePlugin({
       build: [
         { entry: "src/main.ts", config: "vite.main.config.ts", target: "main" },
-        { entry: "src/preload.ts", config: "vite.preload.config.ts", target: "preload" },
+        {
+          entry: "src/preload.ts",
+          config: "vite.preload.config.ts",
+          target: "preload",
+        },
       ],
       renderer: [{ name: "main_window", config: "vite.renderer.config.ts" }],
     }),
