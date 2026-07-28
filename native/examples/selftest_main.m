@@ -9,11 +9,18 @@
  */
 #import <AppKit/AppKit.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "meeting-record.h"
 
 /* Defined in selftest.c */
 int mrec_selftest_run(void);
+
+static int env_enabled(const char *name) {
+  const char *value = getenv(name);
+  return value && value[0] != '\0' && strcmp(value, "0") != 0;
+}
 
 static void *run_test(void *unused) {
   (void)unused;
@@ -27,7 +34,8 @@ static void *run_test(void *unused) {
     }
   }
 
-  if (mrec_microphone_permission_status() != MREC_PERM_GRANTED) {
+  if (env_enabled("MREC_TEST_MICROPHONE") &&
+      mrec_microphone_permission_status() != MREC_PERM_GRANTED) {
     mrec_request_microphone_permission();
     for (int i = 0; i < 60; i++) {
       if (mrec_microphone_permission_status() == MREC_PERM_GRANTED) break;

@@ -3,7 +3,6 @@ description = "System-audio and microphone capture with meeting detection for ma
 edition.workspace = true
 include = [
     "/src/**",
-    "/examples/**",
     "/tests/**",
     "/native/**",
     "/build.rs",

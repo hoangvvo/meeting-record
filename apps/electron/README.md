@@ -17,14 +17,11 @@ npm start --workspace meeting-record-electron
 Build and run the real thing:
 
 ```sh
-MREC_IDENTITY="Apple Development: NAME (TEAM)" \
+MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')" \
   npm run package --workspace meeting-record-electron
-open apps/electron/out/mrec-electron-darwin-arm64/mrec-electron.app
+open out/mrec-electron-darwin-arm64/mrec-electron.app
 ```
-
-`security find-identity -v -p codesigning` gives you the identity string.
 
 Notes:
 
 - Dev mode can't do permissions or recording. TCC reads Electron.app's plist, so no prompt ever shows up. Detection works fine.
-- That leaves `node/build/Release/*.node` on Electron's ABI. Run `npm run build` before going back to `node/examples/*.mjs`.

@@ -114,5 +114,5 @@ xattr -cr "$APP"
 
 echo "    built $APP (identity: $IDENTITY)"
 echo
-echo "Run it with:  open $APP     # then read /tmp/meeting-record-selftest.log"
-echo "Play audio and speak during the test so both tracks can be verified."
+echo "Run it with:  $APP/Contents/MacOS/MrecSelfTest"
+echo "Set MREC_TEST_MICROPHONE=1 to validate the microphone track too."

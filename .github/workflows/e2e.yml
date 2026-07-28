@@ -1,0 +1,74 @@
+name: Live audio E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: Run Windows system and process capture
+        type: boolean
+        default: true
+      macos:
+        description: Run macOS system capture
+        type: boolean
+        default: false
+      microphone:
+        description: Require a non-silent microphone track
+        type: boolean
+        default: false
+      duration_seconds:
+        description: Capture duration for each test
+        type: string
+        default: "8"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-audio-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: inputs.windows
+    runs-on: [self-hosted, Windows, meeting-record-audio]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable --no-self-update
+          rustup default stable
+
+      - name: Run live Windows capture
+        shell: pwsh
+        env:
+          E2E_DURATION: ${{ inputs.duration_seconds }}
+          E2E_MICROPHONE: ${{ inputs.microphone }}
+        run: |
+          $options = @{
+            Mode = "All"
+            DurationSeconds = [int]$env:E2E_DURATION
+          }
+          if ($env:E2E_MICROPHONE -eq "true") {
+            $options.Microphone = $true
+          }
+          ./e2e/windows.ps1 @options
+
+  macos:
+    if: inputs.macos
+    runs-on: [self-hosted, macOS, meeting-record-audio]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run live macOS capture
+        env:
+          MREC_DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          MREC_IDENTITY: ${{ secrets.MREC_E2E_MACOS_SIGNING_IDENTITY }}
+          MREC_TEST_MICROPHONE: ${{ inputs.microphone && '1' || '' }}
+        run: ./e2e/macos.sh

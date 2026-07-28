@@ -17,12 +17,12 @@ npm start --workspace meeting-record-tauri
 Build and run the real thing:
 
 ```sh
-APPLE_SIGNING_IDENTITY="Apple Development: NAME (TEAM)" \
+APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')" \
   npm run package --workspace meeting-record-tauri
 open target/release/bundle/macos/mrec-tauri.app
 ```
 
-`security find-identity -v -p codesigning` gives you the identity string. `cargo tauri build` is the same tool if you have cargo-tauri installed.
+`cargo tauri build` is the same tool if you have cargo-tauri installed.
 
 Notes:
 

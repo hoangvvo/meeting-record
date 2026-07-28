@@ -38,8 +38,7 @@
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:native && npm run build:addon && npm run build:ts",
     "prepack": "npm run build:ts",
-    "test": "node --test",
-    "example": "node examples/record.mjs"
+    "test": "node --test"
   },
   "dependencies": {
     "node-gyp-build": "^4.8.4"

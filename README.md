@@ -7,6 +7,10 @@ System-audio and microphone capture with meeting detection for macOS and Windows
 - [Node.js / TypeScript](./node/README.md)
 - [Rust](./rust/README.md)
 
+## Examples
+
+Check out the example apps for [Tauri](./apps/tauri/README.md) (Rust binding) and [Electron](./apps/electron/README.md) (Node.js binding).
+
 ## Platform support
 
 | Platform | Minimum version | Architectures |
@@ -61,3 +65,22 @@ Always rely on `shouldRecord` / `should_record`. It becomes true when there is a
 - **Capture start times out:** The permission grant is undetermined. Request permissions from a bundled GUI app, not a bare CLI executable.
 - **Capture runs but outputs zeroes:** The targeted processes may have exited.
 - **Titles/URLs are empty:** Accessibility permission was not granted, or the app was not restarted after granting it.
+
+## Testing
+
+Run unit tests:
+
+```sh
+npm test
+cargo test -p meeting-record --all-targets
+```
+
+Test E2E tests:
+
+```sh
+MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Developer ID Application/ { print $2; exit }')" ./e2e/macos.sh
+```
+
+```powershell
+./e2e/windows.ps1 -Mode All
+```

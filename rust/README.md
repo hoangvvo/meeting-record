@@ -15,17 +15,39 @@ use std::thread;
 use std::time::Duration;
 
 use meeting_record::{
-    capture, meetings, permissions, CaptureOptions, CaptureTarget, Error, Permission,
-    PermissionStatus,
+    capture, meetings, permissions, CaptureOptions, CaptureState, CaptureTarget, Error,
+    MicrophoneSource, Permission, PermissionStatus,
 };
 
+fn permission_ready(permission: Permission) -> bool {
+    matches!(
+        permissions::status(permission),
+        PermissionStatus::Granted | PermissionStatus::NotRequired
+    )
+}
+
 fn main() -> Result<(), Error> {
-    if permissions::status(Permission::SystemAudio) != PermissionStatus::Granted {
-        permissions::request(Permission::SystemAudio)?;
-        return Ok(());
+    // Audio permission requests return immediately; rerun after granting them.
+    for (permission, name) in [
+        (Permission::SystemAudio, "system audio"),
+        (Permission::Microphone, "microphone"),
+    ] {
+        if !permission_ready(permission) {
+            permissions::request(permission)?;
+            eprintln!("grant {name} access, then rerun");
+            return Ok(());
+        }
     }
 
-    let _watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"))?;
+    // Request accessibility permission to read meeting titles and URLs for detection.
+    if !permission_ready(Permission::Accessibility) {
+        permissions::request(Permission::Accessibility)?;
+    }
+
+    // Watch for meetings starting, changing, and ending.
+    let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"))?;
+
+    // Or scan for active meetings at any time.
 
     let Some(meeting) = meetings::scan()
         .into_iter()
@@ -36,7 +58,10 @@ fn main() -> Result<(), Error> {
 
     let recording = capture::start(
         CaptureTarget::Process { pid: meeting.pid },
-        CaptureOptions::default(),
+        CaptureOptions {
+            microphone: Some(MicrophoneSource::Default),
+            ..CaptureOptions::default()
+        },
     )?;
     thread::scope(|scope| {
         scope.spawn(|| {
@@ -51,9 +76,28 @@ fn main() -> Result<(), Error> {
                 );
             }
         });
+
+        scope.spawn(|| {
+            let mut health = recording.health();
+            while recording.state() != CaptureState::Stopped {
+                let next = recording.health();
+                if next != health {
+                    println!("capture health: {next:?}");
+                    health = next;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+            if let Some(error) = recording.failure() {
+                eprintln!("capture failed: {error}");
+            }
+        });
+
         thread::sleep(Duration::from_secs(10));
         recording.stop();
     });
+
+    // Stop watching for meetings when done.
+    drop(watcher);
     Ok(())
 }
 ```
