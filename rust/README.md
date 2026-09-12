@@ -1,6 +1,15 @@
 # meeting-record for Rust
 
-[Full documentation](https://github.com/hoangvvo/meeting-record#readme)
+[API documentation](https://docs.rs/meeting-record) · [Project documentation](https://github.com/hoangvvo/meeting-record#readme)
+
+System-audio and microphone capture with meeting detection for macOS and Windows.
+
+## Platform support
+
+| Platform | Minimum version | Architectures |
+| -------- | --------------- | ------------- |
+| macOS    | 14.2            | arm64, x86-64 |
+| Windows  | 10 build 20348  | arm64, x86-64 |
 
 ## Install
 

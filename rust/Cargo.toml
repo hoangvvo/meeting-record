@@ -1,6 +1,10 @@
 [package]
+authors = ["Hoang Vo"]
+categories = ["multimedia::audio", "os::macos-apis", "os::windows-apis"]
 description = "System-audio and microphone capture with meeting detection for macOS and Windows"
+documentation = "https://docs.rs/meeting-record"
 edition = "2021"
+homepage = "https://github.com/hoangvvo/meeting-record"
 include = [
   "/src/**",
   "/tests/**",
@@ -9,9 +13,11 @@ include = [
   "/README.md",
   "/LICENSE.md",
 ]
+keywords = ["audio", "recording", "meeting", "macos", "windows"]
 license = "MIT"
 links = "meetingrecord"
 name = "meeting-record"
+publish = ["crates-io"]
 readme = "README.md"
 repository = "https://github.com/hoangvvo/meeting-record"
 version = "0.1.0"

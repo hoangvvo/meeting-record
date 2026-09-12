@@ -9,6 +9,7 @@ use std::{
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let native = native_root(&manifest);
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     // docs.rs has no macOS or Windows SDK. Rustdoc does not link the externs,
     // so it can still document the safe wrapper without building a backend.
     if env::var_os("DOCS_RS").is_some() {
