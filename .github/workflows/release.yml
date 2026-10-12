@@ -66,7 +66,7 @@ jobs:
         run: node -e 'const fs = require("node:fs"); const file = process.env.PREBUILD_PATH; if (!fs.existsSync(file)) throw new Error("missing " + file);'
 
       - name: Upload prebuild
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-prebuild-${{ matrix.target }}
           path: node/prebuilds/
@@ -115,7 +115,7 @@ jobs:
           npm pack --workspace meeting-record --pack-destination package-artifacts
 
       - name: Upload npm package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-package
           path: package-artifacts/*.tgz
@@ -152,7 +152,7 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "14.2"
 
       - name: Upload Rust crate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-crate
           path: target/package/meeting-record-*.crate
