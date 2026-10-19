@@ -218,7 +218,7 @@ jobs:
           path: package-artifacts
 
       - name: Publish to npm
-        run: npm publish package-artifacts/*.tgz
+        run: npm publish ./package-artifacts/*.tgz
 
   publish-crates:
     name: Publish to crates.io
