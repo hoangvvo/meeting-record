@@ -193,7 +193,11 @@ jobs:
     needs:
       - package-npm
       - release-ready
-    if: ${{ inputs.publish && (inputs.package == 'all' || inputs.package == 'node') }}
+    if: >-
+      ${{ !cancelled() && inputs.publish &&
+          needs.package-npm.result == 'success' &&
+          needs.release-ready.result == 'success' &&
+          (inputs.package == 'all' || inputs.package == 'node') }}
     runs-on: macos-14
     timeout-minutes: 10
     permissions:
@@ -225,7 +229,11 @@ jobs:
     needs:
       - package-crate
       - release-ready
-    if: ${{ inputs.publish && (inputs.package == 'all' || inputs.package == 'rust') }}
+    if: >-
+      ${{ !cancelled() && inputs.publish &&
+          needs.package-crate.result == 'success' &&
+          needs.release-ready.result == 'success' &&
+          (inputs.package == 'all' || inputs.package == 'rust') }}
     runs-on: macos-14
     timeout-minutes: 30
     permissions:
