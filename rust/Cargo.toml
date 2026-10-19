@@ -20,7 +20,7 @@ name = "meeting-record"
 publish = ["crates-io"]
 readme = "README.md"
 repository = "https://github.com/hoangvvo/meeting-record"
-version = "0.1.0"
+version = "0.1.1"
 
 [dependencies]
 
