@@ -83,6 +83,14 @@ mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
                                           size_t *out_count);
 
 /*
+ * Like mrec_list_audio_processes(), but one entry per user-visible application:
+ * helper processes fold into the app that owns them, and `pid` and `name` are
+ * the app's. Pass `pid` to mrec_start() to capture the app with its helpers.
+ */
+mrec_status mrec_list_audio_apps(mrec_process *out, size_t capacity,
+                                     size_t *out_count);
+
+/*
  * Called on a realtime audio thread. `frames` is interleaved float32, valid only
  * for the duration of the call. `host_time_ns` is the capture time of the first
  * frame on a process-wide monotonic clock shared by the system and microphone

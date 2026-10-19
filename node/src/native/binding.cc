@@ -291,55 +291,23 @@ void ScheduleTrackWake(TrackContext *track) {
 /* mrec_start can block for seconds while the permission grant is undetermined. */
 class StartWorker : public Napi::AsyncWorker {
 public:
-  StartWorker(Napi::Env env, uint32_t pid, bool have_pid, bool system_wide,
+  StartWorker(Napi::Env env, uint32_t pid, bool system_wide,
               bool mono, bool microphone)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
-        pid_(pid), have_pid_(have_pid), system_wide_(system_wide), mono_(mono),
+        pid_(pid), system_wide_(system_wide), mono_(mono),
         microphone_(microphone) {}
 
   Napi::Promise Promise() { return deferred_.Promise(); }
 
   void Execute() override {
-    std::vector<uint32_t> resolved_pids;
-
-    if (have_pid_) {
-#ifdef _WIN32
-      /* Process-loopback INCLUDE semantics already follows the visible app's
-       * child process tree, including helpers created after capture starts.
-       * Capturing the currently active helpers as separate clients would double
-       * count their audio and break when those helpers respawn. */
-      resolved_pids.push_back(pid_);
-#else
-      /* A meeting's visible app pid is often not where Chrome, Teams, or
-       * Electron render audio. Resolve its current helper pids here so the JS
-       * API only needs one stable OS identifier. An arbitrary audio-process pid
-       * that is not a detected meeting remains a valid direct target. */
-      mrec_meeting meetings[16]{};
-      size_t count = 0;
-      mrec_scan(meetings, 16, &count);
-      const size_t meeting_count = std::min(count, static_cast<size_t>(16));
-      for (size_t i = 0; i < meeting_count; i++) {
-        if (meetings[i].pid != pid_) continue;
-        const size_t pid_count =
-            std::min(meetings[i].audio_pid_count, static_cast<size_t>(MREC_MAX_AUDIO_PIDS));
-        resolved_pids.assign(meetings[i].audio_pids,
-                             meetings[i].audio_pids + pid_count);
-        resolved_pids.erase(std::remove(resolved_pids.begin(), resolved_pids.end(), 0),
-                            resolved_pids.end());
-        break;
-      }
-      if (resolved_pids.empty()) resolved_pids.push_back(pid_);
-#endif
-    }
-
     mrec_config cfg;
     mrec_config_defaults(&cfg);
     cfg.mono = mono_ ? 1 : 0;
     if (system_wide_) {
       cfg.global_mixdown = 1;
     } else {
-      cfg.pids = resolved_pids.data();
-      cfg.pid_count = resolved_pids.size();
+      cfg.pids = &pid_;
+      cfg.pid_count = 1;
     }
     status_ = mrec_start_tracks_raw(
         cfg.pids, cfg.pid_count, cfg.global_mixdown, cfg.mono,
@@ -416,7 +384,6 @@ public:
 private:
   Napi::Promise::Deferred deferred_;
   uint32_t pid_;
-  bool have_pid_;
   bool system_wide_;
   bool mono_;
   bool microphone_;
@@ -587,7 +554,7 @@ Napi::Value CaptureStart(const Napi::CallbackInfo &info) {
   }
 
   auto *worker =
-      new StartWorker(env, pid, have_pid, system_wide, mono, microphone);
+      new StartWorker(env, pid, system_wide, mono, microphone);
   Napi::Promise promise = worker->Promise();
   worker->Queue();
   return promise;
@@ -647,11 +614,11 @@ Napi::Value LastError(const Napi::CallbackInfo &info) {
   return Napi::String::New(info.Env(), mrec_last_error());
 }
 
-Napi::Value ListAudioProcesses(const Napi::CallbackInfo &info) {
-  Napi::Env env = info.Env();
+Napi::Value ToProcessArray(Napi::Env env,
+                           mrec_status (*list)(mrec_process *, size_t, size_t *)) {
   mrec_process procs[256]{};
   size_t count = 0;
-  mrec_list_audio_processes(procs, 256, &count);
+  list(procs, 256, &count);
 
   const size_t process_count = std::min(count, static_cast<size_t>(256));
   Napi::Array out = Napi::Array::New(env, process_count);
@@ -665,6 +632,14 @@ Napi::Value ListAudioProcesses(const Napi::CallbackInfo &info) {
     out.Set(i, p);
   }
   return out;
+}
+
+Napi::Value ListAudioProcesses(const Napi::CallbackInfo &info) {
+  return ToProcessArray(info.Env(), mrec_list_audio_processes);
+}
+
+Napi::Value ListAudioApps(const Napi::CallbackInfo &info) {
+  return ToProcessArray(info.Env(), mrec_list_audio_apps);
 }
 
 } // namespace
@@ -696,6 +671,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("captureHealthStatus", Napi::Function::New(env, CaptureHealthStatus));
   exports.Set("lastError", Napi::Function::New(env, LastError));
   exports.Set("listAudioProcesses", Napi::Function::New(env, ListAudioProcesses));
+  exports.Set("listAudioApps", Napi::Function::New(env, ListAudioApps));
   return exports;
 }
 

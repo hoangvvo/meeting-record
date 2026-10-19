@@ -212,9 +212,22 @@ private let processStride = 12 + 256 + 256
 public func mrec_list_audio_processes(_ out: UnsafeMutableRawPointer?,
                                         _ capacity: Int,
                                         _ outCount: UnsafeMutablePointer<Int>?) -> Int32 {
+    writeProcesses(AudioProcessRegistry.all(), to: out, capacity: capacity, outCount: outCount)
+}
+
+@_cdecl("mrec_list_audio_apps")
+public func mrec_list_audio_apps(_ out: UnsafeMutableRawPointer?,
+                                   _ capacity: Int,
+                                   _ outCount: UnsafeMutablePointer<Int>?) -> Int32 {
+    writeProcesses(AudioAppRegistry.all(), to: out, capacity: capacity, outCount: outCount)
+}
+
+private func writeProcesses(_ processes: [AudioProcess],
+                            to out: UnsafeMutableRawPointer?,
+                            capacity: Int,
+                            outCount: UnsafeMutablePointer<Int>?) -> Int32 {
     guard let out, let outCount else { return -9 /* INTERNAL */ }
 
-    let processes = AudioProcessRegistry.all()
     let count = min(processes.count, capacity)
 
     for index in 0..<count {
@@ -313,7 +326,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     }
 
     let configuration = SystemCaptureConfiguration(
-        pids: pids,
+        pids: AudioAppRegistry.includingHelpers(pids),
         globalMixdown: global,
         mono: mono != 0,
         muteCapturedOutput: muteCapturedOutput != 0)

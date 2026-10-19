@@ -28,6 +28,11 @@ echo "==> struct layout check"
 clang -I"$ROOT/native/include" -o "$BUILD/layout_check" "$ROOT/native/tests/layout_check.c"
 "$BUILD/layout_check"
 
+echo "==> application process-tree tests"
+clang++ -std=c++17 -Wall -Wextra -Werror \
+  -o "$BUILD/audio_app_process_test" "$ROOT/native/tests/audio_app_process_test.cpp"
+"$BUILD/audio_app_process_test"
+
 echo "==> swiftc: libmeetingrecord_macos.a"
 swiftc -O \
   -parse-as-library \

@@ -6,8 +6,12 @@
  */
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+
+import { MixedAudioImpl, type MixedAudio, type MixedAudioOptions } from "./mixed-audio.js";
+export type { MixedAudio, MixedAudioOptions } from "./mixed-audio.js";
 
 // Native addons cannot be imported under ESM. node-gyp-build selects the
 // bundled binary for the current platform; local builds remain usable in-repo.
@@ -74,6 +78,10 @@ export interface CaptureOptions {
   mono?: boolean;
   /** Capture the default microphone as a separate track. Default off. */
   microphone?: MicrophoneSource;
+  /** Additional mono s16le output, aligned and resampled to the requested rate. */
+  mix?: MixedAudioOptions;
+  /** Aborting stops capture, including a pending start. */
+  signal?: AbortSignal;
 }
 
 export class MeetingRecordError extends Error {
@@ -140,8 +148,9 @@ export const permissions = {
    */
   async request(
     permission: Permission,
-    { timeoutMs = 120_000 }: { timeoutMs?: number } = {},
+    { timeoutMs = 120_000, signal }: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<PermissionStatus> {
+    signal?.throwIfAborted();
     const current = permissions.status(permission);
     if (current === "granted" || current === "not-required") return current;
 
@@ -162,7 +171,7 @@ export const permissions = {
     // The dialog is modal to the user, not to this process.
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await delay(500, undefined, { signal });
       const status = permissions.status(permission);
       if (status === "granted" || status === "denied") return status;
     }
@@ -206,6 +215,14 @@ class Meetings extends EventEmitter {
   /** Every process doing audio IO. */
   audioProcesses(): AudioProcess[] {
     return native.listAudioProcesses();
+  }
+
+  /**
+   * Applications doing audio IO, grouped by owning PID, including helpers.
+   * Pass `pid` as a process target; no meeting scan or Accessibility grant is needed.
+   */
+  audioApps(): AudioProcess[] {
+    return native.listAudioApps();
   }
 }
 
@@ -260,6 +277,7 @@ export interface AudioTrack extends Readable {
 export interface CaptureSession extends EventEmitter {
   readonly systemAudio: AudioTrack;
   readonly microphone?: AudioTrack;
+  readonly mixedAudio?: MixedAudio;
   readonly state: CaptureState;
   /** Native device health; independent of pause/resume state. */
   readonly health: CaptureHealth;
@@ -274,12 +292,18 @@ export interface CaptureSession extends EventEmitter {
   on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
+export interface MixedCaptureSession extends CaptureSession {
+  readonly mixedAudio: MixedAudio;
+}
+
 class AudioTrackImpl extends Readable implements AudioTrack {
   #sampleRate: number;
   #channels: number;
   readonly #microphone: boolean;
   #droppedSamples = 0;
   #consumerReady = true;
+  #mixReady = true;
+  #mixConsumer: ((chunk: AudioChunk) => void) | undefined;
   #finished = false;
 
   constructor(sampleRate: number, channels: number, microphone: boolean) {
@@ -293,8 +317,18 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   override _read(): void {
     if (!this.#consumerReady && !this.#finished) {
       this.#consumerReady = true;
-      native.captureSetConsumerReady(this.#microphone, true);
+      native.captureSetConsumerReady(this.#microphone, this.#mixReady);
     }
+  }
+
+  setMixConsumer(consumer: ((chunk: AudioChunk) => void) | undefined): void {
+    this.#mixConsumer = consumer;
+  }
+
+  setMixReady(ready: boolean): void {
+    this.#mixReady = ready;
+    if (!this.#finished)
+      native.captureSetConsumerReady(this.#microphone, ready && this.#consumerReady);
   }
 
   get sampleRate(): number {
@@ -326,6 +360,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
       channels: { value: info.channels, enumerable: false },
       droppedSamples: { value: info.dropped, enumerable: false },
     });
+    this.#mixConsumer?.(chunk as AudioChunk);
     if (!this.push(chunk as AudioChunk) && this.#consumerReady) {
       this.#consumerReady = false;
       native.captureSetConsumerReady(this.#microphone, false);
@@ -346,11 +381,24 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   readonly #healthTimer: NodeJS.Timeout;
   readonly #systemAudio: AudioTrackImpl;
   readonly #microphone?: AudioTrackImpl;
+  readonly mixedAudio?: MixedAudioImpl;
+  readonly #signal?: AbortSignal;
+  readonly #onAbort = () => {
+    void this.stopRecording();
+  };
 
-  constructor(systemAudio: AudioTrackImpl, microphone?: AudioTrackImpl) {
+  constructor(
+    systemAudio: AudioTrackImpl,
+    microphone?: AudioTrackImpl,
+    mix?: MixedAudioOptions,
+    signal?: AbortSignal,
+  ) {
     super();
     this.#systemAudio = systemAudio;
     this.#microphone = microphone;
+    this.#signal = signal;
+    signal?.addEventListener("abort", this.#onAbort, { once: true });
+    this.mixedAudio = mix ? new MixedAudioImpl(mix.sampleRate, systemAudio, microphone) : undefined;
     this.#healthTimer = setInterval(() => this.#pollHealth(), 250);
     this.#healthTimer.unref();
   }
@@ -380,12 +428,14 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
     if (this.#state !== "paused") {
       native.capturePause();
       this.#state = "paused";
+      this.mixedAudio?.pauseCapture();
     }
   }
 
   resumeRecording(): void {
     if (this.#state === "stopped") return;
     if (this.#state !== "recording") {
+      this.mixedAudio?.resumeCapture();
       native.captureResume();
       this.#state = "recording";
     }
@@ -401,8 +451,10 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   }
 
   #finishTracks(): void {
+    this.#signal?.removeEventListener("abort", this.#onAbort);
     this.#systemAudio.finish();
     this.#microphone?.finish();
+    this.mixedAudio?.finishCapture();
   }
 
   #pollHealth(): void {
@@ -438,87 +490,108 @@ interface NativeAudioInfo {
   channels: number;
 }
 
+function startCapture(
+  target: CaptureTarget,
+  options: CaptureOptions & { mix: MixedAudioOptions },
+): Promise<MixedCaptureSession>;
+function startCapture(target: CaptureTarget, options?: CaptureOptions): Promise<CaptureSession>;
+async function startCapture(
+  target: CaptureTarget,
+  options: CaptureOptions = {},
+): Promise<CaptureSession> {
+  options.signal?.throwIfAborted();
+  if (captureStarting || native.isRunning()) {
+    throw new AlreadyRunningError("capture already running", -3);
+  }
+  captureStarting = true;
+  let session: CaptureSessionImpl | undefined;
+  const pendingSystemAudio: Array<{ chunk: Buffer; info: NativeAudioInfo }> = [];
+  const pendingMicrophone: Array<{ chunk: Buffer; info: NativeAudioInfo }> = [];
+
+  const receive = (
+    track: "systemAudio" | "microphone",
+    pending: Array<{ chunk: Buffer; info: NativeAudioInfo }>,
+    chunk: Buffer,
+    info: NativeAudioInfo,
+  ) => {
+    if (!session) {
+      pending.push({ chunk, info });
+      return;
+    }
+    if (session.state !== "recording") return;
+    session[track]?.pushAudio(chunk, info);
+  };
+
+  const onSystemAudio = (chunk: Buffer, info: NativeAudioInfo) => {
+    receive("systemAudio", pendingSystemAudio, chunk, info);
+  };
+  const onMicrophone = (chunk: Buffer, info: NativeAudioInfo) => {
+    receive("microphone", pendingMicrophone, chunk, info);
+  };
+
+  try {
+    let nativeTarget: { pid: number } | { systemWide: true };
+    if (target.type === "process") {
+      if (!Number.isInteger(target.pid) || target.pid <= 0) {
+        throw new TypeError("process pid must be a positive integer");
+      }
+      nativeTarget = { pid: target.pid };
+    } else if (target.type === "system") {
+      nativeTarget = { systemWide: true };
+    } else {
+      throw new TypeError(`unknown capture target: ${(target as any).type}`);
+    }
+    if (options.mono !== undefined && typeof options.mono !== "boolean") {
+      throw new TypeError("mono must be a boolean");
+    }
+    if (options.microphone !== undefined && options.microphone !== "default") {
+      throw new TypeError('microphone must be "default"');
+    }
+    if (
+      options.mix !== undefined &&
+      (!Number.isInteger(options.mix.sampleRate) || options.mix.sampleRate <= 0)
+    ) {
+      throw new TypeError("mix sampleRate must be a positive integer");
+    }
+    const formats = await native.captureStart(
+      {
+        ...nativeTarget,
+        mono: options.mono ?? true,
+        microphone: options.microphone === "default",
+      },
+      onSystemAudio,
+      onMicrophone,
+    );
+    if (options.signal?.aborted) {
+      native.captureStop();
+      options.signal.throwIfAborted();
+    }
+    const systemAudio = new AudioTrackImpl(
+      formats.systemAudio.sampleRate,
+      formats.systemAudio.channels,
+      false,
+    );
+    const microphone = formats.microphone
+      ? new AudioTrackImpl(formats.microphone.sampleRate, formats.microphone.channels, true)
+      : undefined;
+    session = new CaptureSessionImpl(systemAudio, microphone, options.mix, options.signal);
+    for (const { chunk, info } of pendingSystemAudio) {
+      systemAudio.pushAudio(chunk, info);
+    }
+    for (const { chunk, info } of pendingMicrophone) {
+      microphone?.pushAudio(chunk, info);
+    }
+    return session;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw asLibraryError(error);
+  } finally {
+    captureStarting = false;
+  }
+}
+
 export const capture = {
-  async start(target: CaptureTarget, options: CaptureOptions = {}): Promise<CaptureSession> {
-    if (captureStarting || native.isRunning()) {
-      throw new AlreadyRunningError("capture already running", -3);
-    }
-    captureStarting = true;
-    let session: CaptureSessionImpl | undefined;
-    const pendingSystemAudio: Array<{ chunk: Buffer; info: NativeAudioInfo }> = [];
-    const pendingMicrophone: Array<{ chunk: Buffer; info: NativeAudioInfo }> = [];
-
-    const receive = (
-      track: "systemAudio" | "microphone",
-      pending: Array<{ chunk: Buffer; info: NativeAudioInfo }>,
-      chunk: Buffer,
-      info: NativeAudioInfo,
-    ) => {
-      if (!session) {
-        pending.push({ chunk, info });
-        return;
-      }
-      if (session.state !== "recording") return;
-      session[track]?.pushAudio(chunk, info);
-    };
-
-    const onSystemAudio = (chunk: Buffer, info: NativeAudioInfo) => {
-      receive("systemAudio", pendingSystemAudio, chunk, info);
-    };
-    const onMicrophone = (chunk: Buffer, info: NativeAudioInfo) => {
-      receive("microphone", pendingMicrophone, chunk, info);
-    };
-
-    try {
-      let nativeTarget: { pid: number } | { systemWide: true };
-      if (target.type === "process") {
-        if (!Number.isInteger(target.pid) || target.pid <= 0) {
-          throw new TypeError("process pid must be a positive integer");
-        }
-        nativeTarget = { pid: target.pid };
-      } else if (target.type === "system") {
-        nativeTarget = { systemWide: true };
-      } else {
-        throw new TypeError(`unknown capture target: ${(target as any).type}`);
-      }
-      if (options.mono !== undefined && typeof options.mono !== "boolean") {
-        throw new TypeError("mono must be a boolean");
-      }
-      if (options.microphone !== undefined && options.microphone !== "default") {
-        throw new TypeError('microphone must be "default"');
-      }
-      const formats = await native.captureStart(
-        {
-          ...nativeTarget,
-          mono: options.mono ?? true,
-          microphone: options.microphone === "default",
-        },
-        onSystemAudio,
-        onMicrophone,
-      );
-      const systemAudio = new AudioTrackImpl(
-        formats.systemAudio.sampleRate,
-        formats.systemAudio.channels,
-        false,
-      );
-      const microphone = formats.microphone
-        ? new AudioTrackImpl(formats.microphone.sampleRate, formats.microphone.channels, true)
-        : undefined;
-      session = new CaptureSessionImpl(systemAudio, microphone);
-      for (const { chunk, info } of pendingSystemAudio) {
-        systemAudio.pushAudio(chunk, info);
-      }
-      for (const { chunk, info } of pendingMicrophone) {
-        microphone?.pushAudio(chunk, info);
-      }
-      return session;
-    } catch (error) {
-      throw asLibraryError(error);
-    } finally {
-      captureStarting = false;
-    }
-  },
-
+  start: startCapture,
   get running(): boolean {
     return captureStarting || native.captureHealthStatus() !== "stopped";
   },

@@ -181,3 +181,60 @@ enum MeetingDetector {
 
     static var recordThreshold: Int32 { Score.recordThreshold }
 }
+
+enum AudioAppRegistry {
+    /// Regular applications doing audio IO. Helper processes fold into the app
+    /// whose bundle id prefixes theirs; daemons with no owning app are left out.
+    static func all() -> [AudioProcess] {
+        let apps = regularApps()
+        var byOwner: [pid_t: (app: NSRunningApplication, processes: [AudioProcess])] = [:]
+        for process in AudioProcessRegistry.all() {
+            guard let app = owner(of: process, in: apps) else { continue }
+            byOwner[app.processIdentifier, default: (app, [])].processes.append(process)
+        }
+        return byOwner.values.map { app, processes in
+            AudioProcess(
+                objectID: processes[0].objectID,
+                pid: app.processIdentifier,
+                bundleID: app.bundleIdentifier ?? processes[0].bundleID,
+                name: app.localizedName ?? processes[0].name,
+                isRunningOutput: processes.contains(where: \.isRunningOutput),
+                isRunningInput: processes.contains(where: \.isRunningInput)
+            )
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// `pids` plus the audio processes of any app among them, so tapping an app
+    /// from `all()` reaches audio its helper processes play.
+    static func includingHelpers(_ pids: [pid_t]) -> [pid_t] {
+        let apps = regularApps()
+        let helpers = AudioProcessRegistry.all().compactMap { process -> pid_t? in
+            guard let app = owner(of: process, in: apps),
+                  pids.contains(app.processIdentifier) else { return nil }
+            return process.pid
+        }
+        return Array(Set(pids + helpers)).sorted()
+    }
+
+    private static func regularApps() -> [NSRunningApplication] {
+        NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.processIdentifier != getpid()
+        }
+    }
+
+    private static func owner(of process: AudioProcess,
+                              in apps: [NSRunningApplication]) -> NSRunningApplication? {
+        if let direct = apps.first(where: { $0.processIdentifier == process.pid }) {
+            return direct
+        }
+        let bundleID = process.bundleID.lowercased()
+        guard !bundleID.isEmpty else { return nil }
+        // The longest matching prefix wins, so `com.microsoft.teams2` beats `com.microsoft`.
+        return apps
+            .filter { app in
+                guard let id = app.bundleIdentifier?.lowercased() else { return false }
+                return bundleID.hasPrefix(id)
+            }
+            .max { ($0.bundleIdentifier?.count ?? 0) < ($1.bundleIdentifier?.count ?? 0) }
+    }
+}

@@ -141,6 +141,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         CaptureOptions {
             mono: false,
             microphone: include_microphone.then_some(MicrophoneSource::Default),
+            ..CaptureOptions::default()
         },
     )?);
 

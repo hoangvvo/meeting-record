@@ -21,7 +21,11 @@
 //! Capture and watching are process-wide singletons. Both return a guard that
 //! stops them on drop.
 
+mod mixed_audio;
+mod mixer;
 mod sys;
+
+pub use mixed_audio::{MixedAudio, MixedAudioChunk, MixedAudioOptions};
 
 use std::{
     cell::UnsafeCell,
@@ -32,8 +36,8 @@ use std::{
     panic::{self, AssertUnwindSafe},
     ptr, slice,
     sync::{
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, Weak,
     },
     thread,
     time::Duration,
@@ -48,6 +52,7 @@ pub enum Error {
     AlreadyRunning,
     Capture(String),
     Internal(String),
+    Cancelled,
 }
 
 impl Display for Error {
@@ -58,6 +63,7 @@ impl Display for Error {
             Error::AlreadyRunning => f.write_str("already running"),
             Error::Capture(message) => write!(f, "capture failed: {message}"),
             Error::Internal(message) => write!(f, "internal error: {message}"),
+            Error::Cancelled => f.write_str("operation cancelled"),
         }
     }
 }
@@ -121,6 +127,102 @@ fn c_string(bytes: &[c_char]) -> String {
     }
 }
 
+/// Shared cancellation for capture and permission waits. Cancellation is permanent.
+#[derive(Clone, Default)]
+pub struct CancellationToken {
+    inner: Arc<CancellationState>,
+}
+
+#[derive(Default)]
+struct CancellationState {
+    data: Mutex<CancellationData>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct CancellationData {
+    cancelled: bool,
+    capture: Weak<CaptureControl>,
+}
+
+impl std::fmt::Debug for CancellationToken {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter
+            .debug_struct("CancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        let capture = {
+            let mut data = self
+                .inner
+                .data
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            data.cancelled = true;
+            self.inner.wake.notify_all();
+            mem::take(&mut data.capture).upgrade()
+        };
+        if let Some(capture) = capture {
+            capture.stop();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .data
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cancelled
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        if self.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register(&self, capture: &Arc<CaptureControl>) -> Result<(), Error> {
+        let mut data = self
+            .inner
+            .data
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if data.cancelled {
+            return Err(Error::Cancelled);
+        }
+        data.capture = Arc::downgrade(capture);
+        Ok(())
+    }
+
+    fn wait(&self, timeout: Duration) -> Result<(), Error> {
+        let data = self
+            .inner
+            .data
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (data, _) = self
+            .inner
+            .wake
+            .wait_timeout_while(data, timeout, |data| !data.cancelled)
+            .unwrap_or_else(|error| error.into_inner());
+        if data.cancelled {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
     SystemAudio,
@@ -149,7 +251,12 @@ impl From<i32> for PermissionStatus {
 }
 
 pub mod permissions {
-    use super::{sys, Error, Permission, PermissionStatus};
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::{sys, CancellationToken, Error, Permission, PermissionStatus};
 
     pub fn status(permission: Permission) -> PermissionStatus {
         match permission {
@@ -173,6 +280,51 @@ pub mod permissions {
             Permission::Accessibility => unsafe { sys::mrec_request_accessibility_permission() },
         };
         super::check(status)
+    }
+
+    /// Request and wait for the answer, returning the current status on timeout.
+    /// Accessibility returns immediately; its grant requires an app relaunch.
+    pub fn request_and_wait(
+        permission: Permission,
+        timeout: Duration,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<PermissionStatus, Error> {
+        if let Some(token) = cancellation {
+            token.check()?;
+        }
+        let current = status(permission);
+        if matches!(
+            current,
+            PermissionStatus::Granted | PermissionStatus::NotRequired
+        ) {
+            return Ok(current);
+        }
+        request(permission)?;
+        if permission == Permission::Accessibility {
+            return Ok(status(permission));
+        }
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let delay = Duration::from_millis(500).min(timeout.saturating_sub(start.elapsed()));
+            if let Some(token) = cancellation {
+                token.wait(delay)?;
+            } else {
+                thread::sleep(delay);
+            }
+            let current = status(permission);
+            if matches!(
+                current,
+                PermissionStatus::Granted
+                    | PermissionStatus::Denied
+                    | PermissionStatus::NotRequired
+            ) {
+                return Ok(current);
+            }
+        }
+        if let Some(token) = cancellation {
+            token.check()?;
+        }
+        Ok(status(permission))
     }
 }
 
@@ -199,6 +351,17 @@ impl From<&RawProcess> for AudioProcess {
 
 /// Every live process doing audio IO.
 fn list_audio_processes() -> Vec<AudioProcess> {
+    collect_processes(sys::mrec_list_audio_processes)
+}
+
+/// Applications doing audio IO, with helper processes folded into their app.
+fn list_audio_apps() -> Vec<AudioProcess> {
+    collect_processes(sys::mrec_list_audio_apps)
+}
+
+fn collect_processes(
+    list: unsafe extern "C" fn(*mut RawProcess, usize, *mut usize) -> std::os::raw::c_int,
+) -> Vec<AudioProcess> {
     let mut buffer = vec![
         RawProcess {
             pid: 0,
@@ -210,7 +373,7 @@ fn list_audio_processes() -> Vec<AudioProcess> {
         256
     ];
     let mut count = 0usize;
-    unsafe { sys::mrec_list_audio_processes(buffer.as_mut_ptr(), buffer.len(), &mut count) };
+    unsafe { list(buffer.as_mut_ptr(), buffer.len(), &mut count) };
 
     buffer.iter().take(count).map(AudioProcess::from).collect()
 }
@@ -421,12 +584,16 @@ pub enum MicrophoneSource {
     Default,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CaptureOptions {
     /// Mono mixdown for system audio. Defaults to true.
     pub mono: bool,
     /// Optional microphone track. Defaults to none.
     pub microphone: Option<MicrophoneSource>,
+    /// Additional timestamp-aligned mono s16le output.
+    pub mix: Option<MixedAudioOptions>,
+    /// Cancellation stops capture, including a pending start.
+    pub cancellation: Option<CancellationToken>,
 }
 
 impl Default for CaptureOptions {
@@ -434,6 +601,8 @@ impl Default for CaptureOptions {
         Self {
             mono: true,
             microphone: None,
+            mix: None,
+            cancellation: None,
         }
     }
 }
@@ -483,9 +652,11 @@ pub struct AudioChunk {
 
 const TRACK_CAPACITY: usize = 1 << 20;
 const TRACK_PACKET_CAPACITY: usize = 1 << 12;
-const STATE_RECORDING: u8 = 0;
-const STATE_PAUSED: u8 = 1;
-const STATE_STOPPED: u8 = 2;
+// Low bits hold the phase; upper bits identify segments across pause/resume.
+const STATE_RECORDING: usize = 0;
+const STATE_PAUSED: usize = 1;
+const STATE_STOPPED: usize = 2;
+const STATE_MASK: usize = 3;
 
 #[derive(Clone, Copy, Default)]
 struct PacketMeta {
@@ -496,6 +667,12 @@ struct PacketMeta {
     sample_rate: f64,
     host_time_ns: u64,
     dropped_before: usize,
+    segment: usize,
+}
+
+struct QueuedChunk {
+    audio: AudioChunk,
+    segment: usize,
 }
 
 struct TrackQueue {
@@ -548,15 +725,7 @@ impl TrackQueue {
         }
     }
 
-    fn write(
-        &self,
-        frames: &[f32],
-        frame_count: u32,
-        channels: u32,
-        sample_rate: f64,
-        host_time_ns: u64,
-        state: &AtomicU8,
-    ) {
+    fn write(&self, frames: &[f32], mut packet: PacketMeta, state: &AtomicUsize) {
         if self
             .writing
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -568,7 +737,9 @@ impl TrackQueue {
             return;
         }
 
-        if state.load(Ordering::Acquire) != STATE_RECORDING {
+        if self.closed.load(Ordering::Acquire)
+            || state.load(Ordering::Acquire) != packet.segment << 2
+        {
             self.writing.store(false, Ordering::Release);
             return;
         }
@@ -585,16 +756,11 @@ impl TrackQueue {
             for (offset, sample) in frames.iter().enumerate() {
                 unsafe { *self.buffer[(head + offset) & self.mask].get() = *sample };
             }
+            packet.sample_start = head;
+            packet.sample_count = frames.len();
+            packet.dropped_before = self.dropped_since_read.swap(0, Ordering::Relaxed);
             unsafe {
-                *self.packets[packet_head & self.packet_mask].get() = PacketMeta {
-                    sample_start: head,
-                    sample_count: frames.len(),
-                    frame_count,
-                    channels,
-                    sample_rate,
-                    host_time_ns,
-                    dropped_before: self.dropped_since_read.swap(0, Ordering::Relaxed),
-                };
+                *self.packets[packet_head & self.packet_mask].get() = packet;
             }
             self.head
                 .store(head.wrapping_add(frames.len()), Ordering::Release);
@@ -609,64 +775,71 @@ impl TrackQueue {
         self.writing.store(false, Ordering::Release);
     }
 
+    fn try_recv(&self) -> Option<QueuedChunk> {
+        let _read = self
+            .read_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let packet_tail = self.packet_tail.load(Ordering::Relaxed);
+        let packet_head = self.packet_head.load(Ordering::Acquire);
+        if packet_tail == packet_head {
+            return None;
+        }
+        let first = unsafe { *self.packets[packet_tail & self.packet_mask].get() };
+        let mut next_packet = packet_tail;
+        let mut sample_count = 0usize;
+        let mut frame_count = 0u32;
+        while next_packet != packet_head {
+            let packet = unsafe { *self.packets[next_packet & self.packet_mask].get() };
+            if packet.channels != first.channels
+                || packet.sample_rate != first.sample_rate
+                || packet.segment != first.segment
+                || (next_packet != packet_tail
+                    && (packet.dropped_before != 0
+                        || !Self::packets_are_contiguous(&first, frame_count, &packet)))
+            {
+                break;
+            }
+            sample_count += packet.sample_count;
+            frame_count = frame_count.saturating_add(packet.frame_count);
+            next_packet = next_packet.wrapping_add(1);
+        }
+        let mut frames = Vec::with_capacity(sample_count);
+        for offset in 0..sample_count {
+            frames.push(unsafe { *self.buffer[(first.sample_start + offset) & self.mask].get() });
+        }
+        self.tail.store(
+            first.sample_start.wrapping_add(sample_count),
+            Ordering::Release,
+        );
+        self.packet_tail.store(next_packet, Ordering::Release);
+        Some(QueuedChunk {
+            audio: AudioChunk {
+                frames,
+                host_time_ns: first.host_time_ns,
+                frame_count,
+                channels: first.channels,
+                sample_rate: first.sample_rate,
+                dropped_samples: first.dropped_before,
+            },
+            segment: first.segment,
+        })
+    }
+
     fn recv(&self) -> Option<AudioChunk> {
         loop {
-            {
-                let _read = self
-                    .read_lock
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                let packet_tail = self.packet_tail.load(Ordering::Relaxed);
-                let packet_head = self.packet_head.load(Ordering::Acquire);
-                if packet_tail != packet_head {
-                    let first = unsafe { *self.packets[packet_tail & self.packet_mask].get() };
-                    let mut next_packet = packet_tail;
-                    let mut sample_count = 0usize;
-                    let mut frame_count = 0u32;
-                    while next_packet != packet_head {
-                        let packet = unsafe { *self.packets[next_packet & self.packet_mask].get() };
-                        if packet.channels != first.channels
-                            || packet.sample_rate != first.sample_rate
-                            || (next_packet != packet_tail
-                                && (packet.dropped_before != 0
-                                    || !Self::packets_are_contiguous(&first, frame_count, &packet)))
-                        {
-                            break;
-                        }
-                        sample_count += packet.sample_count;
-                        frame_count = frame_count.saturating_add(packet.frame_count);
-                        next_packet = next_packet.wrapping_add(1);
-                    }
-
-                    let mut frames = Vec::with_capacity(sample_count);
-                    for offset in 0..sample_count {
-                        frames.push(unsafe {
-                            *self.buffer[(first.sample_start + offset) & self.mask].get()
-                        });
-                    }
-                    self.tail.store(
-                        first.sample_start.wrapping_add(sample_count),
-                        Ordering::Release,
-                    );
-                    self.packet_tail.store(next_packet, Ordering::Release);
-                    return Some(AudioChunk {
-                        frames,
-                        host_time_ns: first.host_time_ns,
-                        frame_count,
-                        channels: first.channels,
-                        sample_rate: first.sample_rate,
-                        dropped_samples: first.dropped_before,
-                    });
-                }
+            // Closure precedes the final read so EOF includes the last publication.
+            let closed = self.closed.load(Ordering::Acquire);
+            if let Some(packet) = self.try_recv() {
+                return Some(packet.audio);
             }
-            if self.closed.load(Ordering::Acquire) {
+            if closed {
                 return None;
             }
             if capture_health() == CaptureHealth::Failed {
                 self.close();
-                return None;
+                continue;
             }
-
             let guard = self
                 .wake_lock
                 .lock()
@@ -678,7 +851,12 @@ impl TrackQueue {
         }
     }
 
-    fn clear(&self) {
+    fn barrier(&self) {
+        self.wait_for_writer();
+        self.writing.store(false, Ordering::Release);
+    }
+
+    fn wait_for_writer(&self) {
         while self
             .writing
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -686,6 +864,10 @@ impl TrackQueue {
         {
             thread::yield_now();
         }
+    }
+
+    fn clear(&self) {
+        self.wait_for_writer();
         let _read = self
             .read_lock
             .lock()
@@ -713,7 +895,9 @@ impl TrackQueue {
     }
 
     fn close(&self) {
+        self.wait_for_writer();
         self.closed.store(true, Ordering::Release);
+        self.writing.store(false, Ordering::Release);
         self.wake.notify_all();
     }
 }
@@ -752,7 +936,8 @@ impl AudioTrack {
 
 struct TrackCallbackContext {
     queue: Arc<TrackQueue>,
-    state: Arc<AtomicU8>,
+    mix_queue: Option<Arc<TrackQueue>>,
+    state: Arc<AtomicUsize>,
 }
 
 struct CaptureCallbackContexts {
@@ -774,126 +959,100 @@ unsafe extern "C" fn audio_trampoline(
         return;
     }
     let context = &*(user_data as *const TrackCallbackContext);
-    if context.state.load(Ordering::Acquire) != STATE_RECORDING {
+    let state = context.state.load(Ordering::Acquire);
+    if state & STATE_MASK != STATE_RECORDING {
         return;
     }
     let len = frame_count as usize * channels.max(1) as usize;
-    context.queue.write(
-        slice::from_raw_parts(frames, len),
+    let samples = slice::from_raw_parts(frames, len);
+    let packet = PacketMeta {
         frame_count,
         channels,
         sample_rate,
         host_time_ns,
-        &context.state,
-    );
+        segment: state >> 2,
+        ..PacketMeta::default()
+    };
+    context.queue.write(samples, packet, &context.state);
+    if let Some(queue) = &context.mix_queue {
+        queue.write(samples, packet, &context.state);
+    }
 }
 
-/// Owns both audio tracks and their shared recording lifecycle.
-#[must_use = "capture stops when this session is dropped"]
-pub struct CaptureSession {
-    system_audio: AudioTrack,
-    microphone: Option<AudioTrack>,
-    state: Arc<AtomicU8>,
+struct CaptureControl {
+    state: Arc<AtomicUsize>,
+    queues: Vec<Arc<TrackQueue>>,
+    raw_queues: Vec<Arc<TrackQueue>>,
+    lifecycle: Mutex<()>,
     failure: Mutex<Option<String>>,
 }
 
-impl CaptureSession {
-    pub fn system_audio(&self) -> &AudioTrack {
-        &self.system_audio
+impl CaptureControl {
+    fn phase(&self) -> usize {
+        self.state.load(Ordering::Acquire) & STATE_MASK
     }
 
-    pub fn microphone(&self) -> Option<&AudioTrack> {
-        self.microphone.as_ref()
-    }
-
-    pub fn state(&self) -> CaptureState {
-        if self.health() == CaptureHealth::Failed {
-            return CaptureState::Stopped;
-        }
-        match self.state.load(Ordering::Acquire) {
-            STATE_PAUSED => CaptureState::Paused,
-            STATE_STOPPED => CaptureState::Stopped,
-            _ => CaptureState::Recording,
-        }
-    }
-
-    /// Native device health. Transient interruptions are recovered
-    /// automatically.
-    pub fn health(&self) -> CaptureHealth {
-        if self.state.load(Ordering::Acquire) == STATE_STOPPED {
+    fn health(&self) -> CaptureHealth {
+        if self.phase() == STATE_STOPPED {
             CaptureHealth::Stopped
         } else {
             capture_health()
         }
     }
 
-    /// The terminal recovery error, if automatic recovery was exhausted.
-    pub fn failure(&self) -> Option<Error> {
-        let mut failure = self
-            .failure
+    fn pause(&self) {
+        let _guard = self
+            .lifecycle
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if failure.is_none() && self.health() == CaptureHealth::Failed {
-            *failure = Some(Self::failure_detail());
-        }
-        failure.clone().map(Error::Capture)
-    }
-
-    /// Discard incoming frames until [`CaptureSession::resume`] is called.
-    ///
-    /// Paused time is omitted from the recording; silence is not synthesized.
-    pub fn pause(&self) {
-        if self
-            .state
-            .compare_exchange(
-                STATE_RECORDING,
-                STATE_PAUSED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            self.system_audio.queue.clear();
-            if let Some(microphone) = &self.microphone {
-                microphone.queue.clear();
-            }
-        }
-    }
-
-    /// Resume delivering incoming frames.
-    pub fn resume(&self) {
-        if self.state.load(Ordering::Acquire) != STATE_PAUSED {
+        if self.phase() != STATE_RECORDING {
             return;
         }
-        self.system_audio.queue.clear();
-        if let Some(microphone) = &self.microphone {
-            microphone.queue.clear();
+        self.state.fetch_or(STATE_PAUSED, Ordering::AcqRel);
+        for queue in &self.queues {
+            queue.barrier();
         }
-        let _ = self.state.compare_exchange(
-            STATE_PAUSED,
-            STATE_RECORDING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        for queue in &self.raw_queues {
+            queue.clear();
+        }
     }
 
-    /// Stop both tracks. Dropping the session has the same effect.
-    pub fn stop(&self) {
-        let terminal_failure =
-            (capture_health() == CaptureHealth::Failed).then(Self::failure_detail);
-        if self.state.swap(STATE_STOPPED, Ordering::AcqRel) == STATE_STOPPED {
+    fn resume(&self) {
+        let _guard = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = self.state.load(Ordering::Acquire);
+        if state & STATE_MASK != STATE_PAUSED {
             return;
         }
-        if let Some(detail) = terminal_failure {
+        for queue in &self.raw_queues {
+            queue.clear();
+        }
+        self.state
+            .store((state & !STATE_MASK).wrapping_add(4), Ordering::Release);
+    }
+
+    fn stop(&self) {
+        let _guard = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = self.state.load(Ordering::Acquire);
+        if state & STATE_MASK == STATE_STOPPED {
+            return;
+        }
+        if capture_health() == CaptureHealth::Failed {
             *self
                 .failure
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(detail);
+                .unwrap_or_else(|error| error.into_inner()) = Some(Self::failure_detail());
         }
+        self.state
+            .store((state & !STATE_MASK) | STATE_STOPPED, Ordering::Release);
         unsafe { sys::mrec_stop() };
-        self.system_audio.queue.close();
-        if let Some(microphone) = &self.microphone {
-            microphone.queue.close();
+        for queue in &self.queues {
+            queue.close();
         }
         *CAPTURE_CONTEXTS
             .lock()
@@ -910,71 +1069,120 @@ impl CaptureSession {
     }
 }
 
+/// Owns the audio tracks and their shared recording lifecycle.
+#[must_use = "capture stops when this session is dropped"]
+pub struct CaptureSession {
+    system_audio: AudioTrack,
+    microphone: Option<AudioTrack>,
+    mixed_audio: Option<MixedAudio>,
+    control: Arc<CaptureControl>,
+}
+
+impl CaptureSession {
+    pub fn system_audio(&self) -> &AudioTrack {
+        &self.system_audio
+    }
+    pub fn microphone(&self) -> Option<&AudioTrack> {
+        self.microphone.as_ref()
+    }
+    pub fn mixed_audio(&self) -> Option<&MixedAudio> {
+        self.mixed_audio.as_ref()
+    }
+
+    pub fn state(&self) -> CaptureState {
+        if self.health() == CaptureHealth::Failed {
+            return CaptureState::Stopped;
+        }
+        match self.control.phase() {
+            STATE_PAUSED => CaptureState::Paused,
+            STATE_STOPPED => CaptureState::Stopped,
+            _ => CaptureState::Recording,
+        }
+    }
+
+    /// Native device health. Transient interruptions recover automatically.
+    pub fn health(&self) -> CaptureHealth {
+        self.control.health()
+    }
+
+    /// The terminal recovery error, if automatic recovery was exhausted.
+    pub fn failure(&self) -> Option<Error> {
+        let mut failure = self
+            .control
+            .failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if failure.is_none() && self.health() == CaptureHealth::Failed {
+            *failure = Some(CaptureControl::failure_detail());
+        }
+        failure.clone().map(Error::Capture)
+    }
+
+    /// Discard incoming frames until resume; paused time is omitted.
+    pub fn pause(&self) {
+        self.control.pause();
+    }
+    pub fn resume(&self) {
+        self.control.resume();
+    }
+
+    /// Stop capture. Tracks retain their queued tail until drained.
+    pub fn stop(&self) {
+        self.control.stop();
+    }
+}
+
 impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-fn resolve_process_target(pid: u32) -> Result<Vec<u32>, Error> {
-    if pid == 0 {
-        return Err(Error::Capture("process pid must be non-zero".to_owned()));
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // WASAPI INCLUDE_PROCESS_TREE follows current and future helper children.
-        // Adding active helpers separately would record them twice.
-        return Ok(vec![pid]);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut meetings = [unsafe { mem::zeroed::<RawMeeting>() }; 16];
-        let mut count = 0usize;
-        unsafe { sys::mrec_scan(meetings.as_mut_ptr(), meetings.len(), &mut count) };
-
-        let mut resolved = meetings
-            .iter()
-            .take(count)
-            .find(|meeting| meeting.pid == pid)
-            .map(|meeting| {
-                meeting.audio_pids[..meeting.audio_pid_count.min(sys::MREC_MAX_AUDIO_PIDS)].to_vec()
-            })
-            .unwrap_or_default();
-        resolved.retain(|candidate| *candidate != 0);
-        if resolved.is_empty() {
-            resolved.push(pid);
-        }
-        Ok(resolved)
-    }
-}
-
-/// Capture one process target or the system mix.
-///
-/// Blocks for up to six seconds while the permission grant is undetermined, so
-/// do not call from a UI thread.
 fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<CaptureSession, Error> {
+    if let Some(token) = &options.cancellation {
+        token.check()?;
+    }
+    if options.mix.is_some_and(|mix| mix.sample_rate == 0) {
+        return Err(Error::Capture(
+            "mix sample rate must be non-zero".to_owned(),
+        ));
+    }
     if unsafe { sys::mrec_is_running() } != 0 {
         return Err(Error::AlreadyRunning);
     }
-
     let (pids, system_wide) = match target {
-        CaptureTarget::Process { pid } => (resolve_process_target(pid)?, false),
+        CaptureTarget::Process { pid: 0 } => {
+            return Err(Error::Capture("process pid must be non-zero".to_owned()))
+        }
+        CaptureTarget::Process { pid } => (vec![pid], false),
         CaptureTarget::System => (Vec::new(), true),
     };
-
-    let state = Arc::new(AtomicU8::new(STATE_RECORDING));
+    let state = Arc::new(AtomicUsize::new(STATE_RECORDING));
     let system_queue = Arc::new(TrackQueue::new());
     let microphone_queue = options.microphone.map(|_| Arc::new(TrackQueue::new()));
+    let system_mix_queue = options.mix.map(|_| Arc::new(TrackQueue::new()));
+    let microphone_mix_queue = options
+        .mix
+        .and(options.microphone)
+        .map(|_| Arc::new(TrackQueue::new()));
+    let raw_queues: Vec<_> = std::iter::once(Arc::clone(&system_queue))
+        .chain(microphone_queue.iter().cloned())
+        .collect();
+    let mix_queues: Vec<_> = system_mix_queue
+        .iter()
+        .cloned()
+        .chain(microphone_mix_queue.iter().cloned())
+        .collect();
     let mut contexts = CaptureCallbackContexts {
         system_audio: Box::new(TrackCallbackContext {
             queue: Arc::clone(&system_queue),
+            mix_queue: system_mix_queue,
             state: Arc::clone(&state),
         }),
         microphone: microphone_queue.as_ref().map(|queue| {
             Box::new(TrackCallbackContext {
                 queue: Arc::clone(queue),
+                mix_queue: microphone_mix_queue,
                 state: Arc::clone(&state),
             })
         }),
@@ -993,93 +1201,85 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
     }
     *context_slot = Some(contexts);
     drop(context_slot);
-
-    let status = unsafe {
-        sys::mrec_start_tracks_raw(
-            if pids.is_empty() {
-                ptr::null()
-            } else {
-                pids.as_ptr()
-            },
-            pids.len(),
-            system_wide as i32,
-            options.mono as i32,
-            0,
-            match options.microphone {
-                Some(MicrophoneSource::Default) => 1,
-                None => 0,
-            },
-            Some(audio_trampoline),
-            system_context,
-            options
-                .microphone
-                .map(|_| audio_trampoline as RawAudioCallback),
-            microphone_context,
-        )
-    };
-    if status != sys::MREC_OK {
-        *CAPTURE_CONTEXTS.lock().unwrap() = None;
-        system_queue.close();
-        if let Some(queue) = &microphone_queue {
-            queue.close();
+    let control = Arc::new(CaptureControl {
+        state: Arc::clone(&state),
+        queues: raw_queues
+            .iter()
+            .cloned()
+            .chain(mix_queues.iter().cloned())
+            .collect(),
+        raw_queues,
+        lifecycle: Mutex::new(()),
+        failure: Mutex::new(None),
+    });
+    let result = (|| {
+        let status = unsafe {
+            sys::mrec_start_tracks_raw(
+                if pids.is_empty() {
+                    ptr::null()
+                } else {
+                    pids.as_ptr()
+                },
+                pids.len(),
+                system_wide as i32,
+                options.mono as i32,
+                0,
+                match options.microphone {
+                    Some(MicrophoneSource::Default) => 1,
+                    None => 0,
+                },
+                Some(audio_trampoline),
+                system_context,
+                options
+                    .microphone
+                    .map(|_| audio_trampoline as RawAudioCallback),
+                microphone_context,
+            )
+        };
+        if let Some(token) = &options.cancellation {
+            token.check()?;
         }
         check(status)?;
-    }
-
-    if capture_health() == CaptureHealth::Failed {
-        unsafe { sys::mrec_stop() };
-        system_queue.close();
-        if let Some(queue) = &microphone_queue {
-            queue.close();
+        if capture_health() == CaptureHealth::Failed {
+            return Err(Error::Capture(last_error()));
         }
-        *CAPTURE_CONTEXTS.lock().unwrap() = None;
-        return Err(Error::Capture(last_error()));
-    }
-
-    let mut system_sample_rate = 0.0f64;
-    let mut system_channels = 0u32;
-    let system_format_status =
-        unsafe { sys::mrec_current_format(&mut system_sample_rate, &mut system_channels) };
-    if let Err(error) = check(system_format_status) {
-        unsafe { sys::mrec_stop() };
-        system_queue.close();
-        if let Some(queue) = &microphone_queue {
-            queue.close();
+        let mut system_sample_rate = 0.0;
+        let mut system_channels = 0;
+        check(unsafe { sys::mrec_current_format(&mut system_sample_rate, &mut system_channels) })?;
+        let microphone = if let Some(queue) = microphone_queue {
+            let mut sample_rate = 0.0;
+            let mut channels = 0;
+            check(unsafe { sys::mrec_current_microphone_format(&mut sample_rate, &mut channels) })?;
+            Some(AudioTrack {
+                sample_rate,
+                channels,
+                queue,
+            })
+        } else {
+            None
+        };
+        let mixed_audio = options
+            .mix
+            .map(|mix| MixedAudio::new(mix.sample_rate, mix_queues, state))
+            .transpose()?;
+        if let Some(token) = &options.cancellation {
+            token.register(&control)?;
         }
-        *CAPTURE_CONTEXTS.lock().unwrap() = None;
-        return Err(error);
-    }
-    let microphone = if let Some(queue) = microphone_queue {
-        let mut sample_rate = 0.0f64;
-        let mut channels = 0u32;
-        let microphone_format_status =
-            unsafe { sys::mrec_current_microphone_format(&mut sample_rate, &mut channels) };
-        if let Err(error) = check(microphone_format_status) {
-            unsafe { sys::mrec_stop() };
-            system_queue.close();
-            queue.close();
-            *CAPTURE_CONTEXTS.lock().unwrap() = None;
-            return Err(error);
-        }
-        Some(AudioTrack {
-            sample_rate,
-            channels,
-            queue,
+        Ok(CaptureSession {
+            system_audio: AudioTrack {
+                sample_rate: system_sample_rate,
+                channels: system_channels,
+                queue: system_queue,
+            },
+            microphone,
+            mixed_audio,
+            control: Arc::clone(&control),
         })
-    } else {
-        None
-    };
-
-    Ok(CaptureSession {
-        system_audio: AudioTrack {
-            sample_rate: system_sample_rate,
-            channels: system_channels,
-            queue: system_queue,
-        },
-        microphone,
-        state,
-        failure: Mutex::new(None),
-    })
+    })();
+    if result.is_err() {
+        control.stop();
+    }
+    result
 }
 
 fn capture_running() -> bool {
@@ -1100,6 +1300,12 @@ pub mod meetings {
     /// Every live process doing audio IO.
     pub fn audio_processes() -> Vec<AudioProcess> {
         super::list_audio_processes()
+    }
+
+    /// Applications doing audio IO, grouped by owning PID, including helpers.
+    /// Pass `pid` to capture the app; no meeting scan or Accessibility grant is needed.
+    pub fn audio_apps() -> Vec<AudioProcess> {
+        super::list_audio_apps()
     }
 
     /// Point-in-time scan, highest confidence first.
@@ -1127,6 +1333,9 @@ pub mod capture {
     use super::{CaptureOptions, CaptureSession, CaptureTarget, Error};
 
     /// Start capturing one process target or the system mix.
+    ///
+    /// Native initialization may block for six seconds. Cancellation during
+    /// initialization is returned after that attempt has been cleaned up.
     pub fn start(target: CaptureTarget, options: CaptureOptions) -> Result<CaptureSession, Error> {
         super::start_capture(target, options)
     }
@@ -1138,15 +1347,46 @@ pub mod capture {
 
 #[cfg(test)]
 mod capture_tests {
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::AtomicUsize;
 
-    use super::{TrackQueue, STATE_PAUSED, STATE_RECORDING};
+    use super::{PacketMeta, TrackQueue, STATE_PAUSED, STATE_RECORDING};
+
+    fn write(
+        queue: &TrackQueue,
+        frames: &[f32],
+        frame_count: u32,
+        channels: u32,
+        sample_rate: f64,
+        host_time_ns: u64,
+        state: &AtomicUsize,
+    ) {
+        queue.write(
+            frames,
+            PacketMeta {
+                frame_count,
+                channels,
+                sample_rate,
+                host_time_ns,
+                segment: state.load(std::sync::atomic::Ordering::Acquire) >> 2,
+                ..PacketMeta::default()
+            },
+            state,
+        );
+    }
 
     #[test]
     fn track_queue_delivers_interleaved_samples() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[0.25, -0.5, 0.75, -1.0], 2, 2, 48_000.0, 42, &state);
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(
+            &queue,
+            &[0.25, -0.5, 0.75, -1.0],
+            2,
+            2,
+            48_000.0,
+            42,
+            &state,
+        );
         let chunk = queue.recv().unwrap();
         assert_eq!(chunk.frames, [0.25, -0.5, 0.75, -1.0]);
         assert_eq!(chunk.frame_count, 2);
@@ -1161,17 +1401,43 @@ mod capture_tests {
     #[test]
     fn track_queue_drops_paused_samples() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_PAUSED);
-        queue.write(&[1.0], 1, 1, 48_000.0, 1, &state);
+        let state = AtomicUsize::new(STATE_PAUSED);
+        write(&queue, &[1.0], 1, 1, 48_000.0, 1, &state);
         queue.close();
         assert!(queue.recv().is_none());
     }
 
     #[test]
+    fn track_queue_drains_final_packets_while_producer_closes() {
+        use std::{sync::Arc, thread};
+
+        for _ in 0..32 {
+            let queue = Arc::new(TrackQueue::new());
+            let producer = Arc::clone(&queue);
+            let writer = thread::spawn(move || {
+                let state = AtomicUsize::new(STATE_RECORDING);
+                for index in 0..128 {
+                    write(&producer, &[0.25], 1, 1, 48_000.0, index * 20_833, &state);
+                    thread::yield_now();
+                }
+                producer.close();
+                write(&producer, &[1.0], 1, 1, 48_000.0, 3_000_000, &state);
+            });
+            let mut frames = Vec::new();
+            while let Some(chunk) = queue.recv() {
+                frames.extend(chunk.frames);
+            }
+            writer.join().unwrap();
+            assert_eq!(frames, vec![0.25; 128]);
+            assert!(queue.recv().is_none());
+        }
+    }
+
+    #[test]
     fn track_queue_clears_buffered_samples() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[2.0], 1, 1, 48_000.0, 1, &state);
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[2.0], 1, 1, 48_000.0, 1, &state);
         queue.clear();
         queue.close();
         assert!(queue.recv().is_none());
@@ -1180,9 +1446,9 @@ mod capture_tests {
     #[test]
     fn track_queue_coalesces_matching_packets_and_keeps_first_timestamp() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[1.0, 2.0], 2, 1, 48_000.0, 1_000, &state);
-        queue.write(&[3.0, 4.0], 2, 1, 48_000.0, 1_042, &state);
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[1.0, 2.0], 2, 1, 48_000.0, 1_000, &state);
+        write(&queue, &[3.0, 4.0], 2, 1, 48_000.0, 1_042, &state);
 
         let chunk = queue.recv().unwrap();
         assert_eq!(chunk.frames, [1.0, 2.0, 3.0, 4.0]);
@@ -1194,9 +1460,9 @@ mod capture_tests {
     #[test]
     fn track_queue_never_coalesces_across_format_changes() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[1.0], 1, 1, 48_000.0, 1, &state);
-        queue.write(&[2.0, 3.0], 1, 2, 44_100.0, 2, &state);
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[1.0], 1, 1, 48_000.0, 1, &state);
+        write(&queue, &[2.0, 3.0], 1, 2, 44_100.0, 2, &state);
 
         let first = queue.recv().unwrap();
         assert_eq!(first.frames, [1.0]);
@@ -1213,9 +1479,9 @@ mod capture_tests {
     #[test]
     fn track_queue_never_coalesces_across_timestamp_gaps() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[1.0], 1, 1, 48_000.0, 1_000_000, &state);
-        queue.write(&[2.0], 1, 1, 48_000.0, 20_000_000, &state);
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[1.0], 1, 1, 48_000.0, 1_000_000, &state);
+        write(&queue, &[2.0], 1, 1, 48_000.0, 20_000_000, &state);
 
         assert_eq!(queue.recv().unwrap().frames, [1.0]);
         assert_eq!(queue.recv().unwrap().frames, [2.0]);
@@ -1225,10 +1491,11 @@ mod capture_tests {
     #[test]
     fn track_queue_reports_a_drop_on_the_first_packet_after_the_gap() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
-        queue.write(&[1.0], 1, 1, 48_000.0, 1_000_000, &state);
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[1.0], 1, 1, 48_000.0, 1_000_000, &state);
         let oversized = vec![0.0; super::TRACK_CAPACITY + 1];
-        queue.write(
+        write(
+            &queue,
             &oversized,
             oversized.len() as u32,
             1,
@@ -1236,7 +1503,7 @@ mod capture_tests {
             2_000_000,
             &state,
         );
-        queue.write(&[2.0], 1, 1, 48_000.0, 3_000_000, &state);
+        write(&queue, &[2.0], 1, 1, 48_000.0, 3_000_000, &state);
 
         let before_gap = queue.recv().unwrap();
         assert_eq!(before_gap.frames, [1.0]);
@@ -1250,10 +1517,18 @@ mod capture_tests {
     #[test]
     fn track_queue_reports_bounded_buffer_drops() {
         let queue = TrackQueue::new();
-        let state = AtomicU8::new(STATE_RECORDING);
+        let state = AtomicUsize::new(STATE_RECORDING);
         let oversized = vec![0.0; super::TRACK_CAPACITY + 1];
-        queue.write(&oversized, oversized.len() as u32, 1, 48_000.0, 1, &state);
-        queue.write(&[1.0], 1, 1, 48_000.0, 2, &state);
+        write(
+            &queue,
+            &oversized,
+            oversized.len() as u32,
+            1,
+            48_000.0,
+            1,
+            &state,
+        );
+        write(&queue, &[1.0], 1, 1, 48_000.0, 2, &state);
 
         let chunk = queue.recv().unwrap();
         assert_eq!(chunk.frames, [1.0]);
@@ -1263,5 +1538,148 @@ mod capture_tests {
             oversized.len()
         );
         queue.close();
+    }
+
+    #[test]
+    fn packets_keep_segment_boundaries_and_reject_stale_callbacks() {
+        let queue = TrackQueue::new();
+        let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[0.25], 1, 1, 48_000.0, 1, &state);
+        state.store(4, std::sync::atomic::Ordering::Release);
+        write(&queue, &[0.5], 1, 1, 48_000.0, 2, &state);
+        queue.write(
+            &[1.0],
+            PacketMeta {
+                frame_count: 1,
+                channels: 1,
+                sample_rate: 48_000.0,
+                host_time_ns: 3,
+                segment: 0,
+                ..PacketMeta::default()
+            },
+            &state,
+        );
+        queue.close();
+        let first = queue.try_recv().unwrap();
+        let second = queue.try_recv().unwrap();
+        assert_eq!((first.segment, first.audio.frames), (0, vec![0.25]));
+        assert_eq!((second.segment, second.audio.frames), (1, vec![0.5]));
+        assert!(queue.try_recv().is_none());
+    }
+
+    #[test]
+    fn native_callback_fans_out_independent_raw_and_mix_queues() {
+        use super::{audio_trampoline, TrackCallbackContext};
+        use std::sync::Arc;
+        let state = Arc::new(AtomicUsize::new(STATE_RECORDING));
+        let raw = Arc::new(TrackQueue::new());
+        let mixed = Arc::new(TrackQueue::new());
+        let context = TrackCallbackContext {
+            queue: Arc::clone(&raw),
+            mix_queue: Some(Arc::clone(&mixed)),
+            state,
+        };
+        let samples = [0.25, -0.5];
+        unsafe {
+            audio_trampoline(
+                samples.as_ptr(),
+                2,
+                1,
+                48_000.0,
+                42,
+                (&context as *const TrackCallbackContext).cast_mut().cast(),
+            );
+        }
+        assert_eq!(raw.try_recv().unwrap().audio.frames, samples);
+        assert_eq!(mixed.try_recv().unwrap().audio.frames, samples);
+        assert!(raw.try_recv().is_none());
+        assert!(mixed.try_recv().is_none());
+    }
+
+    #[test]
+    fn cancelled_requests_do_not_start_native_work() {
+        use super::{
+            capture, permissions, CancellationToken, CaptureOptions, CaptureTarget, Error,
+            Permission,
+        };
+        use std::time::Duration;
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(token.clone().is_cancelled());
+        assert!(matches!(
+            capture::start(
+                CaptureTarget::System,
+                CaptureOptions {
+                    cancellation: Some(token.clone()),
+                    ..CaptureOptions::default()
+                }
+            ),
+            Err(Error::Cancelled)
+        ));
+        assert_eq!(
+            permissions::request_and_wait(
+                Permission::Microphone,
+                Duration::from_secs(10),
+                Some(&token)
+            ),
+            Err(Error::Cancelled)
+        );
+    }
+
+    #[test]
+    fn zero_mix_rate_is_rejected_before_capture_starts() {
+        use super::{capture, CaptureOptions, CaptureTarget, Error, MixedAudioOptions};
+        assert!(matches!(
+            capture::start(
+                CaptureTarget::System,
+                CaptureOptions {
+                    mix: Some(MixedAudioOptions { sample_rate: 0 }),
+                    ..CaptureOptions::default()
+                }
+            ),
+            Err(Error::Capture(_))
+        ));
+    }
+
+    #[test]
+    fn cancellation_wakes_permission_wait_without_polling_delay() {
+        use super::{CancellationToken, Error};
+        use std::{sync::mpsc, thread, time::Duration};
+        let token = CancellationToken::new();
+        let waiting = token.clone();
+        let (send, recv) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            send.send(waiting.wait(Duration::from_secs(60))).unwrap();
+        });
+        token.cancel();
+        assert_eq!(
+            recv.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(Error::Cancelled)
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_stops_registered_capture_and_preserves_tail() {
+        use super::{CancellationToken, CaptureControl, STATE_STOPPED};
+        use std::sync::{atomic::Ordering, Arc, Mutex};
+        let queue = Arc::new(TrackQueue::new());
+        let state = Arc::new(AtomicUsize::new(STATE_RECORDING));
+        write(&queue, &[0.25], 1, 1, 48_000.0, 42, &state);
+        let control = Arc::new(CaptureControl {
+            state: Arc::clone(&state),
+            queues: vec![Arc::clone(&queue)],
+            raw_queues: vec![Arc::clone(&queue)],
+            lifecycle: Mutex::new(()),
+            failure: Mutex::new(None),
+        });
+        let token = CancellationToken::new();
+        token.register(&control).unwrap();
+        token.cancel();
+        assert_eq!(state.load(Ordering::Acquire) & 3, STATE_STOPPED);
+        assert!(queue.closed.load(Ordering::Acquire));
+        assert_eq!(queue.recv().unwrap().frames, [0.25]);
+        assert!(queue.recv().is_none());
+        control.stop();
     }
 }

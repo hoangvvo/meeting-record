@@ -72,7 +72,9 @@ An open app does nothing. Active audio triggers it. Muted users are recorded if 
 
 **Browser handling:** A YouTube tab looks identical to a Google Meet tab at the process level. Browsers need mic activity or a recognized URL to hit the threshold.
 
-**Process targets:** The UI PID for Chrome, Electron, or Teams is useless for audio capture. You have to find and tap the actual audio helper processes. (Windows handles this natively via `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`).
+**Process targets:** The native core expands app PIDs; bindings do not run meeting detection. Windows follows the process tree. macOS snapshots current audio helpers at capture start.
+
+**Windows app picker:** Audio-process ancestry resolves to the nearest app-window owner, excluding the shell. Hidden/tray apps use their same-executable ancestor. Entries are grouped by owning PID.
 
 ### Accessibility (AX) hazards
 

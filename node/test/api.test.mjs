@@ -32,5 +32,23 @@ test("invalid public inputs use TypeError without starting capture", async () =>
     MeetingRecord.capture.start({ type: "system" }, { microphone: "built-in" }),
     TypeError,
   );
+  await assert.rejects(
+    MeetingRecord.capture.start({ type: "system" }, { mix: { sampleRate: 0 } }),
+    TypeError,
+  );
+  assert.equal(MeetingRecord.capture.running, false);
+});
+
+test("cancel capture and permission requests before native work starts", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    MeetingRecord.capture.start({ type: "system" }, { signal: controller.signal }),
+    { name: "AbortError" },
+  );
+  await assert.rejects(
+    MeetingRecord.permissions.request("microphone", { signal: controller.signal }),
+    { name: "AbortError" },
+  );
   assert.equal(MeetingRecord.capture.running, false);
 });

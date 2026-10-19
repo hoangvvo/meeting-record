@@ -41,7 +41,7 @@ On macOS, system-audio capture needs `NSAudioCaptureUsageDescription`. Add `NSMi
 
 Permission handling is asynchronous. Query the permission status for the result.
 
-Microphone capture is opt-in. It uses the current default input device and stays separate from system audio; the library never mixes the two tracks together.
+Microphone capture is opt-in and uses the current default input device. Raw tracks stay separate; both bindings also support mixed output.
 
 ## Detection
 
@@ -63,6 +63,8 @@ Always rely on `shouldRecord` / `should_record`. It becomes true when there is a
 
 - **Process target:** Recommended. Captures the selected meeting process and its audio helpers.
 - **System target:** Captures all application audio.
+
+For manual source pickers, use [`meetings.audioApps()`](./node/README.md#audio-apps) (Node.js) or [`meetings::audio_apps()`](./rust/README.md#audio-apps) (Rust).
 
 ## Troubleshooting
 

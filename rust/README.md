@@ -111,6 +111,35 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+## Audio apps
+
+`meetings::audio_apps()` lists owning applications for a source picker. Use an entry's `pid` with `CaptureTarget::Process`; no meeting scan or Accessibility grant is needed.
+
+Windows targets include future child processes. macOS targets include current audio helpers; restart capture if helpers are replaced.
+
+## Mixed output
+
+```rust
+use std::io::Write;
+use meeting_record::{capture, CaptureOptions, CaptureTarget, MicrophoneSource, MixedAudioOptions};
+
+let recording = capture::start(CaptureTarget::System, CaptureOptions {
+    microphone: Some(MicrophoneSource::Default),
+    mix: Some(MixedAudioOptions { sample_rate: 24_000 }),
+    ..CaptureOptions::default()
+})?;
+let mixed = recording.mixed_audio().unwrap();
+mixed.set_microphone_muted(true);
+while let Some(chunk) = mixed.recv() {
+    destination.write_all(&chunk.pcm)?;
+    println!("{}", chunk.level);
+}
+```
+
+`mixed_audio()` is mono s16le. Pause/resume excludes paused time; drain it after stopping to consume the final tail. Raw tracks remain float32. Mixing does not perform echo cancellation.
+
+Set `CaptureOptions::cancellation` to a cloned `CancellationToken` to cancel capture. Use `permissions::request_and_wait(permission, timeout, Some(&token))` for cancellable permission waits.
+
 ## License
 
 [MIT](./LICENSE.md) © Hoang Vo

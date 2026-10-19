@@ -126,6 +126,7 @@ fn build_windows(native: &Path) {
         "include/meeting-record.h",
         "include/meeting-record-detect.h",
         "windows/ProcessLoopback.cpp",
+        "windows/AudioAppProcess.h",
         "windows/MeetingDetector.cpp",
     ] {
         println!("cargo:rerun-if-changed={}", native.join(source).display());

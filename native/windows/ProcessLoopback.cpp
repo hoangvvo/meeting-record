@@ -15,6 +15,7 @@
  *     Chrome, Electron and Teams
  */
 #include "meeting-record.h"
+#include "AudioAppProcess.h"
 
 #include <audioclient.h>
 #include <audioclientactivationparams.h>
@@ -908,6 +909,62 @@ mrec_status mrec_list_audio_processes(mrec_process *out, size_t capacity,
 
   *out_count = count;
   return activity.size() > capacity ? MREC_ERR_BUFFER_TOO_SMALL : MREC_OK;
+}
+
+mrec_status mrec_list_audio_apps(mrec_process *out, size_t capacity,
+                                     size_t *out_count) {
+  if (!out || !out_count) return MREC_ERR_INTERNAL;
+  *out_count = 0;
+  const auto activity = CollectAudioActivity();
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return MREC_ERR_INTERNAL;
+
+  std::map<uint32_t, meeting_record::AudioAppProcess> processes;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof entry;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      processes.emplace(entry.th32ProcessID, meeting_record::AudioAppProcess{
+          entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile});
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+
+  EnumWindows([](HWND window, LPARAM context) -> BOOL {
+    if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr ||
+        (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) {
+      return TRUE;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    auto &processes = *reinterpret_cast<
+        std::map<uint32_t, meeting_record::AudioAppProcess> *>(context);
+    const auto process = processes.find(pid);
+    if (process != processes.end()) process->second.has_app_window = true;
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&processes));
+
+  DWORD shell_pid = 0;
+  GetWindowThreadProcessId(GetShellWindow(), &shell_pid);
+  std::map<uint32_t, mrec_process> apps;
+  for (const auto &[pid, state] : activity) {
+    const auto *root = meeting_record::FindAudioAppRoot(processes, pid, shell_pid);
+    if (!root || root->pid == GetCurrentProcessId()) continue;
+    auto &app = apps[root->pid];
+    app.pid = root->pid;
+    app.is_running_output |= state.rendering ? 1 : 0;
+    app.is_running_input |= state.capturing ? 1 : 0;
+    WideCharToMultiByte(CP_UTF8, 0, root->executable.c_str(), -1, app.name,
+                        sizeof app.name, nullptr, nullptr);
+  }
+
+  size_t count = 0;
+  for (const auto &[pid, app] : apps) {
+    if (count == capacity) break;
+    out[count++] = app;
+  }
+  *out_count = count;
+  return apps.size() > capacity ? MREC_ERR_BUFFER_TOO_SMALL : MREC_OK;
 }
 
 int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,

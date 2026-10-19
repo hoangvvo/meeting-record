@@ -75,6 +75,9 @@ extern "C" {
         out_count: *mut usize,
     ) -> c_int;
 
+    pub fn mrec_list_audio_apps(out: *mut Process, capacity: usize, out_count: *mut usize)
+        -> c_int;
+
     pub fn mrec_start_tracks_raw(
         pids: *const u32,
         pid_count: usize,

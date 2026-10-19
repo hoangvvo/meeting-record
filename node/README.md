@@ -66,6 +66,28 @@ await recording.stopRecording();
 MeetingRecord.meetings.unwatch();
 ```
 
+## Audio apps
+
+`meetings.audioApps()` lists owning applications for a source picker. Pass an entry's `pid` to `capture.start()`; no meeting scan or Accessibility grant is needed.
+
+Windows targets include future child processes. macOS targets include current audio helpers; restart capture if helpers are replaced.
+
+## Mixed output
+
+```ts
+const recording = await MeetingRecord.capture.start(
+  { type: "system" },
+  { microphone: "default", mix: { sampleRate: 24_000 } },
+);
+recording.mixedAudio.pipe(destination);
+recording.mixedAudio.on("level", (rms) => console.log(rms));
+recording.mixedAudio.setMicrophoneMuted(true);
+```
+
+`mixedAudio` is mono s16le. Pause/resume excludes paused time; await its `end` event after stopping to consume the final tail. Raw tracks remain float32. Mixing does not perform echo cancellation.
+
+Pass an `AbortSignal` to `capture.start()` to stop capture on cancellation, or to `permissions.request()` to cancel waiting for a grant.
+
 ## License
 
 [MIT](./LICENSE.md) © Hoang Vo
