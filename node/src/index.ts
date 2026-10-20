@@ -13,11 +13,6 @@ import { fileURLToPath } from "node:url";
 import { MixedAudioImpl, type MixedAudio, type MixedAudioOptions } from "./mixed-audio.js";
 export type { MixedAudio, MixedAudioOptions } from "./mixed-audio.js";
 
-// Native addons cannot be imported under ESM. node-gyp-build selects the
-// bundled binary for the current platform; local builds remain usable in-repo.
-const loadNative = createRequire(import.meta.url)("node-gyp-build") as (root: string) => any;
-const native = loadNative(fileURLToPath(new URL("..", import.meta.url)));
-
 export type Permission = "system-audio" | "microphone" | "accessibility";
 export type PermissionStatus = "granted" | "denied" | "unknown" | "not-required";
 
@@ -100,6 +95,27 @@ export class AlreadyRunningError extends MeetingRecordError {}
 export class CaptureError extends MeetingRecordError {}
 export class InternalError extends MeetingRecordError {}
 
+let cachedNative: any;
+
+function getNative(): any {
+  if (cachedNative) return cachedNative;
+  if (
+    (process.platform !== "darwin" && process.platform !== "win32") ||
+    (process.arch !== "arm64" && process.arch !== "x64")
+  ) {
+    throw new UnsupportedOsError(
+      `meeting-record native APIs require macOS or Windows on arm64 or x64; received ${process.platform}-${process.arch}`,
+      -1,
+    );
+  }
+
+  // Defer loading so other platforms can install and import the JavaScript API.
+  // node-gyp-build selects a bundled binary or a local development build.
+  const loadNative = createRequire(import.meta.url)("node-gyp-build") as (root: string) => any;
+  cachedNative = loadNative(fileURLToPath(new URL("..", import.meta.url)));
+  return cachedNative;
+}
+
 function errorFromStatus(message: string, code: number): MeetingRecordError {
   switch (code) {
     case -1:
@@ -135,6 +151,7 @@ export const permissions = {
     ) {
       throw new TypeError(`unknown permission: ${String(permission)}`);
     }
+    const native = getNative();
     if (permission === "accessibility") return native.accessibilityPermissionStatus();
     if (permission === "microphone") return native.microphonePermissionStatus();
     return native.audioPermissionStatus();
@@ -154,6 +171,7 @@ export const permissions = {
     const current = permissions.status(permission);
     if (current === "granted" || current === "not-required") return current;
 
+    const native = getNative();
     if (permission === "accessibility") {
       const status = native.requestAccessibilityPermission();
       if (status !== 0) throw errorFromStatus("failed to request accessibility permission", status);
@@ -192,11 +210,12 @@ export interface MeetingEvents {
 class Meetings extends EventEmitter {
   /** Point-in-time scan, highest confidence first. */
   scan(): Meeting[] {
-    return native.scan().map(toMeeting);
+    return getNative().scan().map(toMeeting);
   }
 
   /** Begin emitting `started` / `updated` / `ended`. */
   watch(): void {
+    const native = getNative();
     if (native.isWatching()) return;
     const status = native.watchStart((event: keyof MeetingEvents, raw: any) => {
       this.emit(event, toMeeting(raw));
@@ -205,16 +224,17 @@ class Meetings extends EventEmitter {
   }
 
   unwatch(): void {
+    const native = getNative();
     if (native.isWatching()) native.watchStop();
   }
 
   get watching(): boolean {
-    return native.isWatching();
+    return getNative().isWatching();
   }
 
   /** Every process doing audio IO. */
   audioProcesses(): AudioProcess[] {
-    return native.listAudioProcesses();
+    return getNative().listAudioProcesses();
   }
 
   /**
@@ -222,7 +242,7 @@ class Meetings extends EventEmitter {
    * Pass `pid` as a process target; no meeting scan or Accessibility grant is needed.
    */
   audioApps(): AudioProcess[] {
-    return native.listAudioApps();
+    return getNative().listAudioApps();
   }
 }
 
@@ -317,7 +337,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   override _read(): void {
     if (!this.#consumerReady && !this.#finished) {
       this.#consumerReady = true;
-      native.captureSetConsumerReady(this.#microphone, this.#mixReady);
+      getNative().captureSetConsumerReady(this.#microphone, this.#mixReady);
     }
   }
 
@@ -328,7 +348,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   setMixReady(ready: boolean): void {
     this.#mixReady = ready;
     if (!this.#finished)
-      native.captureSetConsumerReady(this.#microphone, ready && this.#consumerReady);
+      getNative().captureSetConsumerReady(this.#microphone, ready && this.#consumerReady);
   }
 
   get sampleRate(): number {
@@ -363,7 +383,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     this.#mixConsumer?.(chunk as AudioChunk);
     if (!this.push(chunk as AudioChunk) && this.#consumerReady) {
       this.#consumerReady = false;
-      native.captureSetConsumerReady(this.#microphone, false);
+      getNative().captureSetConsumerReady(this.#microphone, false);
     }
   }
 
@@ -426,7 +446,7 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   pauseRecording(): void {
     if (this.#state === "stopped") return;
     if (this.#state !== "paused") {
-      native.capturePause();
+      getNative().capturePause();
       this.#state = "paused";
       this.mixedAudio?.pauseCapture();
     }
@@ -436,7 +456,7 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
     if (this.#state === "stopped") return;
     if (this.#state !== "recording") {
       this.mixedAudio?.resumeCapture();
-      native.captureResume();
+      getNative().captureResume();
       this.#state = "recording";
     }
   }
@@ -444,7 +464,7 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   async stopRecording(): Promise<void> {
     if (this.#state === "stopped") return;
     clearInterval(this.#healthTimer);
-    native.captureStop();
+    getNative().captureStop();
     this.#state = "stopped";
     this.#health = "stopped";
     this.#finishTracks();
@@ -459,6 +479,7 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
 
   #pollHealth(): void {
     if (this.#state === "stopped") return;
+    const native = getNative();
     const health = native.captureHealthStatus() as CaptureHealth;
     if (health === this.#health) return;
 
@@ -500,6 +521,31 @@ async function startCapture(
   options: CaptureOptions = {},
 ): Promise<CaptureSession> {
   options.signal?.throwIfAborted();
+  let nativeTarget: { pid: number } | { systemWide: true };
+  if (target.type === "process") {
+    if (!Number.isInteger(target.pid) || target.pid <= 0) {
+      throw new TypeError("process pid must be a positive integer");
+    }
+    nativeTarget = { pid: target.pid };
+  } else if (target.type === "system") {
+    nativeTarget = { systemWide: true };
+  } else {
+    throw new TypeError(`unknown capture target: ${(target as any).type}`);
+  }
+  if (options.mono !== undefined && typeof options.mono !== "boolean") {
+    throw new TypeError("mono must be a boolean");
+  }
+  if (options.microphone !== undefined && options.microphone !== "default") {
+    throw new TypeError('microphone must be "default"');
+  }
+  if (
+    options.mix !== undefined &&
+    (!Number.isInteger(options.mix.sampleRate) || options.mix.sampleRate <= 0)
+  ) {
+    throw new TypeError("mix sampleRate must be a positive integer");
+  }
+
+  const native = getNative();
   if (captureStarting || native.isRunning()) {
     throw new AlreadyRunningError("capture already running", -3);
   }
@@ -530,29 +576,6 @@ async function startCapture(
   };
 
   try {
-    let nativeTarget: { pid: number } | { systemWide: true };
-    if (target.type === "process") {
-      if (!Number.isInteger(target.pid) || target.pid <= 0) {
-        throw new TypeError("process pid must be a positive integer");
-      }
-      nativeTarget = { pid: target.pid };
-    } else if (target.type === "system") {
-      nativeTarget = { systemWide: true };
-    } else {
-      throw new TypeError(`unknown capture target: ${(target as any).type}`);
-    }
-    if (options.mono !== undefined && typeof options.mono !== "boolean") {
-      throw new TypeError("mono must be a boolean");
-    }
-    if (options.microphone !== undefined && options.microphone !== "default") {
-      throw new TypeError('microphone must be "default"');
-    }
-    if (
-      options.mix !== undefined &&
-      (!Number.isInteger(options.mix.sampleRate) || options.mix.sampleRate <= 0)
-    ) {
-      throw new TypeError("mix sampleRate must be a positive integer");
-    }
     const formats = await native.captureStart(
       {
         ...nativeTarget,
@@ -593,6 +616,6 @@ async function startCapture(
 export const capture = {
   start: startCapture,
   get running(): boolean {
-    return captureStarting || native.captureHealthStatus() !== "stopped";
+    return captureStarting || getNative().captureHealthStatus() !== "stopped";
   },
 };

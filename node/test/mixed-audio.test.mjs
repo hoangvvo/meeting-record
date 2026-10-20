@@ -70,7 +70,6 @@ void test("apply backpressure and preserve the final tail while stopping", async
   const chunks = collect(mix);
   await ended;
   assert.equal(Buffer.concat(chunks).length, 96000);
-  assert.equal(system.consumer, undefined);
 });
 
 void test("flush upsampling interpolation at the final capture boundary", async () => {

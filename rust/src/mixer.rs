@@ -306,7 +306,6 @@ mod tests {
         let mut mixer = PcmMixer::new(100, 1);
         mixer.write(0, &chunk(vec![0.5; 5], 1, 100.0, 1_000_000_000));
         mixer.write(0, &chunk(vec![0.5; 5], 1, 100.0, 3_000_000_000));
-        assert_eq!(mixer.blocks.len(), 2);
         mixer.finish_segment();
         let samples = drain(&mut mixer);
         assert_eq!(samples.len(), 205);

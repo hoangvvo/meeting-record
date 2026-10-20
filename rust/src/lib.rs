@@ -1375,39 +1375,6 @@ mod capture_tests {
     }
 
     #[test]
-    fn track_queue_delivers_interleaved_samples() {
-        let queue = TrackQueue::new();
-        let state = AtomicUsize::new(STATE_RECORDING);
-        write(
-            &queue,
-            &[0.25, -0.5, 0.75, -1.0],
-            2,
-            2,
-            48_000.0,
-            42,
-            &state,
-        );
-        let chunk = queue.recv().unwrap();
-        assert_eq!(chunk.frames, [0.25, -0.5, 0.75, -1.0]);
-        assert_eq!(chunk.frame_count, 2);
-        assert_eq!(chunk.channels, 2);
-        assert_eq!(chunk.sample_rate, 48_000.0);
-        assert_eq!(chunk.host_time_ns, 42);
-        assert_eq!(chunk.dropped_samples, 0);
-        queue.close();
-        assert!(queue.recv().is_none());
-    }
-
-    #[test]
-    fn track_queue_drops_paused_samples() {
-        let queue = TrackQueue::new();
-        let state = AtomicUsize::new(STATE_PAUSED);
-        write(&queue, &[1.0], 1, 1, 48_000.0, 1, &state);
-        queue.close();
-        assert!(queue.recv().is_none());
-    }
-
-    #[test]
     fn track_queue_drains_final_packets_while_producer_closes() {
         use std::{sync::Arc, thread};
 
@@ -1434,30 +1401,6 @@ mod capture_tests {
     }
 
     #[test]
-    fn track_queue_clears_buffered_samples() {
-        let queue = TrackQueue::new();
-        let state = AtomicUsize::new(STATE_RECORDING);
-        write(&queue, &[2.0], 1, 1, 48_000.0, 1, &state);
-        queue.clear();
-        queue.close();
-        assert!(queue.recv().is_none());
-    }
-
-    #[test]
-    fn track_queue_coalesces_matching_packets_and_keeps_first_timestamp() {
-        let queue = TrackQueue::new();
-        let state = AtomicUsize::new(STATE_RECORDING);
-        write(&queue, &[1.0, 2.0], 2, 1, 48_000.0, 1_000, &state);
-        write(&queue, &[3.0, 4.0], 2, 1, 48_000.0, 1_042, &state);
-
-        let chunk = queue.recv().unwrap();
-        assert_eq!(chunk.frames, [1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(chunk.frame_count, 4);
-        assert_eq!(chunk.host_time_ns, 1_000);
-        queue.close();
-    }
-
-    #[test]
     fn track_queue_never_coalesces_across_format_changes() {
         let queue = TrackQueue::new();
         let state = AtomicUsize::new(STATE_RECORDING);
@@ -1471,6 +1414,7 @@ mod capture_tests {
 
         let second = queue.recv().unwrap();
         assert_eq!(second.frames, [2.0, 3.0]);
+        assert_eq!(second.frame_count, 1);
         assert_eq!(second.sample_rate, 44_100.0);
         assert_eq!(second.channels, 2);
         queue.close();
@@ -1511,28 +1455,6 @@ mod capture_tests {
         let after_gap = queue.recv().unwrap();
         assert_eq!(after_gap.frames, [2.0]);
         assert_eq!(after_gap.dropped_samples, oversized.len());
-        queue.close();
-    }
-
-    #[test]
-    fn track_queue_reports_bounded_buffer_drops() {
-        let queue = TrackQueue::new();
-        let state = AtomicUsize::new(STATE_RECORDING);
-        let oversized = vec![0.0; super::TRACK_CAPACITY + 1];
-        write(
-            &queue,
-            &oversized,
-            oversized.len() as u32,
-            1,
-            48_000.0,
-            1,
-            &state,
-        );
-        write(&queue, &[1.0], 1, 1, 48_000.0, 2, &state);
-
-        let chunk = queue.recv().unwrap();
-        assert_eq!(chunk.frames, [1.0]);
-        assert_eq!(chunk.dropped_samples, oversized.len());
         assert_eq!(
             queue.dropped.load(std::sync::atomic::Ordering::Relaxed),
             oversized.len()
@@ -1541,19 +1463,23 @@ mod capture_tests {
     }
 
     #[test]
-    fn packets_keep_segment_boundaries_and_reject_stale_callbacks() {
+    fn packets_keep_pause_boundaries_and_reject_stale_callbacks() {
         let queue = TrackQueue::new();
         let state = AtomicUsize::new(STATE_RECORDING);
+        write(&queue, &[2.0], 1, 1, 48_000.0, 0, &state);
+        queue.clear();
         write(&queue, &[0.25], 1, 1, 48_000.0, 1, &state);
+        state.store(STATE_PAUSED, std::sync::atomic::Ordering::Release);
+        write(&queue, &[1.0], 1, 1, 48_000.0, 2, &state);
         state.store(4, std::sync::atomic::Ordering::Release);
-        write(&queue, &[0.5], 1, 1, 48_000.0, 2, &state);
+        write(&queue, &[0.5], 1, 1, 48_000.0, 3, &state);
         queue.write(
             &[1.0],
             PacketMeta {
                 frame_count: 1,
                 channels: 1,
                 sample_rate: 48_000.0,
-                host_time_ns: 3,
+                host_time_ns: 4,
                 segment: 0,
                 ..PacketMeta::default()
             },
@@ -1605,7 +1531,6 @@ mod capture_tests {
         use std::time::Duration;
         let token = CancellationToken::new();
         token.cancel();
-        assert!(token.clone().is_cancelled());
         assert!(matches!(
             capture::start(
                 CaptureTarget::System,

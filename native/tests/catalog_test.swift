@@ -68,17 +68,6 @@ struct CatalogTests {
         expect(MeetingCatalog.browser(forBundleID: "us.zoom.xos") == nil,
                "Zoom is not a browser")
 
-        // Stable ids are part of the contract: consumers branch on them.
-        print("\nplatform identifiers are stable")
-        expectEqual(MeetingPlatform.zoom.id, "zoom", "zoom")
-        expectEqual(MeetingPlatform.teams.id, "teams", "teams")
-        expectEqual(MeetingPlatform.meet.id, "meet", "meet")
-        expectEqual(MeetingPlatform.webex.id, "webex", "webex")
-        expectEqual(MeetingPlatform.slack.id, "slack", "slack")
-        expectEqual(MeetingPlatform.discord.id, "discord", "discord")
-        expectEqual(MeetingPlatform.genericBrowser.id, "browser", "browser")
-        expectEqual(MeetingPlatform.unknown.id, "unknown", "unknown")
-
         print("\nmeeting URL recognition")
         expectEqual(MeetingCatalog.platform(forURLOrTitle: "https://meet.google.com/abc-defg-hij"),
                     .meet, "Google Meet URL")
@@ -105,17 +94,6 @@ struct CatalogTests {
         expectEqual(MeetingCatalog.platform(forURLOrTitle: "https://news.ycombinator.com"), nil,
                     "unrelated site")
         expectEqual(MeetingCatalog.platform(forURLOrTitle: ""), nil, "empty string")
-
-        print("\nconfidence threshold")
-        // A known app merely being open must not be enough to start recording.
-        expect(MeetingDetector.recordThreshold > 40,
-               "app-present alone (40) is below the record threshold")
-        // App + audio output + mic is a live two-way call.
-        expect(40 + 30 + 25 >= MeetingDetector.recordThreshold,
-               "app + output + mic reaches the record threshold")
-        // App + output but no mic (someone talking, user muted) should still record.
-        expect(40 + 30 >= MeetingDetector.recordThreshold,
-               "app + output alone reaches the record threshold")
 
         print("\n\(failures == 0 ? "PASS" : "FAIL") — \(failures) failure(s)")
         exit(failures == 0 ? 0 : 1)

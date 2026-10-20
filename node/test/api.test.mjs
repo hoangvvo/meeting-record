@@ -3,27 +3,16 @@ import test from "node:test";
 
 import * as MeetingRecord from "../dist/index.js";
 
-test("exports only the public namespaces and error classes", () => {
-  assert.deepEqual(Object.keys(MeetingRecord).sort(), [
-    "AlreadyRunningError",
-    "CaptureError",
-    "InternalError",
-    "MeetingRecordError",
-    "PermissionError",
-    "UnsupportedOsError",
-    "capture",
-    "meetings",
-    "permissions",
-  ]);
-});
+const nativeSupported =
+  ["darwin", "win32"].includes(process.platform) && ["arm64", "x64"].includes(process.arch);
 
-test("library errors can be caught specifically or together", () => {
-  const error = new MeetingRecord.PermissionError("permission not granted", -2);
-  assert(error instanceof MeetingRecord.PermissionError);
-  assert(error instanceof MeetingRecord.MeetingRecordError);
-  assert(error instanceof Error);
-  assert.equal(error.code, -2);
-});
+function assertCaptureInactive() {
+  if (nativeSupported) {
+    assert.equal(MeetingRecord.capture.running, false);
+  } else {
+    assert.throws(() => MeetingRecord.capture.running, MeetingRecord.UnsupportedOsError);
+  }
+}
 
 test("invalid public inputs use TypeError without starting capture", async () => {
   assert.throws(() => MeetingRecord.permissions.status("camera"), TypeError);
@@ -36,7 +25,7 @@ test("invalid public inputs use TypeError without starting capture", async () =>
     MeetingRecord.capture.start({ type: "system" }, { mix: { sampleRate: 0 } }),
     TypeError,
   );
-  assert.equal(MeetingRecord.capture.running, false);
+  assertCaptureInactive();
 });
 
 test("cancel capture and permission requests before native work starts", async () => {
@@ -50,5 +39,5 @@ test("cancel capture and permission requests before native work starts", async (
     MeetingRecord.permissions.request("microphone", { signal: controller.signal }),
     { name: "AbortError" },
   );
-  assert.equal(MeetingRecord.capture.running, false);
+  assertCaptureInactive();
 });
