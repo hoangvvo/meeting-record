@@ -11,7 +11,8 @@ System-audio and microphone capture with meeting detection for macOS and Windows
 
 ![Demo app](apps/electron/screenshots/demo.png)
 
-Check out the example apps for [Tauri](./apps/tauri/README.md) (Rust binding) and [Electron](./apps/electron/README.md) (Node.js binding).
+- [Tauri](./apps/tauri/README.md) (Rust binding)
+- [Electron](./apps/electron/README.md) (Node.js binding)
 
 Need an AI Note-taker? Check out [fireflies.ai](https://fireflies.ai/?utm_source=github&utm_medium=referral&utm_campaign=hoangvvo_meeting-record).
 
@@ -22,7 +23,11 @@ Need an AI Note-taker? Check out [fireflies.ai](https://fireflies.ai/?utm_source
 | macOS    | 14.2            | arm64, x86-64 |
 | Windows  | 10 build 20348  | arm64, x86-64 |
 
-On macOS, system-audio capture needs `NSAudioCaptureUsageDescription`. Add `NSMicrophoneUsageDescription` only when requesting the microphone track. The app must be signed and running as a GUI application for permission prompts.
+macOS app requirements:
+
+- Signed, running as a GUI app.
+- `NSAudioCaptureUsageDescription` in `Info.plist`.
+- `NSMicrophoneUsageDescription` only for the microphone track.
 
 ```xml
 <key>NSAudioCaptureUsageDescription</key>
@@ -33,19 +38,17 @@ On macOS, system-audio capture needs `NSAudioCaptureUsageDescription`. Add `NSMi
 
 ## Permissions
 
-| Permission        | Purpose                                                  | Prompt type            |
-| ----------------- | -------------------------------------------------------- | ---------------------- |
-| **System Audio**  | Required to capture audio.                               | One-time modal dialog. |
-| **Microphone**    | Required only when the microphone track is requested.    | One-time modal dialog. |
-| **Accessibility** | Optional. Required only to read meeting titles and URLs. | System Settings.       |
+| Permission        | Needed for                    | macOS prompt           |
+| ----------------- | ----------------------------- | ---------------------- |
+| **System Audio**  | Any capture                   | One-time modal dialog. |
+| **Microphone**    | The microphone track          | One-time modal dialog. |
+| **Accessibility** | Meeting titles and URLs (opt) | System Settings.       |
 
-Permission handling is asynchronous. Query the permission status for the result.
-
-Microphone capture is opt-in and uses the current default input device. Raw tracks stay separate; both bindings also support mixed output.
+- Requests are asynchronous: request, then poll the status.
+- Windows: all three report `not-required`.
+- Windows: microphone denied in privacy settings → capture start fails with a permission error.
 
 ## Detection
-
-The passive watcher reports meetings starting, changing, and ending on a safe serial queue.
 
 | ID        | Name                         |
 | --------- | ---------------------------- |
@@ -57,45 +60,56 @@ The passive watcher reports meetings starting, changing, and ending on a safe se
 | `discord` | Discord                      |
 | `browser` | Other browser-based meetings |
 
-Always rely on `shouldRecord` / `should_record`. It becomes true when there is active two-way audio or remote audio; idle conferencing apps remain false.
+- Record when `shouldRecord` / `should_record` is true.
+- The watcher reports `started`, `updated` and `ended` on a serial queue.
+- Windows: a Meet call in a background tab is `meet` with an empty `url`.
 
 ## Capture
 
-- **Process target:** Recommended. Captures the selected meeting process and its audio helpers.
-- **System target:** Captures all application audio.
-
-For manual source pickers, use [`meetings.audioApps()`](./node/README.md#audio-apps) (Node.js) or [`meetings::audio_apps()`](./rust/README.md#audio-apps) (Rust).
+- **Process target:** recommended; the meeting app and its helpers.
+- **System target:** all application audio.
+- **Microphone:** opt-in; the default input device.
+- **Mixed output:** optional mono s16le from both bindings.
+- Source pickers: [`meetings.audioApps()`](./node/README.md#audio-apps) (Node.js), [`meetings::audio_apps()`](./rust/README.md#audio-apps) (Rust).
 
 ## Troubleshooting
 
-- **Capture start times out:** The permission grant is undetermined. Request permissions from a bundled GUI app, not a bare CLI executable.
-- **Capture runs but outputs zeroes:** The targeted processes may have exited.
-- **Titles/URLs are empty:** Accessibility permission was not granted, or the app was not restarted after granting it.
+| Symptom                                        | Fix                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------- |
+| Capture start times out (macOS)                | Request permissions from a bundled GUI app.                   |
+| Capture outputs zeroes                         | The target exited; rescan.                                    |
+| Titles/URLs empty (macOS)                      | Grant Accessibility, then relaunch.                           |
+| "none of the requested pids are running" (Win) | The target exited; rescan.                                    |
+| "no default microphone is available" (Win)     | Enable a recording device, or capture without the microphone. |
 
 ## Development
 
-### Lint and format
+Lint and format:
 
 ```sh
 npm run lint:fix && npm run fmt
 cargo +nightly clippy --all-targets --all-features --workspace && cargo +nightly fmt
 ```
 
-### Testing
-
-Run unit tests:
+Unit tests:
 
 ```sh
 npm test
 cargo test -p meeting-record --all-targets
 ```
 
-Test E2E tests:
+macOS E2E:
 
 ```sh
 MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Developer ID Application/ { print $2; exit }')" ./e2e/macos.sh
 ```
 
+Windows E2E (needs Python and the Visual Studio C++ build tools):
+
 ```powershell
-./e2e/windows.ps1 -Mode All
+./e2e/windows.ps1                                    # system + process, both bindings
+./e2e/windows.ps1 -Binding Rust                      # one binding
+./e2e/windows.ps1 -MicrophoneDevice "CABLE Input"    # + virtual-cable microphone
+./e2e/windows.ps1 -SwitchMicrophone "Stereo Mix"     # + default-microphone switch
+./e2e/windows.ps1 -Mode Meeting -MeetingPid 1234     # a live meeting
 ```

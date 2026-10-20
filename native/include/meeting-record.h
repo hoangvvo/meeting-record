@@ -21,7 +21,7 @@ extern "C" {
 typedef enum {
   MREC_OK = 0,
   MREC_ERR_UNSUPPORTED_OS = -1, /* macOS < 14.2 / Windows < 10 20348 */
-  MREC_ERR_PERMISSION = -2,     /* TCC audio-capture not granted */
+  MREC_ERR_PERMISSION = -2,     /* TCC grant missing, or Windows privacy denies it */
   MREC_ERR_ALREADY_RUNNING = -3,
   MREC_ERR_NOT_RUNNING = -4,
   MREC_ERR_NO_PROCESSES = -5, /* no target produced audio */
@@ -62,7 +62,11 @@ mrec_permission mrec_audio_permission_status(void);
  */
 mrec_status mrec_request_audio_permission(void);
 
-/* macOS microphone permission. Windows currently reports NOT_REQUIRED. */
+/*
+ * macOS microphone permission. Windows currently reports NOT_REQUIRED; when its
+ * privacy settings deny desktop apps the microphone, starting capture fails with
+ * MREC_ERR_PERMISSION instead.
+ */
 mrec_permission mrec_microphone_permission_status(void);
 mrec_status mrec_request_microphone_permission(void);
 

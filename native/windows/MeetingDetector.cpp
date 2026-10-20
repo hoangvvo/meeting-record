@@ -6,11 +6,12 @@
  * IAudioSessionManager2 session enumeration: an ACTIVE render session on a
  * conferencing process is the equivalent signal.
  *
- * Window titles come from EnumWindows + GetWindowTextW, which needs no permission.
- * Full UI Automation would also yield browser URLs but is not used, so titles
- * carry the URL matching.
+ * Window titles come from EnumWindows + GetWindowTextW, and browser URLs and tab
+ * titles from UI Automation. Neither needs a permission.
  */
 #include "meeting-record-detect.h"
+#include "AudioAppProcess.h"
+#include "MeetingCatalog.h"
 
 #include <audiopolicy.h>
 #include <mmdeviceapi.h>
@@ -28,48 +29,18 @@
 #include <thread>
 #include <vector>
 
+#include <tlhelp32.h>
+#include <uiautomation.h>
+
 using Microsoft::WRL::ComPtr;
 
 namespace {
 
-struct NativeApp {
-  const char *exe; /* lowercased executable name */
-  mrec_platform platform;
-};
-
-/* Matched on executable name; Windows has no bundle identifiers. */
-constexpr NativeApp kNativeApps[] = {
-    {"zoom.exe", MREC_PLATFORM_ZOOM},
-    {"cpthost.exe", MREC_PLATFORM_ZOOM}, /* Zoom's screen-share helper */
-    {"teams.exe", MREC_PLATFORM_TEAMS},
-    {"ms-teams.exe", MREC_PLATFORM_TEAMS},
-    {"msteams.exe", MREC_PLATFORM_TEAMS},
-    {"webexmta.exe", MREC_PLATFORM_WEBEX},
-    {"webex.exe", MREC_PLATFORM_WEBEX},
-    {"atmgr.exe", MREC_PLATFORM_WEBEX},
-    {"slack.exe", MREC_PLATFORM_SLACK},
-    {"discord.exe", MREC_PLATFORM_DISCORD},
-};
-
-constexpr const char *kBrowsers[] = {"chrome.exe", "msedge.exe", "firefox.exe",
-                                     "brave.exe",  "arc.exe",    "vivaldi.exe",
-                                     "opera.exe"};
-
-struct UrlPattern {
-  const char *pattern;
-  mrec_platform platform;
-};
-
-constexpr UrlPattern kUrlPatterns[] = {
-    {"meet.google.com", MREC_PLATFORM_MEET},
-    {"teams.microsoft.com", MREC_PLATFORM_TEAMS},
-    {"teams.live.com", MREC_PLATFORM_TEAMS},
-    {"zoom.us/j/", MREC_PLATFORM_ZOOM},
-    {"zoom.us/wc/", MREC_PLATFORM_ZOOM},
-    {"app.slack.com/huddle", MREC_PLATFORM_SLACK},
-    {"whereby.com/", MREC_PLATFORM_GENERIC_BROWSER},
-    {"meet.jit.si", MREC_PLATFORM_GENERIC_BROWSER},
-};
+using meeting_record::IsBrowser;
+using meeting_record::NativePlatformFor;
+using meeting_record::PlatformForText;
+using meeting_record::PlatformForTitle;
+using meeting_record::ToLower;
 
 /* Must match the macOS backend. */
 constexpr int32_t kScoreKnownApp = 40;
@@ -78,11 +49,12 @@ constexpr int32_t kScoreUsingMic = 25;
 constexpr int32_t kScoreRecognisedUrl = 5;
 constexpr int32_t kRecordThreshold = 70;
 
-std::string ToLower(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) { return static_cast<char>(::tolower(c)); });
-  return value;
-}
+/* UI Automation bounds, as for macOS Accessibility: each call is synchronous IPC. */
+constexpr DWORD kAccessibilityTimeoutMs = 250;
+constexpr uint64_t kAccessibilityTraversalNs = 500000000;
+constexpr int kAccessibilityMaxDepth = 24;
+constexpr int kAccessibilityMaxNodes = 600;
+constexpr int kMaxBrowserWindows = 3;
 
 std::string Narrow(const std::wstring &wide) {
   if (wide.empty()) return {};
@@ -113,29 +85,6 @@ uint64_t MonotonicTimeNs() {
          remainder * 1000000000ull / static_cast<uint64_t>(frequency.QuadPart);
 }
 
-mrec_platform NativePlatformFor(const std::string &exe_lower) {
-  for (const auto &app : kNativeApps) {
-    if (exe_lower == app.exe) return app.platform;
-  }
-  return MREC_PLATFORM_UNKNOWN;
-}
-
-bool IsBrowser(const std::string &exe_lower) {
-  for (const char *browser : kBrowsers) {
-    if (exe_lower == browser) return true;
-  }
-  return false;
-}
-
-mrec_platform PlatformForText(const std::string &text) {
-  if (text.empty()) return MREC_PLATFORM_UNKNOWN;
-  const std::string haystack = ToLower(text);
-  for (const auto &entry : kUrlPatterns) {
-    if (haystack.find(entry.pattern) != std::string::npos) return entry.platform;
-  }
-  return MREC_PLATFORM_UNKNOWN;
-}
-
 struct AudioActivity {
   bool rendering = false;
   bool capturing = false;
@@ -154,7 +103,6 @@ private:
 
 /* Per-process audio activity across every render and capture endpoint. */
 std::map<DWORD, AudioActivity> CollectAudioActivity() {
-  ScopedComApartment apartment;
   std::map<DWORD, AudioActivity> activity;
 
   ComPtr<IMMDeviceEnumerator> enumerator;
@@ -215,6 +163,7 @@ std::map<DWORD, AudioActivity> CollectAudioActivity() {
 }
 
 struct VisibleWindow {
+  HWND handle = nullptr;
   DWORD pid = 0;
   std::string executable;
   std::string executable_lower;
@@ -250,7 +199,7 @@ BOOL CALLBACK CollectWindowProc(HWND window, LPARAM param) {
            static_cast<uint64_t>(rect.bottom - rect.top);
   }
   windows->push_back(
-      {pid, executable, ToLower(executable), std::move(title), area});
+      {window, pid, executable, ToLower(executable), std::move(title), area});
   return TRUE;
 }
 
@@ -273,6 +222,168 @@ std::string ExecutableName(DWORD pid) {
   }
   CloseHandle(process);
   return name;
+}
+
+/* Every process, marked when it owns one of `windows`, for FindAudioAppRoot. */
+std::map<uint32_t, meeting_record::AudioAppProcess> CollectProcesses(
+    const std::vector<VisibleWindow> &windows) {
+  std::map<uint32_t, meeting_record::AudioAppProcess> processes;
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return processes;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof entry;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      processes.emplace(entry.th32ProcessID, meeting_record::AudioAppProcess{
+          entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile});
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  for (const auto &window : windows) {
+    const auto process = processes.find(window.pid);
+    if (process != processes.end()) process->second.has_app_window = true;
+  }
+  return processes;
+}
+
+/* What a browser window shows: its active tab's address and every tab's title. */
+struct BrowserWindowContent {
+  std::string url;
+  std::vector<std::string> tab_titles;
+};
+
+/*
+ * Browser URLs and tab titles through UI Automation; best effort, like macOS
+ * Accessibility. Calls time out, the walk is bounded, and it never enters a document.
+ */
+class BrowserAccessibility {
+public:
+  BrowserWindowContent Read(HWND window, uint64_t deadline_ns) {
+    BrowserWindowContent content;
+    if (!Ready()) return content;
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(automation_->ElementFromHandle(window, &root)) || !root) return content;
+    int budget = kAccessibilityMaxNodes;
+    Visit(root.Get(), 0, deadline_ns, budget, content);
+    return content;
+  }
+
+private:
+  bool Ready() {
+    if (walker_ || attempted_) return walker_ != nullptr;
+    attempted_ = true;
+    if (FAILED(CoCreateInstance(__uuidof(CUIAutomation8), nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&automation_))) &&
+        FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&automation_)))) {
+      return false;
+    }
+    ComPtr<IUIAutomation2> timeouts;
+    if (SUCCEEDED(automation_.As(&timeouts))) {
+      timeouts->put_ConnectionTimeout(kAccessibilityTimeoutMs);
+      timeouts->put_TransactionTimeout(kAccessibilityTimeoutMs);
+    }
+    return SUCCEEDED(automation_->get_ControlViewWalker(&walker_)) && walker_;
+  }
+
+  void Visit(IUIAutomationElement *element, int depth, uint64_t deadline_ns,
+             int &budget, BrowserWindowContent &content) {
+    if (depth > kAccessibilityMaxDepth || budget-- <= 0 ||
+        MonotonicTimeNs() > deadline_ns) {
+      return;
+    }
+    CONTROLTYPEID type = 0;
+    if (FAILED(element->get_CurrentControlType(&type))) return;
+    switch (type) {
+      case UIA_TabItemControlTypeId:
+        if (std::string title = Name(element); !title.empty()) {
+          content.tab_titles.push_back(std::move(title));
+        }
+        return;
+      case UIA_EditControlTypeId:
+      case UIA_DocumentControlTypeId:
+        /* The omnibox, or the page itself in an app window without one. */
+        if (content.url.empty()) {
+          std::string value = Value(element);
+          if (value.find('.') != std::string::npos || value.rfind("http", 0) == 0) {
+            content.url = std::move(value);
+          }
+        }
+        return;
+    }
+    ComPtr<IUIAutomationElement> child;
+    walker_->GetFirstChildElement(element, &child);
+    while (child) {
+      Visit(child.Get(), depth + 1, deadline_ns, budget, content);
+      ComPtr<IUIAutomationElement> next;
+      if (FAILED(walker_->GetNextSiblingElement(child.Get(), &next))) break;
+      child = std::move(next);
+    }
+  }
+
+  static std::string Name(IUIAutomationElement *element) {
+    BSTR name = nullptr;
+    if (FAILED(element->get_CurrentName(&name)) || !name) return {};
+    std::string result = Narrow(std::wstring(name, SysStringLen(name)));
+    SysFreeString(name);
+    return result;
+  }
+
+  static std::string Value(IUIAutomationElement *element) {
+    VARIANT value;
+    VariantInit(&value);
+    std::string result;
+    if (SUCCEEDED(element->GetCurrentPropertyValue(UIA_ValueValuePropertyId, &value)) &&
+        value.vt == VT_BSTR && value.bstrVal) {
+      result = Narrow(std::wstring(value.bstrVal, SysStringLen(value.bstrVal)));
+    }
+    VariantClear(&value);
+    return result;
+  }
+
+  ComPtr<IUIAutomation> automation_;
+  ComPtr<IUIAutomationTreeWalker> walker_;
+  bool attempted_ = false;
+};
+
+struct BrowserMeeting {
+  const VisibleWindow *window = nullptr;
+  mrec_platform platform = MREC_PLATFORM_UNKNOWN;
+  std::string title;
+  std::string url;
+};
+
+/* The front window showing a meeting in its URL, title or any tab; else the front window. */
+template <typename Predicate>
+BrowserMeeting FindBrowserMeeting(const std::vector<VisibleWindow> &windows,
+                                  Predicate predicate,
+                                  BrowserAccessibility &accessibility) {
+  BrowserMeeting front;
+  const uint64_t deadline_ns = MonotonicTimeNs() + kAccessibilityTraversalNs;
+  int inspected = 0;
+  for (const auto &window : windows) {
+    if (!predicate(window)) continue;
+    if (inspected++ == kMaxBrowserWindows) break;
+    BrowserWindowContent content = accessibility.Read(window.handle, deadline_ns);
+    if (!front.window) front = {&window, MREC_PLATFORM_UNKNOWN, window.title, content.url};
+
+    std::string title = window.title;
+    const auto title_platform = PlatformForTitle(title);
+    if (const auto platform = PlatformForText(content.url);
+        platform != MREC_PLATFORM_UNKNOWN) {
+      return {&window, platform, std::move(title), std::move(content.url)};
+    }
+    if (title_platform != MREC_PLATFORM_UNKNOWN) {
+      return {&window, title_platform, std::move(title), std::move(content.url)};
+    }
+    /* A background tab's URL is not exposed, only its title. */
+    for (auto &tab : content.tab_titles) {
+      if (const auto platform = PlatformForTitle(tab); platform != MREC_PLATFORM_UNKNOWN) {
+        return {&window, platform, std::move(tab), {}};
+      }
+    }
+  }
+  return front;
 }
 
 struct Detected {
@@ -302,34 +413,46 @@ const VisibleWindow *BestWindow(const std::vector<VisibleWindow> &windows,
 }
 
 std::vector<Detected> Scan() {
+  ScopedComApartment apartment;
   const auto activity = CollectAudioActivity();
   const auto windows = CollectVisibleWindows();
+  const auto processes = CollectProcesses(windows);
   const DWORD self = GetCurrentProcessId();
+  DWORD shell_pid = 0;
+  GetWindowThreadProcessId(GetShellWindow(), &shell_pid);
 
-  /* Group by platform (native) or by executable (browsers). */
+  /* Group by platform (native) or by the browser instance that owns the audio. */
   std::map<mrec_platform, Detected> native;
-  std::map<std::string, Detected> browser;
+  std::map<DWORD, Detected> browser;
 
   for (const auto &[pid, state] : activity) {
     if (pid == self) continue;
     if (!state.rendering && !state.capturing) continue;
+    const auto process = processes.find(pid);
+    if (process == processes.end()) continue;
 
-    const std::string exe = ExecutableName(pid);
-    if (exe.empty()) continue;
+    /* Audio often comes from a helper, such as new Teams' WebView2: use its owner app. */
+    const auto *root = meeting_record::FindAudioAppRoot(processes, pid, shell_pid);
+    std::string exe = Narrow(process->second.executable);
     const std::string exe_lower = ToLower(exe);
+    const bool is_browser = IsBrowser(exe_lower);
+    mrec_platform platform = NativePlatformFor(exe_lower);
+    if (platform == MREC_PLATFORM_UNKNOWN && !is_browser && root) {
+      exe = Narrow(root->executable);
+      platform = NativePlatformFor(ToLower(exe));
+    }
 
-    if (const auto platform = NativePlatformFor(exe_lower);
-        platform != MREC_PLATFORM_UNKNOWN) {
+    if (platform != MREC_PLATFORM_UNKNOWN) {
       Detected &entry = native[platform];
       entry.platform = platform;
-      if (entry.pid == 0) entry.pid = pid;
+      if (entry.pid == 0) entry.pid = root ? root->pid : pid;
       entry.audio_pids.push_back(pid);
       entry.app_name = exe;
       entry.mic = entry.mic || state.capturing;
       entry.output = entry.output || state.rendering;
-    } else if (IsBrowser(exe_lower)) {
-      Detected &entry = browser[exe_lower];
-      if (entry.pid == 0) entry.pid = pid;
+    } else if (is_browser) {
+      Detected &entry = browser[root ? root->pid : pid];
+      if (entry.pid == 0) entry.pid = root ? root->pid : pid;
       entry.audio_pids.push_back(pid);
       entry.app_name = exe;
       entry.mic = entry.mic || state.capturing;
@@ -352,26 +475,21 @@ std::vector<Detected> Scan() {
     results.push_back(entry);
   }
 
-  for (auto &[exe, entry] : browser) {
-    const auto matching_executable = [&exe](const VisibleWindow &candidate) {
-      return candidate.executable_lower == exe;
-    };
-    const VisibleWindow *window = BestWindow(windows, [&matching_executable](
-                                                           const VisibleWindow &candidate) {
-      return matching_executable(candidate) &&
-             PlatformForText(candidate.title) != MREC_PLATFORM_UNKNOWN;
-    });
-    if (!window) window = BestWindow(windows, matching_executable);
-    if (window) {
-      entry.pid = window->pid;
-      entry.app_name = window->executable;
-      entry.title = window->title;
-    }
+  /* Only an instance's own windows describe it; another instance is another target. */
+  BrowserAccessibility accessibility;
+  for (auto &[owner, entry] : browser) {
+    const DWORD instance = owner;
+    BrowserMeeting meeting = FindBrowserMeeting(
+        windows, [instance](const VisibleWindow &candidate) { return candidate.pid == instance; },
+        accessibility);
+    if (meeting.window) entry.app_name = meeting.window->executable;
+    entry.title = std::move(meeting.title);
+    entry.url = std::move(meeting.url);
     /*
      * A video tab and a call tab are indistinguishable at the process level, so
-     * require a recognised title or a live microphone.
+     * require a recognised URL or title, or a live microphone.
      */
-    const mrec_platform matched = PlatformForText(entry.title);
+    const mrec_platform matched = meeting.platform;
     if (matched == MREC_PLATFORM_UNKNOWN && !entry.mic) continue;
 
     entry.platform =
@@ -520,8 +638,8 @@ private:
   }
 
   static bool Changed(const Detected &a, const Detected &b) {
-    return a.platform != b.platform || a.title != b.title || a.mic != b.mic ||
-           a.output != b.output || a.audio_pids != b.audio_pids;
+    return a.platform != b.platform || a.title != b.title || a.url != b.url ||
+           a.mic != b.mic || a.output != b.output || a.audio_pids != b.audio_pids;
   }
 
   std::mutex mutex_;

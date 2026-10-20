@@ -1,102 +1,76 @@
 # Internals
 
-Implementation notes and API edge cases. See the README for usage. Tested on macOS 26.5.1, Apple silicon.
+Tested on macOS 26.5.1 (Apple silicon) and Windows 11 build 26200 (x86-64).
 
-### Basic
+## Backends
 
-- **macOS system audio:** CoreAudio process taps (14.2+). Needs `kTCCServiceAudioCapture`.
-- **macOS microphone:** `AVAudioEngine` using the current default input device. Needs microphone permission.
-- **Windows system audio:** WASAPI process loopback (Win10 build 20348+).
-- **Windows microphone:** WASAPI shared-mode capture using the current default input device.
-- We don't use virtual audio drivers or ScreenCaptureKit anymore.
+| Platform | System audio                           | Microphone                        |
+| -------- | -------------------------------------- | --------------------------------- |
+| macOS    | CoreAudio process tap (14.2+)          | `AVAudioEngine`, default input    |
+| Windows  | WASAPI process loopback (build 20348+) | WASAPI shared mode, default input |
 
-On macOS, the permission grant is silent and unbounded. If you need to debug the state, check the TCC database directly (`auth_value` 2 is allowed, 0 is denied):
+- No virtual audio drivers. No ScreenCaptureKit.
+- macOS TCC state (`auth_value` 2 = allowed, 0 = denied):
 
 ```sql
 sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
   "select service,client,auth_value from access where service='kTCCServiceAudioCapture'"
-
 ```
 
-### Architecture & realtime constraints
+## Pipeline
 
-The native audio callbacks produce interleaved float32. The Rust and Node bindings copy each track into its own bounded queue before user code runs.
+- Native callbacks: interleaved float32, first-frame timestamp on the host monotonic clock.
+- Bindings: one fixed-size queue per track; coalesce compatible packets; no wake per callback.
+- System and microphone: separate tracks and formats; pause, resume and stop together.
+- macOS: process tap → private aggregate device (empty sub-device list) → `AudioDeviceCreateIOProcID`.
+- macOS microphone: separate `AVAudioEngine` input tap.
+- Windows: one loopback client per PID, aligned on QPC into one 10 ms track.
+- Recovery: serialized, 3 retries, `RECOVERING` → `RUNNING` or terminal `FAILED`.
+- No echo cancellation, gain control or noise suppression. Use the system track as the AEC reference downstream.
 
-macOS pipeline:
+## CoreAudio rules
 
-1. `AudioHardwareCreateProcessTap` to mix down specific processes.
-2. Wrap it in a private aggregate device. Leave the sub-device list empty so you don't hijack the user's output.
-3. Call `AudioDeviceCreateIOProcID` on the aggregate to pull PCM.
-4. If requested, run the default microphone through a separate `AVAudioEngine` input tap.
+- Use `AudioDeviceCreateIOProcID`; the block variant never fires on tap aggregates.
+- Create taps under a timeout; without a TCC grant the call blocks forever.
+- Filter targets by process liveness.
+- Translate PIDs with `kAudioHardwarePropertyTranslatePIDToProcessObject`.
+- Read the format from the aggregate's input stream, not `kAudioTapPropertyFormat`.
+- Interleave non-interleaved stereo into preallocated scratch.
+- Arm callbacks and start IO only after preparation succeeds.
 
-System audio and microphone stay separate. They can negotiate different sample rates; a session pauses, resumes, and stops both together.
+## WASAPI rules
 
-Both callbacks carry the first frame's timestamp on the host monotonic clock. The
-bindings retain packet boundaries and format metadata while coalescing compatible
-packets. Their sample and packet rings are fixed-size; they never queue one runtime
-wake per native callback.
+- Pin the MTA (`CoIncrementMTAUsage`) for the whole session.
+- Check PID liveness before activation; fail with `MREC_ERR_NO_PROCESSES`.
+- Initialise loopback clients with an explicit float32 format.
+- Idle loopback targets deliver continuous silent packets.
+- Keep a source's packets contiguous within 20 ms of timestamp jitter, unless flagged `DATA_DISCONTINUITY`.
+- Never sum a source with its own audio.
+- `E_NOTFOUND` → no microphone. `E_ACCESSDENIED` → `MREC_ERR_PERMISSION`.
 
-Default-device, tap-format, aggregate-device, and AVAudioEngine configuration
-changes are monitored. Recovery is serialized, retries three times, and moves the
-session through `RECOVERING` to `RUNNING` or terminal `FAILED`. Windows aligns all
-per-PID WASAPI clients on QPC and emits one ordered 10 ms mixed track.
+## Meeting detection
 
-The native core intentionally exposes raw synchronized stems. Echo cancellation,
-gain control, and noise suppression belong in a downstream processing layer; use
-the system track as the AEC reference before mixing when building live-call or
-transcription products.
+- Score: app 40 + output 30 + mic 25 + URL/title 5. Record at 70.
+- Decide from audio IO; never scrape UI controls.
+- Browsers: need mic activity or a recognised URL or title.
+- Process targets: native code expands app PIDs. Windows follows the process tree; macOS snapshots helpers at start.
+- Windows: attribute each audio session to its window-owning app (WebView2 → host app); one meeting per browser instance.
+- Windows: UI Automation reads address bars and tab strips; 250 ms call timeout, 500 ms walk, node budget, never inside documents.
+- Windows: `Meet - abc-defg-hij` matches in any tab; only the active tab has a URL.
+- Windows app picker: nearest window-owning ancestor, never the shell; tray apps use their same-executable ancestor.
 
-### CoreAudio failure modes
+## Accessibility (AX)
 
-The HAL will return `noErr` and deliver empty streams or permanent hangs.
+- Set a ~250 ms messaging timeout.
+- Set `AXEnhancedUserInterface` for Chromium and Electron trees.
+- Cap traversal depth and node count.
 
-- **The block API is broken:** `AudioDeviceCreateIOProcIDWithBlock` doesn't work on tap-backed aggregates. The block never fires. Use the function-pointer callback.
-- **TCC deadlocks:** If you lack the TCC grant, CoreAudio blocks indefinitely waiting for a GUI prompt. If you call this on a non-GUI main thread, your app deadlocks permanently. Wrap it in a timeout.
-- **Zombie audio:** Dead processes keep `kAudioProcessPropertyIsRunningOutput == true` in the HAL. Tapping them yields infinite zeros. Filter by actual process liveness.
-- **Bad PIDs:** PIDs are not `AudioObjectID`s. Translate them via `kAudioHardwarePropertyTranslatePIDToProcessObject` or you get `kAudioHardwareBadObjectError`.
-- **Format lies:** `kAudioTapPropertyFormat` might say mono 48kHz while the device delivers stereo. Read the format directly from the aggregate's input stream.
-- **Non-interleaved stereo:** A tap may deliver two mono buffers. Interleave them
-  into preallocated scratch space; forwarding each buffer as if it were a complete
-  stereo frame corrupts the stream.
-- **Permission timeout lifetime:** Prepare the HAL objects under the timeout, but
-  do not arm the host callback or start realtime I/O until preparation succeeds.
-  A timed-out worker may finish later and must own no binding pointer.
+## macOS permissions
 
-### Meeting detection
+- Audio prompt needs `NSAudioCaptureUsageDescription`, code signing, a GUI process, and a request off the main thread.
+- No preflight API: probe with a throwaway tap; cache the result.
+- Microphone: separate grant; `NSMicrophoneUsageDescription`; audio-input entitlement when sandboxed.
 
-Don't scrape the UI for mute buttons. It requires the Accessibility (AX) grant and breaks whenever the app updates or the user changes their language. We use audio IO heuristics instead.
+## Teardown
 
-**Scoring:** Open app (40) + audio output (30) + mic active (25) + URL match (5). Threshold to record is 70.
-
-An open app does nothing. Active audio triggers it. Muted users are recorded if the call itself is active.
-
-**Browser handling:** A YouTube tab looks identical to a Google Meet tab at the process level. Browsers need mic activity or a recognized URL to hit the threshold.
-
-**Process targets:** The native core expands app PIDs; bindings do not run meeting detection. Windows follows the process tree. macOS snapshots current audio helpers at capture start.
-
-**Windows app picker:** Audio-process ancestry resolves to the nearest app-window owner, excluding the shell. Hidden/tray apps use their same-executable ancestor. Entries are grouped by owning PID.
-
-### Accessibility (AX) hazards
-
-If you use AX to grab titles/URLs, be careful:
-
-- **Sync IPC:** AX calls are synchronous IPC. If Chrome hangs, your app hangs. Enforce a ~250ms timeout.
-- **Hidden DOMs:** Chromium/Electron expose nothing until you explicitly set `AXEnhancedUserInterface`.
-- **Massive trees:** Browser windows have thousands of elements. Cap your depth and node traversal or you'll burn CPU.
-
-### macOS permission quirks
-
-To get the audio prompt to show up:
-
-1. `NSAudioCaptureUsageDescription` must be in `Info.plist`. The system fails silently without it.
-2. Binary must be code-signed.
-3. Must be a GUI process (`NSApplication` running).
-4. Request the permission **off** the main thread.
-
-There is no public preflight API. We probe by building a throwaway tap and checking if IO starts. We cache this because probing is expensive and disrupts live captures.
-
-Microphone access is a separate TCC grant. A host that requests it must include `NSMicrophoneUsageDescription` and, when sandboxed, the audio-input entitlement.
-
-### Teardown
-
-Do not SIGKILL a process holding a tap. Destroy the tap and aggregate device cleanly first. Crashing mid-capture leaks HAL state and eventually wedges `coreaudiod` system-wide. The user will have to reboot their machine.
+- Never SIGKILL a process holding a tap. Destroy the tap and aggregate device first.

@@ -434,9 +434,12 @@ pub struct Meeting {
     /// The user-visible application. Use this with [`CaptureTarget::Process`].
     pub pid: u32,
     pub app_name: String,
-    /// Requires the accessibility permission; empty otherwise.
+    /// Window or tab title. Requires the accessibility permission on macOS;
+    /// empty otherwise.
     pub title: String,
-    /// Requires the accessibility permission; empty otherwise.
+    /// The active tab's address for browser meetings. Requires the
+    /// accessibility permission on macOS; empty otherwise, or when the call
+    /// is in a background tab.
     pub url: String,
     pub is_using_mic: bool,
     pub is_playing_audio: bool,

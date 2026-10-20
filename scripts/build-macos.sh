@@ -33,6 +33,17 @@ clang++ -std=c++17 -Wall -Wextra -Werror \
   -o "$BUILD/audio_app_process_test" "$ROOT/native/tests/audio_app_process_test.cpp"
 "$BUILD/audio_app_process_test"
 
+# The Windows catalog and stream mixer are portable C++.
+echo "==> Windows meeting catalog tests"
+clang++ -std=c++17 -Wall -Wextra -Werror -I"$ROOT/native/include" \
+  -o "$BUILD/meeting_catalog_test" "$ROOT/native/tests/meeting_catalog_test.cpp"
+"$BUILD/meeting_catalog_test"
+
+echo "==> Windows timeline mixer tests"
+clang++ -std=c++17 -Wall -Wextra -Werror -I"$ROOT/native/include" \
+  -o "$BUILD/timeline_mixer_test" "$ROOT/native/tests/timeline_mixer_test.cpp"
+"$BUILD/timeline_mixer_test"
+
 echo "==> swiftc: libmeetingrecord_macos.a"
 swiftc -O \
   -parse-as-library \

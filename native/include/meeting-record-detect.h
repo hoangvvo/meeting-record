@@ -65,8 +65,8 @@ typedef struct {
   size_t audio_pid_count;
 
   char app_name[128];
-  char title[512]; /* window or tab title; empty without Accessibility */
-  char url[1024];  /* meeting URL for browser-based calls; may be empty */
+  char title[512]; /* window or tab title; empty without macOS Accessibility */
+  char url[1024];  /* active tab's URL for browser-based calls; may be empty */
 
   int32_t is_using_mic;     /* the user is (or could be) speaking */
   int32_t is_playing_audio; /* someone else is speaking */

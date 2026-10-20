@@ -43,9 +43,7 @@ const recording = await MeetingRecord.capture.start(
   { microphone: "default" },
 );
 
-recording.on("interrupted", () =>
-  console.warn("audio device changed; recovering"),
-);
+recording.on("interrupted", () => console.warn("audio device changed; recovering"));
 recording.on("recovered", () => console.log("capture recovered"));
 recording.on("failed", (error) => console.error("capture failed", error));
 
@@ -54,9 +52,7 @@ recording.systemAudio.on("data", (chunk) => {
   console.log(chunk.length, chunk.hostTimeNs, chunk.sampleRate, chunk.channels);
 });
 recording.systemAudio.on("drop", (samples) => console.warn("dropped", samples));
-recording.systemAudio.on("format", (format) =>
-  console.log("new format", format),
-);
+recording.systemAudio.on("format", (format) => console.log("new format", format));
 
 // Process the microphone track if requested.
 recording.microphone?.on("data", (chunk) => {
@@ -72,9 +68,10 @@ MeetingRecord.meetings.unwatch();
 
 ## Audio apps
 
-`meetings.audioApps()` lists owning applications for a source picker. Pass an entry's `pid` to `capture.start()`; no meeting scan or Accessibility grant is needed.
-
-Windows targets include future child processes. macOS targets include current audio helpers; restart capture if helpers are replaced.
+- `meetings.audioApps()`: applications doing audio IO, for a source picker.
+- Pass an entry's `pid` to `capture.start()`; no meeting scan or Accessibility grant needed.
+- Windows: the target includes future child processes.
+- macOS: the target includes current audio helpers; restart capture if they change.
 
 ## Mixed output
 
@@ -88,9 +85,11 @@ recording.mixedAudio.on("level", (rms) => console.log(rms));
 recording.mixedAudio.setMicrophoneMuted(true);
 ```
 
-`mixedAudio` is mono s16le. Pause/resume excludes paused time; await its `end` event after stopping to consume the final tail. Raw tracks remain float32. Mixing does not perform echo cancellation.
-
-Pass an `AbortSignal` to `capture.start()` to stop capture on cancellation, or to `permissions.request()` to cancel waiting for a grant.
+- `mixedAudio`: mono s16le; raw tracks stay float32.
+- Paused time is excluded.
+- After stopping, await `end` to consume the final tail.
+- No echo cancellation.
+- `AbortSignal` in `capture.start()` stops capture; in `permissions.request()` it cancels the wait.
 
 ## License
 

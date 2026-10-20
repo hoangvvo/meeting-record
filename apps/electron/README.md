@@ -1,6 +1,6 @@
 # mrec-electron
 
-Node binding test app. macOS 14.2+, arm64.
+Node binding test app. macOS 14.2+ (arm64) or Windows 10 build 20348+.
 
 Build the core first, from the repo root:
 
@@ -24,4 +24,6 @@ open out/mrec-electron-darwin-arm64/mrec-electron.app
 
 Notes:
 
-- Dev mode can't do permissions or recording. TCC reads Electron.app's plist, so no prompt ever shows up. Detection works fine.
+- macOS dev mode: detection only; no permission prompts, no recording.
+- Windows dev mode: detection and recording.
+- Windows build: needs Python and the Visual Studio C++ build tools.

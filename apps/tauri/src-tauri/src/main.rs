@@ -499,11 +499,21 @@ fn finish(recording: Recording) -> RecordingStopped {
 
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
-    Command::new("open")
-        .args(["-R", &path])
-        .spawn()
-        .map(drop)
-        .map_err(|error| error.to_string())
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        // Explorer parses its own command line, so quote only the path.
+        let mut command = Command::new("explorer");
+        command.raw_arg(format!("/select,\"{path}\""));
+        command
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.args(["-R", &path]);
+        command
+    };
+    command.spawn().map(drop).map_err(|error| error.to_string())
 }
 
 /// Both guards have to be released before the process goes away: leaking a

@@ -127,7 +127,9 @@ fn build_windows(native: &Path) {
         "include/meeting-record-detect.h",
         "windows/ProcessLoopback.cpp",
         "windows/AudioAppProcess.h",
+        "windows/MeetingCatalog.h",
         "windows/MeetingDetector.cpp",
+        "windows/TimelineMixer.h",
     ] {
         println!("cargo:rerun-if-changed={}", native.join(source).display());
     }
@@ -139,7 +141,7 @@ fn build_windows(native: &Path) {
         .file(native.join("windows/MeetingDetector.cpp"))
         .compile("meetingrecord_win");
 
-    for library in ["ole32", "mmdevapi", "user32"] {
+    for library in ["ole32", "oleaut32", "mmdevapi", "user32"] {
         println!("cargo:rustc-link-lib=dylib={library}");
     }
 }

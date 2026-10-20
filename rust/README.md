@@ -113,9 +113,10 @@ fn main() -> Result<(), Error> {
 
 ## Audio apps
 
-`meetings::audio_apps()` lists owning applications for a source picker. Use an entry's `pid` with `CaptureTarget::Process`; no meeting scan or Accessibility grant is needed.
-
-Windows targets include future child processes. macOS targets include current audio helpers; restart capture if helpers are replaced.
+- `meetings::audio_apps()`: applications doing audio IO, for a source picker.
+- Use an entry's `pid` with `CaptureTarget::Process`; no meeting scan or Accessibility grant needed.
+- Windows: the target includes future child processes.
+- macOS: the target includes current audio helpers; restart capture if they change.
 
 ## Mixed output
 
@@ -136,9 +137,12 @@ while let Some(chunk) = mixed.recv() {
 }
 ```
 
-`mixed_audio()` is mono s16le. Pause/resume excludes paused time; drain it after stopping to consume the final tail. Raw tracks remain float32. Mixing does not perform echo cancellation.
-
-Set `CaptureOptions::cancellation` to a cloned `CancellationToken` to cancel capture. Use `permissions::request_and_wait(permission, timeout, Some(&token))` for cancellable permission waits.
+- `mixed_audio()`: mono s16le; raw tracks stay float32.
+- Paused time is excluded.
+- After stopping, drain it to consume the final tail.
+- No echo cancellation.
+- `CaptureOptions::cancellation`: a cloned `CancellationToken` stops capture.
+- `permissions::request_and_wait(permission, timeout, Some(&token))`: cancellable permission wait.
 
 ## License
 

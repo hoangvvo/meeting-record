@@ -7,6 +7,14 @@ on:
         description: Run Windows system and process capture
         type: boolean
         default: true
+      windows_binding:
+        description: Windows bindings to exercise
+        type: choice
+        options:
+          - All
+          - Rust
+          - Node
+        default: All
       macos:
         description: Run macOS system capture
         type: boolean
@@ -15,6 +23,14 @@ on:
         description: Require a non-silent microphone track
         type: boolean
         default: false
+      windows_microphone_device:
+        description: Windows output device that loops back to the default microphone, such as CABLE Input
+        type: string
+        default: ""
+      windows_switch_microphone:
+        description: Windows recording device to switch the default microphone to mid-capture
+        type: string
+        default: ""
       duration_seconds:
         description: Capture duration for each test
         type: string
@@ -43,18 +59,39 @@ jobs:
           rustup toolchain install stable --no-self-update
           rustup default stable
 
+      - name: Set up Node.js
+        if: inputs.windows_binding != 'Rust'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Node.js dependencies
+        if: inputs.windows_binding != 'Rust'
+        run: npm ci --ignore-scripts
+
       - name: Run live Windows capture
         shell: pwsh
         env:
+          E2E_BINDING: ${{ inputs.windows_binding }}
           E2E_DURATION: ${{ inputs.duration_seconds }}
           E2E_MICROPHONE: ${{ inputs.microphone }}
+          E2E_MICROPHONE_DEVICE: ${{ inputs.windows_microphone_device }}
+          E2E_SWITCH_MICROPHONE: ${{ inputs.windows_switch_microphone }}
         run: |
           $options = @{
             Mode = "All"
+            Binding = $env:E2E_BINDING
             DurationSeconds = [int]$env:E2E_DURATION
           }
           if ($env:E2E_MICROPHONE -eq "true") {
             $options.Microphone = $true
+          }
+          if ($env:E2E_MICROPHONE_DEVICE) {
+            $options.MicrophoneDevice = $env:E2E_MICROPHONE_DEVICE
+          }
+          if ($env:E2E_SWITCH_MICROPHONE) {
+            $options.SwitchMicrophone = $env:E2E_SWITCH_MICROPHONE
           }
           ./e2e/windows.ps1 @options
 

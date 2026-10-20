@@ -36,9 +36,12 @@ export interface Meeting {
   /** The visible app. Use it in `CaptureTarget` when starting capture. */
   readonly pid: number;
   readonly appName: string;
-  /** Requires the accessibility permission; empty string otherwise. */
+  /** Window or tab title. Requires the accessibility permission on macOS; empty string otherwise. */
   readonly title: string;
-  /** Requires the accessibility permission; empty string otherwise. */
+  /**
+   * The active tab's address for browser meetings. Requires the accessibility permission on
+   * macOS; empty string otherwise, or when the call is in a background tab.
+   */
   readonly url: string;
   readonly isUsingMic: boolean;
   readonly isPlayingAudio: boolean;
@@ -419,7 +422,8 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
     this.#signal = signal;
     signal?.addEventListener("abort", this.#onAbort, { once: true });
     this.mixedAudio = mix ? new MixedAudioImpl(mix.sampleRate, systemAudio, microphone) : undefined;
-    this.#healthTimer = setInterval(() => this.#pollHealth(), 250);
+    // A recovery can last only 100 ms; a slower poll misses it.
+    this.#healthTimer = setInterval(() => this.#pollHealth(), 50);
     this.#healthTimer.unref();
   }
 

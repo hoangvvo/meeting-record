@@ -1,6 +1,6 @@
 # mrec-tauri
 
-Rust binding test app. macOS 14.2+, arm64.
+Rust binding test app. macOS 14.2+ (arm64) or Windows 10 build 20348+.
 
 Build the core first:
 
@@ -22,9 +22,10 @@ APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning | awk '/Apple
 open "$(git rev-parse --show-toplevel)/target/release/bundle/macos/mrec-tauri.app"
 ```
 
-`cargo tauri build` is the same tool if you have cargo-tauri installed.
+`cargo tauri build` works too, with cargo-tauri installed.
 
 Notes:
 
-- Dev mode can't do permissions or recording. The dev binary is unsigned so TCC won't prompt. Detection works fine.
-- The audio callback only memcpys into an `rtrb` ring. A normal thread drains it, writes the WAV, and emits level and elapsed at 10Hz.
+- macOS dev mode: detection only; no permission prompts, no recording.
+- Windows dev mode: detection and recording.
+- The audio callback copies into an `rtrb` ring; a normal thread writes the WAV and emits level and elapsed at 10 Hz.
