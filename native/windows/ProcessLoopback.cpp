@@ -906,15 +906,9 @@ private:
 
   /* Captures another process tree alongside the others, as a new live source. */
   void AddTarget(uint32_t pid) {
-    if (std::find(unavailable_targets_.begin(), unavailable_targets_.end(), pid) !=
-        unavailable_targets_.end()) {
-      return;
-    }
+    if (stop_requested_) return;
     auto stream = Activate(pid, /*exclude=*/false);
-    if (!stream || FAILED(stream->client->Start())) {
-      unavailable_targets_.push_back(pid);
-      return;
-    }
+    if (!stream || FAILED(stream->client->Start())) return;
     std::lock_guard<std::mutex> lock(sources_mutex_);
     if (stop_requested_ || !mrec_track_add_source(track_session_, MREC_TRACK_SYSTEM_AUDIO)) {
       stream->client->Stop();
@@ -1040,7 +1034,6 @@ private:
     if (microphone_ && microphone_->client) microphone_->client->Stop();
     microphone_.reset();
     targets_.clear();
-    unavailable_targets_.clear();
     sibling_rule_ = SiblingRule();
     mta_usage_.reset();
     microphone_enabled_ = false;
@@ -1065,8 +1058,6 @@ private:
   std::vector<std::unique_ptr<LoopbackStream>> streams_;
   std::vector<std::thread> workers_;
   SiblingRule sibling_rule_;
-  /* Processes that could not be captured; the watcher does not retry them. */
-  std::vector<uint32_t> unavailable_targets_;
   ComPtr<IMMDeviceEnumerator> device_enumerator_;
   ComPtr<DeviceNotifications> notifications_;
   std::optional<MicrophoneStream> microphone_;
