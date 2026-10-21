@@ -414,6 +414,17 @@ uint64_t MonotonicTimeNs() {
          remainder * 1000000000ull / static_cast<uint64_t>(frequency.QuadPart);
 }
 
+/* When `pid`'s process was created, in 100 ns units; 0 when it cannot be read. */
+uint64_t ProcessCreationTime(uint32_t pid) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!process) return 0;
+  FILETIME created{}, exited{}, kernel{}, user{};
+  const BOOL read = GetProcessTimes(process, &created, &exited, &kernel, &user);
+  CloseHandle(process);
+  if (!read) return 0;
+  return (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+}
+
 /* Loopback activation succeeds for any pid, so a dead target would record silence. */
 bool IsProcessRunning(uint32_t pid) {
   HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
@@ -586,11 +597,13 @@ public:
       }
     }
 
-    if (!global_mixdown) targets_ = targets;
+    if (!global_mixdown) {
+      for (uint32_t pid : targets) targets_.push_back({pid, ProcessCreationTime(pid)});
+    }
     microphone_source_ = microphone;
     if (microphone != MREC_MICROPHONE_NONE) {
       mrec_status failure = MREC_ERR_DEVICE_FAILED;
-      auto stream = ActivateMicrophone(PreferredMicrophoneId(targets_, microphone_source_), failure);
+      auto stream = ActivateMicrophone(PreferredMicrophoneId(targets, microphone_source_), failure);
       if (!stream) {
         streams_.clear();
         targets_.clear();
@@ -886,10 +899,19 @@ private:
     while (WaitWhileRunning(1000, nullptr)) {
       const auto processes = ProcessSnapshot();
       if (processes.empty()) continue;
+      const auto roots = Roots();
       const auto targets = Targets();
+      std::map<uint32_t, uint64_t> times;
+      const auto created = [&times](uint32_t pid) {
+        const auto [time, read] = times.try_emplace(pid, 0);
+        if (read) time->second = ProcessCreationTime(pid);
+        return time->second;
+      };
+      /* Pids narrow the search; creation times rule out processes that reused one. */
       const bool has_processes = std::any_of(processes.begin(), processes.end(),
-          [&processes, &targets](const auto &entry) {
-            return InTrees(processes, entry.first, targets) && IsProcessRunning(entry.first);
+          [&](const auto &entry) {
+            return InTrees(processes, entry.first, targets) && IsProcessRunning(entry.first) &&
+                   meeting_record::InRootTrees(processes, entry.first, roots, created);
           });
       if (!has_processes) {
         system_exited_ = true;
@@ -897,8 +919,8 @@ private:
                                MREC_TRACK_REASON_APP_EXITED, "the captured apps exited");
         return;
       }
-      const auto roots = meeting_record::SelectCaptureRoots(processes, {}, sibling_rule_);
-      for (uint32_t pid : meeting_record::UncapturedRoots(processes, roots, targets)) {
+      const auto siblings = meeting_record::SelectCaptureRoots(processes, {}, sibling_rule_);
+      for (uint32_t pid : meeting_record::UncapturedRoots(processes, siblings, roots, created)) {
         AddTarget(pid);
       }
     }
@@ -907,6 +929,7 @@ private:
   /* Captures another process tree alongside the others, as a new live source. */
   void AddTarget(uint32_t pid) {
     if (stop_requested_) return;
+    const uint64_t created = ProcessCreationTime(pid);
     auto stream = Activate(pid, /*exclude=*/false);
     if (!stream || FAILED(stream->client->Start())) return;
     std::lock_guard<std::mutex> lock(sources_mutex_);
@@ -916,7 +939,7 @@ private:
     }
     const size_t index = system_mixer_.AddSource();
     streams_.push_back(std::make_unique<LoopbackStream>(std::move(*stream)));
-    targets_.push_back(pid);
+    targets_.push_back({pid, created});
     workers_.emplace_back([this, index] { Drain(index); });
   }
 
@@ -925,9 +948,15 @@ private:
     return *streams_[index];
   }
 
-  std::vector<uint32_t> Targets() {
+  std::vector<meeting_record::Root> Roots() {
     std::lock_guard<std::mutex> lock(sources_mutex_);
     return targets_;
+  }
+
+  std::vector<uint32_t> Targets() {
+    std::vector<uint32_t> pids;
+    for (const auto &root : Roots()) pids.push_back(root.pid);
+    return pids;
   }
 
   /* Device changes retry a lost microphone at once, between the timed retries. */
@@ -1053,7 +1082,7 @@ private:
   /* Guards adding targets while drain and microphone threads read them. */
   std::mutex sources_mutex_;
   /* Capture roots, which also pick the microphone; empty for system capture. */
-  std::vector<uint32_t> targets_;
+  std::vector<meeting_record::Root> targets_;
   /* Index `i` feeds mixer source `i` and system track source `i`. */
   std::vector<std::unique_ptr<LoopbackStream>> streams_;
   std::vector<std::thread> workers_;
