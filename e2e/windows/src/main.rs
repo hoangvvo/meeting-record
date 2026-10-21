@@ -312,7 +312,7 @@ impl MixMetrics {
             "mixed: {seconds:.2}s at {sample_rate} Hz, {} bytes, peak level={:.6}",
             self.bytes, self.peak_level
         );
-        if self.bytes % 2 != 0 {
+        if !self.bytes.is_multiple_of(2) {
             return Err(format!(
                 "mixed: {} bytes is not whole s16le samples",
                 self.bytes

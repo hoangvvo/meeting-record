@@ -300,7 +300,7 @@ Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
   const int reason = static_cast<int>(event->reason);
   Napi::Object out = Napi::Object::New(env);
   out.Set("track", event->track == MREC_TRACK_MICROPHONE ? "microphone" : "systemAudio");
-  out.Set("type", (type >= 0 && type <= 3) ? kTypes[type] : "interrupted");
+  out.Set("type", kTypes[type]);
   out.Set("reason", (reason >= 0 && reason <= 5) ? kReasons[reason] : "unknown");
   out.Set("deviceName", event->device_name);
   out.Set("message", event->message);
@@ -311,6 +311,8 @@ Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
 void OnTrackEvent(const mrec_track_event *event, void *user_data) {
   auto *capture = static_cast<CaptureContext *>(user_data);
   if (!capture || !event) return;
+  /* Skip event types newer than this binding, as the Rust binding does. */
+  if (event->type < MREC_TRACK_INTERRUPTED || event->type > MREC_TRACK_DEGRADED) return;
   auto *copy = new mrec_track_event(*event);
   const uint64_t capture_id = capture->id;
   const napi_status status = capture->events.NonBlockingCall(

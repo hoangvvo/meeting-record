@@ -616,6 +616,7 @@ public:
       }
       workers_.emplace_back([this, i] { Drain(i); });
     }
+    if (!targets_.empty()) exit_worker_ = std::thread([this] { WatchForExit(); });
     if (microphone_) {
       HRESULT hr = microphone_->client->Start();
       if (FAILED(hr)) {
@@ -805,29 +806,9 @@ private:
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     LoopbackStream &stream = streams_[index];
-    uint64_t next_exit_check = 0;
 
     while (!stop_requested_.load(std::memory_order_relaxed) &&
            !system_exited_.load(std::memory_order_relaxed)) {
-      /* Exited targets deliver silence; say so, and keep recording. */
-      if (index == 0 && !targets_.empty() && next_exit_check != UINT64_MAX) {
-        const uint64_t now = MonotonicTimeNs();
-        if (now >= next_exit_check) {
-          next_exit_check = now + 1000000000ull;
-          const auto processes = ProcessSnapshot();
-          const bool has_processes = std::any_of(processes.begin(), processes.end(),
-              [this, &processes](const auto &entry) {
-                return InTrees(processes, entry.first, targets_) && IsProcessRunning(entry.first);
-              });
-          if (!processes.empty() && !has_processes) {
-            system_exited_ = true;
-            next_exit_check = UINT64_MAX;
-            mrec_track_interrupted(track_session_, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
-                                   MREC_TRACK_REASON_APP_EXITED, "the captured apps exited");
-            break;
-          }
-        }
-      }
       UINT32 packet = 0;
       HRESULT hr = stream.capture->GetNextPacketSize(&packet);
       if (FAILED(hr)) {
@@ -916,23 +897,59 @@ private:
     CoUninitialize();
   }
 
+  /* Sleeps `milliseconds`: false once stopping, or once `ended` is set. */
+  bool WaitWhileRunning(uint32_t milliseconds, const std::atomic<bool> *ended) const {
+    const auto finished = [this, ended] {
+      return stop_requested_.load(std::memory_order_relaxed) ||
+             (ended && ended->load(std::memory_order_relaxed));
+    };
+    for (uint32_t waited = 0; waited < milliseconds; waited += 50) {
+      if (finished()) return false;
+      Sleep((std::min)(50u, milliseconds - waited));
+    }
+    return !finished();
+  }
+
+  /*
+   * Exited targets deliver silence; say so, end system audio, and keep recording.
+   * Its own thread, like the macOS timer, so a drain stuck in recovery still sees it.
+   */
+  void WatchForExit() {
+    while (WaitWhileRunning(1000, nullptr)) {
+      const auto processes = ProcessSnapshot();
+      const bool has_processes = std::any_of(processes.begin(), processes.end(),
+          [this, &processes](const auto &entry) {
+            return InTrees(processes, entry.first, targets_) && IsProcessRunning(entry.first);
+          });
+      if (!processes.empty() && !has_processes) {
+        system_exited_ = true;
+        mrec_track_interrupted(track_session_, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+                               MREC_TRACK_REASON_APP_EXITED, "the captured apps exited");
+        return;
+      }
+    }
+  }
+
   /* What a recovery needs through the shared C callbacks. */
   struct Recovery {
     Session *session;
     size_t index;
+    mrec_track track;
   };
 
+  /* System audio stops retrying once its apps exit, as on macOS. */
   static int32_t WaitForRetry(void *context, uint32_t milliseconds) {
-    const Session *session = static_cast<Recovery *>(context)->session;
-    for (uint32_t waited = 0; waited < milliseconds; waited += 50) {
-      if (session->stop_requested_.load(std::memory_order_relaxed)) return 0;
-      Sleep((std::min)(50u, milliseconds - waited));
-    }
-    return session->stop_requested_.load(std::memory_order_relaxed) ? 0 : 1;
+    const auto *recovery = static_cast<Recovery *>(context);
+    const Session *session = recovery->session;
+    const bool system = recovery->track == MREC_TRACK_SYSTEM_AUDIO;
+    return session->WaitWhileRunning(milliseconds, system ? &session->system_exited_ : nullptr)
+               ? 1
+               : 0;
   }
 
   static int32_t ReopenLoopback(void *context, char *, size_t) {
     auto *recovery = static_cast<Recovery *>(context);
+    if (recovery->session->system_exited_.load(std::memory_order_relaxed)) return 0;
     LoopbackStream &stream = recovery->session->streams_[recovery->index];
     auto replacement = recovery->session->Activate(stream.pid, stream.exclude);
     if (!replacement) return 0;
@@ -967,7 +984,7 @@ private:
     if (streams_[index].client) streams_[index].client->Stop();
     const std::string message = "system audio interrupted: " + detail;
     SetLastErrorMessage(message);
-    Recovery recovery{this, index};
+    Recovery recovery{this, index, MREC_TRACK_SYSTEM_AUDIO};
     mrec_track_recover(track_session_, MREC_TRACK_SYSTEM_AUDIO, static_cast<uint32_t>(index),
                        reason, message.c_str(), ReopenLoopback, WaitForRetry, &recovery);
   }
@@ -976,7 +993,7 @@ private:
     if (microphone_ && microphone_->client) microphone_->client->Stop();
     const std::string message = "microphone interrupted: " + detail;
     SetLastErrorMessage(message);
-    Recovery recovery{this, 0};
+    Recovery recovery{this, 0, MREC_TRACK_MICROPHONE};
     mrec_track_recover(track_session_, MREC_TRACK_MICROPHONE, 0, reason, message.c_str(),
                        ReopenMicrophone, WaitForRetry, &recovery);
   }
@@ -988,6 +1005,7 @@ private:
     }
     workers_.clear();
     if (microphone_worker_.joinable()) microphone_worker_.join();
+    if (exit_worker_.joinable()) exit_worker_.join();
     system_mixer_.Flush();
     if (microphone_) microphone_mixer_.Flush();
     for (auto &stream : streams_) {
@@ -1021,6 +1039,7 @@ private:
   int32_t microphone_source_ = MREC_MICROPHONE_NONE;
   uint64_t track_session_ = 0;
   std::thread microphone_worker_;
+  std::thread exit_worker_;
   TimelineMixer system_mixer_;
   TimelineMixer microphone_mixer_;
   mrec_audio_callback callback_ = nullptr;
