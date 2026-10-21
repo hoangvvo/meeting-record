@@ -120,6 +120,21 @@ void DiscontinuityKeepsTheGap() {
   assert(All(blocks[2].samples, 0, kFramesPerBlock, 0.5f));
 }
 
+void InterruptionIsSkippedNotFilled() {
+  std::vector<Block> blocks;
+  TimelineMixer mixer;
+  mixer.Reset(1, 1, Collect, &blocks);
+  const auto packet = Constant(kFramesPerBlock, 0.5f);
+  mixer.Add(0, packet.data(), kFramesPerBlock, false, false, BlockTime(10));
+  // An hour later the source returns; the output jumps rather than emitting silence.
+  const uint64_t later = 10 + 360000;
+  mixer.Add(0, packet.data(), kFramesPerBlock, false, true, BlockTime(later));
+  mixer.Flush();
+  assert(blocks.size() == 2);
+  assert(blocks[1].host_time_ns == BlockTime(later));
+  assert(All(blocks[1].samples, 0, kFramesPerBlock, 0.5f));
+}
+
 void BackwardJumpNeverDoublesASource() {
   std::vector<Block> blocks;
   TimelineMixer mixer;
@@ -213,6 +228,7 @@ int main() {
   ClockJitterKeepsPacketsContiguous();
   JitteredTimestampsKeepSamplesContiguous();
   DiscontinuityKeepsTheGap();
+  InterruptionIsSkippedNotFilled();
   BackwardJumpNeverDoublesASource();
   SourcesAreSummedOnTheSharedTimelineAndClamped();
   StalledSourceIsSilenceAfterTheWatermark();

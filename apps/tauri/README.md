@@ -1,6 +1,6 @@
 # mrec-tauri
 
-Rust binding test app. macOS 14.2+ (arm64) or Windows 10 build 20348+.
+Rust binding test app. macOS 14.2+ (arm64) or Windows 10 build 19041+.
 
 Build the core first:
 

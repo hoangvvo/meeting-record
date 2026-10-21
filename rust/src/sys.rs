@@ -15,9 +15,14 @@ pub const MREC_ERR_TAP_FAILED: i32 = -6;
 pub const MREC_ERR_DEVICE_FAILED: i32 = -7;
 pub const MREC_ERR_IOPROC_FAILED: i32 = -8;
 
-pub const MREC_CAPTURE_RUNNING: i32 = 1;
-pub const MREC_CAPTURE_RECOVERING: i32 = 2;
-pub const MREC_CAPTURE_FAILED: i32 = 3;
+pub const MREC_TRACK_MICROPHONE: i32 = 1;
+pub const MREC_TRACK_INTERRUPTED: i32 = 0;
+pub const MREC_TRACK_RESUMED: i32 = 1;
+pub const MREC_TRACK_REASON_DEVICE_REMOVED: i32 = 1;
+pub const MREC_TRACK_REASON_DEVICE_CHANGED: i32 = 2;
+pub const MREC_TRACK_REASON_FORMAT_CHANGED: i32 = 3;
+pub const MREC_TRACK_REASON_APP_EXITED: i32 = 4;
+pub const MREC_TRACK_REASON_SERVICE_RESET: i32 = 5;
 
 pub const MREC_MAX_AUDIO_PIDS: usize = 16;
 
@@ -33,6 +38,20 @@ pub type AudioCallback = unsafe extern "C" fn(
 
 pub type MeetingCallback =
     unsafe extern "C" fn(meeting: *const Meeting, event: c_int, user_data: *mut c_void);
+
+pub type TrackEventCallback =
+    unsafe extern "C" fn(event: *const TrackEvent, user_data: *mut c_void);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TrackEvent {
+    pub track: i32,
+    pub kind: i32,
+    pub reason: i32,
+    pub host_time_ns: u64,
+    pub device_name: [c_char; 256],
+    pub message: [c_char; 512],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -89,11 +108,13 @@ extern "C" {
         system_audio_user_data: *mut c_void,
         microphone_cb: Option<AudioCallback>,
         microphone_user_data: *mut c_void,
+        event_cb: Option<TrackEventCallback>,
+        event_user_data: *mut c_void,
     ) -> i32;
 
     pub fn mrec_stop() -> c_int;
     pub fn mrec_is_running() -> i32;
-    pub fn mrec_capture_health_status() -> i32;
+    pub fn mrec_current_microphone_name(name: *mut c_char, capacity: usize) -> c_int;
     pub fn mrec_current_format(sample_rate: *mut c_double, channels: *mut u32) -> c_int;
     pub fn mrec_current_microphone_format(sample_rate: *mut c_double, channels: *mut u32) -> c_int;
     pub fn mrec_last_error() -> *const c_char;
@@ -108,7 +129,7 @@ extern "C" {
 mod tests {
     use std::mem;
 
-    use super::{Meeting, Process};
+    use super::{Meeting, Process, TrackEvent};
 
     #[test]
     fn meeting_layout_matches_header() {
@@ -143,6 +164,22 @@ mod tests {
             offset(&meeting.detected_at_ns as *const _ as *const u8),
             1760
         );
+    }
+
+    #[test]
+    fn track_event_layout_matches_header() {
+        assert_eq!(
+            mem::size_of::<TrackEvent>(),
+            792,
+            "sizeof(mrec_track_event)"
+        );
+        let event = unsafe { mem::zeroed::<TrackEvent>() };
+        let base = &event as *const _ as usize;
+        assert_eq!(&event.kind as *const _ as usize - base, 4);
+        assert_eq!(&event.reason as *const _ as usize - base, 8);
+        assert_eq!(&event.host_time_ns as *const _ as usize - base, 16);
+        assert_eq!(&event.device_name as *const _ as usize - base, 24);
+        assert_eq!(&event.message as *const _ as usize - base, 280);
     }
 
     #[test]

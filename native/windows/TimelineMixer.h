@@ -17,6 +17,8 @@ constexpr uint64_t kBlockDurationNs = 10000000;
 constexpr uint64_t kMixerWaitBlocks = 3; /* Allow 30 ms for sibling streams. */
 /* Timestamp movement still treated as jitter: 20 ms, as in the bindings' mixers. */
 constexpr uint64_t kMaxJitterFrames = kSampleRate / 50;
+/* A longer silence from every source is an interruption: skipped, not filled. */
+constexpr uint64_t kMaxStallFrames = kSampleRate;
 
 /*
  * WASAPI exposes one process-loopback client per target pid. Their callbacks are
@@ -65,6 +67,12 @@ public:
     if (expected != 0 && !discontinuity) {
       const uint64_t distance = frame > expected ? frame - expected : expected - frame;
       if (distance <= kMaxJitterFrames) frame = expected;
+    }
+
+    /* After an interruption, resume at the new audio; filling would release it all at once. */
+    if (have_timeline_ && frame > max_observed_frame_ + kMaxStallFrames) {
+      EmitReady(true);
+      next_output_block_ = frame / kFramesPerBlock;
     }
 
     /* Drop what a backward jump would write over this source's own audio. */

@@ -66,11 +66,13 @@ fn build_macos(native: &Path) {
     for source in &sources {
         println!("cargo:rerun-if-changed={}", source.display());
     }
-    for header in ["meeting-record.h", "meeting-record-detect.h"] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            native.join("include").join(header).display()
-        );
+    for header in [
+        "include/meeting-record.h",
+        "include/meeting-record-detect.h",
+        "include/meeting-record-events.h",
+        "macos/Bridging.h",
+    ] {
+        println!("cargo:rerun-if-changed={}", native.join(header).display());
     }
 
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("libmeetingrecord_macos.a");
@@ -83,9 +85,10 @@ fn build_macos(native: &Path) {
         "-static",
         "-target",
         swift_target,
-        "-o",
+        "-import-objc-header",
     ]);
-    swift.arg(&output).args(&sources);
+    swift.arg(native.join("macos/Bridging.h"));
+    swift.arg("-o").arg(&output).args(&sources);
     let status = swift
         .status()
         .expect("failed to start swiftc through xcrun");
@@ -119,15 +122,16 @@ fn build_macos(native: &Path) {
         swift_libraries.display()
     );
     println!("cargo:rustc-link-lib=dylib=swiftCore");
+    build_common(native);
 }
 
 fn build_windows(native: &Path) {
     for source in [
         "include/meeting-record.h",
         "include/meeting-record-detect.h",
+        "include/meeting-record-events.h",
         "windows/ProcessLoopback.cpp",
         "windows/AudioAppProcess.h",
-        "windows/MeetingCatalog.h",
         "windows/MeetingDetector.cpp",
         "windows/TimelineMixer.h",
     ] {
@@ -137,11 +141,30 @@ fn build_windows(native: &Path) {
         .cpp(true)
         .std("c++17")
         .include(native.join("include"))
+        .include(native.join("common"))
         .file(native.join("windows/ProcessLoopback.cpp"))
         .file(native.join("windows/MeetingDetector.cpp"))
         .compile("meetingrecord_win");
 
-    for library in ["ole32", "oleaut32", "mmdevapi", "user32"] {
+    for library in ["advapi32", "ole32", "oleaut32", "mmdevapi", "user32"] {
         println!("cargo:rustc-link-lib=dylib={library}");
     }
+    build_common(native);
+}
+
+/// Meeting classification and source recovery shared by both backends.
+fn build_common(native: &Path) {
+    for source in [
+        "common/meeting-catalog.h",
+        "common/meeting-catalog.c",
+        "common/tracks.h",
+        "common/tracks.c",
+    ] {
+        println!("cargo:rerun-if-changed={}", native.join(source).display());
+    }
+    cc::Build::new()
+        .include(native.join("include"))
+        .file(native.join("common/meeting-catalog.c"))
+        .file(native.join("common/tracks.c"))
+        .compile("meetingrecord_common");
 }

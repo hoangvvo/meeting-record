@@ -1,6 +1,6 @@
 # mrec-electron
 
-Node binding test app. macOS 14.2+ (arm64) or Windows 10 build 20348+.
+Node binding test app. macOS 14.2+ (arm64) or Windows 10 build 19041+.
 
 Build the core first, from the repo root:
 

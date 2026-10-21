@@ -137,7 +137,7 @@ int mrec_selftest_run(void) {
       cfg.pids, cfg.pid_count, cfg.global_mixdown, cfg.mono,
       cfg.mute_captured_output,
       test_microphone ? MREC_MICROPHONE_DEFAULT : MREC_MICROPHONE_NONE,
-      on_audio, NULL, test_microphone ? on_microphone : NULL, NULL);
+      on_audio, NULL, test_microphone ? on_microphone : NULL, NULL, NULL, NULL);
   fprintf(log, "mrec_start_tracks_raw -> %d (%s)\n", st, mrec_last_error());
   if (st != MREC_OK) {
     fclose(log);

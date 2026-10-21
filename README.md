@@ -21,7 +21,7 @@ Need an AI Note-taker? Check out [fireflies.ai](https://fireflies.ai/?utm_source
 | Platform | Minimum version | Architectures |
 | -------- | --------------- | ------------- |
 | macOS    | 14.2            | arm64, x86-64 |
-| Windows  | 10 build 20348  | arm64, x86-64 |
+| Windows  | 10 build 19041  | arm64, x86-64 |
 
 macOS app requirements:
 
@@ -45,8 +45,8 @@ macOS app requirements:
 | **Accessibility** | Meeting titles and URLs (opt) | System Settings.       |
 
 - Requests are asynchronous: request, then poll the status.
-- Windows: all three report `not-required`.
-- Windows: microphone denied in privacy settings → capture start fails with a permission error.
+- Windows: no prompts. System Audio and Accessibility report `granted`.
+- Windows: Microphone reports Settings › Privacy & security › Microphone; `denied` there → capture start fails with a permission error.
 
 ## Detection
 
@@ -60,15 +60,19 @@ macOS app requirements:
 | `discord` | Discord                      |
 | `browser` | Other browser-based meetings |
 
-- Record when `shouldRecord` / `should_record` is true.
+- Record when `shouldRecord` / `should_record` is true, including listen-only meetings.
 - The watcher reports `started`, `updated` and `ended` on a serial queue.
+- `started` needs ~2 s of detection; `ended` ~3 s of absence.
 - Windows: a Meet call in a background tab is `meet` with an empty `url`.
 
 ## Capture
 
 - **Process target:** recommended; the meeting app and its helpers.
 - **System target:** all application audio.
-- **Microphone:** opt-in; the default input device.
+- **Microphone:** opt-in. Windows: the mic the captured app uses, else the communications default. macOS: the default input.
+- A lost source never stops a recording: its track is interrupted and retried until it returns.
+- Tracks report `interrupted` (with a reason) and `resumed`; the microphone reports `devicechange`.
+- Every captured app exiting interrupts system audio (`app-exited`).
 - **Mixed output:** optional mono s16le from both bindings.
 - Source pickers: [`meetings.audioApps()`](./node/README.md#audio-apps) (Node.js), [`meetings::audio_apps()`](./rust/README.md#audio-apps) (Rust).
 

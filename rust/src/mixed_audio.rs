@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{mixer::PcmMixer, CaptureHealth, Error, QueuedChunk, TrackQueue, STATE_PAUSED};
+use crate::{mixer::PcmMixer, Error, QueuedChunk, TrackQueue, STATE_PAUSED};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MixedAudioOptions {
@@ -177,11 +177,6 @@ fn run(
         }
         drop(output);
 
-        if crate::capture_health() == CaptureHealth::Failed {
-            for source in &sources {
-                source.close();
-            }
-        }
         fill_pending(&sources, &mut pending);
         // A newer packet proves resume's producer barrier has completed. Refill
         // earlier empty slots so an older packet cannot be overtaken here.

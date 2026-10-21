@@ -15,17 +15,28 @@ final class MeetingWatcher {
     private static let backstopInterval: TimeInterval = 5.0
     /// Audio process lists churn in bursts, so let them settle before re-scanning.
     private static let debounceInterval: TimeInterval = 0.4
+    /// Shared with the Windows watcher through meeting-catalog.h.
+    private static let startDelay = TimeInterval(MREC_CATALOG_START_DELAY_MS) / 1000
+    private static let endDelay = TimeInterval(MREC_CATALOG_END_DELAY_MS) / 1000
+
+    private struct Tracked {
+        var meeting: DetectedMeeting
+        let firstSeen: TimeInterval
+        var lastSeen: TimeInterval
+        var started = false
+    }
 
     private let queue = DispatchQueue(label: "meetingrecord.watcher")
     private let queueKey = DispatchSpecificKey<UInt8>()
     private let callback: MrecMeetingCallback
     private let userData: UnsafeMutableRawPointer?
 
-    /// Last reported state, keyed by pid, for diffing.
-    private var active: [pid_t: DetectedMeeting] = [:]
+    /// Meetings seen so far, keyed by pid, for diffing.
+    private var tracked: [pid_t: Tracked] = [:]
     private var observers: [NSObjectProtocol] = []
     private var timer: DispatchSourceTimer?
     private var debounce: DispatchWorkItem?
+    private var followUp: DispatchWorkItem?
     private var listenerBlock: AudioObjectPropertyListenerBlock?
     private var stopped = false
 
@@ -80,8 +91,10 @@ final class MeetingWatcher {
             self.timer = nil
             self.debounce?.cancel()
             self.debounce = nil
+            self.followUp?.cancel()
+            self.followUp = nil
             // No ENDED events on explicit stop.
-            self.active.removeAll()
+            self.tracked.removeAll()
         }
         if DispatchQueue.getSpecific(key: self.queueKey) != nil {
             cleanup()
@@ -106,24 +119,46 @@ final class MeetingWatcher {
 
     private func rescan() {
         guard !stopped else { return }
-        let found = MeetingDetector.scan()
-        var next: [pid_t: DetectedMeeting] = [:]
-        for meeting in found { next[meeting.pid] = meeting }
+        let now = ProcessInfo.processInfo.systemUptime
 
-        for (pid, meeting) in next {
+        for meeting in MeetingDetector.scan() {
             guard !stopped else { return }
-            if let previous = active[pid] {
-                if changed(previous, meeting) { emit(meeting, .updated) }
-            } else {
+            var entry = tracked[meeting.pid]
+                ?? Tracked(meeting: meeting, firstSeen: now, lastSeen: now)
+            let updated = entry.started && changed(entry.meeting, meeting)
+            let starting = !entry.started && now - entry.firstSeen >= Self.startDelay
+            entry.meeting = meeting
+            entry.lastSeen = now
+            entry.started = entry.started || starting
+            tracked[meeting.pid] = entry
+            if starting {
                 emit(meeting, .started)
+            } else if updated {
+                emit(meeting, .updated)
             }
         }
-        for (pid, meeting) in active where next[pid] == nil {
+        for (pid, entry) in tracked where entry.lastSeen < now {
             guard !stopped else { return }
-            emit(meeting, .ended)
+            if entry.started && now - entry.lastSeen < Self.endDelay { continue }
+            tracked[pid] = nil
+            if entry.started { emit(entry.meeting, .ended) }
         }
         guard !stopped else { return }
-        active = next
+        scheduleFollowUp(now: now)
+    }
+
+    /// Settles pending starts and endings without waiting for the backstop.
+    private func scheduleFollowUp(now: TimeInterval) {
+        followUp?.cancel()
+        followUp = nil
+        let deadlines = tracked.values.compactMap { entry -> TimeInterval? in
+            if !entry.started { return entry.firstSeen + Self.startDelay }
+            return entry.lastSeen < now ? entry.lastSeen + Self.endDelay : nil
+        }
+        guard let deadline = deadlines.min() else { return }
+        let work = DispatchWorkItem { [weak self] in self?.rescan() }
+        followUp = work
+        queue.asyncAfter(deadline: .now() + max(deadline - now, 0), execute: work)
     }
 
     /// Compares only fields a consumer would act on, excluding confidence.

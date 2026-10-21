@@ -14,7 +14,11 @@ import { MixedAudioImpl, type MixedAudio, type MixedAudioOptions } from "./mixed
 export type { MixedAudio, MixedAudioOptions } from "./mixed-audio.js";
 
 export type Permission = "system-audio" | "microphone" | "accessibility";
-export type PermissionStatus = "granted" | "denied" | "unknown" | "not-required";
+/**
+ * Windows has no prompts: system audio and accessibility are always granted, and
+ * the microphone follows its privacy settings.
+ */
+export type PermissionStatus = "granted" | "denied" | "unknown";
 
 /**
  * Stable platform identifier; the values never change. No display labels are
@@ -172,7 +176,7 @@ export const permissions = {
   ): Promise<PermissionStatus> {
     signal?.throwIfAborted();
     const current = permissions.status(permission);
-    if (current === "granted" || current === "not-required") return current;
+    if (current === "granted") return current;
 
     const native = getNative();
     if (permission === "accessibility") {
@@ -212,8 +216,9 @@ export interface MeetingEvents {
 
 class Meetings extends EventEmitter {
   /** Point-in-time scan, highest confidence first. */
-  scan(): Meeting[] {
-    return getNative().scan().map(toMeeting);
+  async scan(): Promise<Meeting[]> {
+    const meetings: unknown[] = await getNative().scan();
+    return meetings.map(toMeeting);
   }
 
   /** Begin emitting `started` / `updated` / `ended`. */
@@ -262,7 +267,15 @@ export const meetings = new Meetings() as Meetings & {
  * its preallocated ring buffer drops samples and emits `drop`.
  */
 export type CaptureState = "recording" | "paused" | "stopped";
-export type CaptureHealth = "running" | "recovering" | "failed" | "stopped";
+
+/** Why a track was interrupted, after WASAPI's session disconnect reasons. */
+export type TrackInterruptionReason =
+  | "device-removed"
+  | "device-changed"
+  | "format-changed"
+  | "app-exited"
+  | "service-reset"
+  | "unknown";
 
 export interface AudioFormat {
   readonly sampleRate: number;
@@ -290,29 +303,34 @@ export interface AudioTrack extends Readable {
   readonly channels: number;
   /** Interleaved samples discarded because the bounded queue could not accept them. */
   readonly droppedSamples: number;
+  /** True while the source is lost and being reopened, like `MediaStreamTrack.muted`. */
+  readonly interrupted: boolean;
+  /** The microphone in use; undefined for system audio. */
+  readonly deviceName?: string;
   on(event: "data", listener: (chunk: AudioChunk) => void): this;
   on(event: "drop", listener: (droppedSamples: number) => void): this;
   /** Emitted before the first chunk in a newly negotiated device format. */
   on(event: "format", listener: (format: AudioFormat) => void): this;
+  /** The source stopped. Recording continues; it is retried until it returns. */
+  on(
+    event: "interrupted",
+    listener: (reason: TrackInterruptionReason, message: string) => void,
+  ): this;
+  on(event: "resumed", listener: () => void): this;
+  /** The microphone moved to another device. */
+  on(event: "devicechange", listener: (deviceName: string) => void): this;
   on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
+/** A lost source interrupts its track; the session records until stopped. */
 export interface CaptureSession extends EventEmitter {
   readonly systemAudio: AudioTrack;
   readonly microphone?: AudioTrack;
   readonly mixedAudio?: MixedAudio;
   readonly state: CaptureState;
-  /** Native device health; independent of pause/resume state. */
-  readonly health: CaptureHealth;
-  /** Set when automatic recovery exhausts its retries. */
-  readonly failure?: CaptureError;
   pauseRecording(): void;
   resumeRecording(): void;
   stopRecording(): Promise<void>;
-  on(event: "interrupted", listener: () => void): this;
-  on(event: "recovered", listener: () => void): this;
-  on(event: "failed", listener: (error: CaptureError) => void): this;
-  on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
 export interface MixedCaptureSession extends CaptureSession {
@@ -328,12 +346,15 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   #mixReady = true;
   #mixConsumer: ((chunk: AudioChunk) => void) | undefined;
   #finished = false;
+  #interrupted = false;
+  #deviceName?: string;
 
-  constructor(sampleRate: number, channels: number, microphone: boolean) {
+  constructor(sampleRate: number, channels: number, microphone: boolean, deviceName?: string) {
     super({ objectMode: false, highWaterMark: 1 << 20 });
     this.#sampleRate = sampleRate;
     this.#channels = channels;
     this.#microphone = microphone;
+    this.#deviceName = deviceName;
   }
 
   /** Required by Readable; data arrives from the native side, not on demand. */
@@ -366,6 +387,14 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     return this.#droppedSamples;
   }
 
+  get interrupted(): boolean {
+    return this.#interrupted;
+  }
+
+  get deviceName(): string | undefined {
+    return this.#deviceName;
+  }
+
   pushAudio(chunk: Buffer, info: NativeAudioInfo): void {
     if (info.dropped > 0) {
       this.#droppedSamples += info.dropped;
@@ -390,6 +419,20 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     }
   }
 
+  pushEvent(event: NativeTrackEvent): void {
+    if (this.#finished) return;
+    if (event.type === "interrupted") {
+      this.#interrupted = true;
+      this.emit("interrupted", event.reason, event.message);
+    } else if (event.type === "resumed") {
+      this.#interrupted = false;
+      this.emit("resumed");
+    } else {
+      this.#deviceName = event.deviceName;
+      this.emit("devicechange", event.deviceName);
+    }
+  }
+
   finish(): void {
     if (this.#finished) return;
     this.#finished = true;
@@ -399,9 +442,6 @@ class AudioTrackImpl extends Readable implements AudioTrack {
 
 class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   #state: CaptureState = "recording";
-  #health: CaptureHealth = "running";
-  #failure?: CaptureError;
-  readonly #healthTimer: NodeJS.Timeout;
   readonly #systemAudio: AudioTrackImpl;
   readonly #microphone?: AudioTrackImpl;
   readonly mixedAudio?: MixedAudioImpl;
@@ -422,9 +462,6 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
     this.#signal = signal;
     signal?.addEventListener("abort", this.#onAbort, { once: true });
     this.mixedAudio = mix ? new MixedAudioImpl(mix.sampleRate, systemAudio, microphone) : undefined;
-    // A recovery can last only 100 ms; a slower poll misses it.
-    this.#healthTimer = setInterval(() => this.#pollHealth(), 50);
-    this.#healthTimer.unref();
   }
 
   get systemAudio(): AudioTrackImpl {
@@ -437,14 +474,6 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
 
   get state(): CaptureState {
     return this.#state;
-  }
-
-  get health(): CaptureHealth {
-    return this.#health;
-  }
-
-  get failure(): CaptureError | undefined {
-    return this.#failure;
   }
 
   pauseRecording(): void {
@@ -467,41 +496,12 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
 
   async stopRecording(): Promise<void> {
     if (this.#state === "stopped") return;
-    clearInterval(this.#healthTimer);
     getNative().captureStop();
     this.#state = "stopped";
-    this.#health = "stopped";
-    this.#finishTracks();
-  }
-
-  #finishTracks(): void {
     this.#signal?.removeEventListener("abort", this.#onAbort);
     this.#systemAudio.finish();
     this.#microphone?.finish();
     this.mixedAudio?.finishCapture();
-  }
-
-  #pollHealth(): void {
-    if (this.#state === "stopped") return;
-    const native = getNative();
-    const health = native.captureHealthStatus() as CaptureHealth;
-    if (health === this.#health) return;
-
-    const previous = this.#health;
-    this.#health = health;
-    if (health === "recovering") {
-      this.emit("interrupted");
-    } else if (health === "running" && previous === "recovering") {
-      this.emit("recovered");
-    } else if (health === "failed") {
-      const failure = new CaptureError(native.lastError(), -7);
-      this.#failure = failure;
-      clearInterval(this.#healthTimer);
-      native.captureStop();
-      this.#state = "stopped";
-      this.#finishTracks();
-      this.emit("failed", failure);
-    }
   }
 }
 
@@ -513,6 +513,14 @@ interface NativeAudioInfo {
   frameCount: number;
   sampleRate: number;
   channels: number;
+}
+
+interface NativeTrackEvent {
+  track: "systemAudio" | "microphone";
+  type: "interrupted" | "resumed" | "devicechange";
+  reason: TrackInterruptionReason;
+  deviceName: string;
+  message: string;
 }
 
 function startCapture(
@@ -578,6 +586,14 @@ async function startCapture(
   const onMicrophone = (chunk: Buffer, info: NativeAudioInfo) => {
     receive("microphone", pendingMicrophone, chunk, info);
   };
+  const pendingEvents: NativeTrackEvent[] = [];
+  const onTrackEvent = (event: NativeTrackEvent) => {
+    if (!session) {
+      pendingEvents.push(event);
+      return;
+    }
+    session[event.track]?.pushEvent(event);
+  };
 
   try {
     const formats = await native.captureStart(
@@ -588,6 +604,7 @@ async function startCapture(
       },
       onSystemAudio,
       onMicrophone,
+      onTrackEvent,
     );
     if (options.signal?.aborted) {
       native.captureStop();
@@ -599,7 +616,12 @@ async function startCapture(
       false,
     );
     const microphone = formats.microphone
-      ? new AudioTrackImpl(formats.microphone.sampleRate, formats.microphone.channels, true)
+      ? new AudioTrackImpl(
+          formats.microphone.sampleRate,
+          formats.microphone.channels,
+          true,
+          formats.microphone.deviceName || undefined,
+        )
       : undefined;
     session = new CaptureSessionImpl(systemAudio, microphone, options.mix, options.signal);
     for (const { chunk, info } of pendingSystemAudio) {
@@ -608,6 +630,7 @@ async function startCapture(
     for (const { chunk, info } of pendingMicrophone) {
       microphone?.pushAudio(chunk, info);
     }
+    for (const event of pendingEvents) session[event.track]?.pushEvent(event);
     return session;
   } catch (error) {
     if (options.signal?.aborted) throw error;
@@ -620,6 +643,6 @@ async function startCapture(
 export const capture = {
   start: startCapture,
   get running(): boolean {
-    return captureStarting || getNative().captureHealthStatus() !== "stopped";
+    return captureStarting || getNative().isRunning();
   },
 };

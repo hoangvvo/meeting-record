@@ -5,7 +5,7 @@
 //! - `MREC_DURATION_SECONDS`: capture duration (default: 6).
 //! - `MREC_MONO=1`: request a mono system-audio track instead of stereo.
 //! - `MREC_MICROPHONE=1`: require a non-silent default-microphone track.
-//! - `MREC_EXPECT_RECOVERY=1`: require a recovering -> running transition.
+//! - `MREC_EXPECT_DEVICE_CHANGE=1`: require a microphone device change.
 //! - `MREC_MIN_PEAK`: minimum absolute sample peak (default: 0.0001).
 //! - `MREC_ALLOW_DROPS=1`: permit bounded-queue drops.
 //! - `MREC_EXPECT_FREQUENCIES`: comma-separated tones (Hz) the system track
@@ -32,8 +32,8 @@ use std::{
 };
 
 use meeting_record::{
-    capture, meetings, AudioChunk, CaptureHealth, CaptureOptions, CaptureState, CaptureTarget,
-    MeetingEvent, MicrophoneSource, MixedAudioOptions,
+    capture, meetings, AudioChunk, CaptureOptions, CaptureState, CaptureTarget, MeetingEvent,
+    MicrophoneSource, MixedAudioOptions, TrackEvent,
 };
 
 /// A timestamp further than this from the previous chunk's end is a gap.
@@ -385,12 +385,12 @@ fn find_meeting(platform: &str, pid: Option<u32>) -> Result<CaptureTarget, Box<d
         })
         .ok_or_else(|| format!("no recordable {platform} meeting was detected"))?;
 
-    // The watcher reports the current state as soon as it starts.
+    // The watcher reports a meeting once it has been seen for about 2 s.
     let (sender, receiver) = mpsc::channel();
     let watcher = meetings::watch(move |event, meeting| {
         let _ = sender.send((event, meeting.clone()));
     })?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(8);
     let watched = loop {
         let (event, candidate) = receiver
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -436,7 +436,7 @@ fn restart_cycles(
         if frames == 0 {
             return Err(format!("restart cycle {cycle}: no audio before stop").into());
         }
-        if recording.health() != CaptureHealth::Stopped || capture::running() {
+        if recording.state() != CaptureState::Stopped || capture::running() {
             return Err(format!("restart cycle {cycle}: capture still running after stop").into());
         }
         drop(recording);
@@ -477,7 +477,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .ok()
         .map_or(Ok(0), |value| value.parse())?;
     let include_microphone = enabled("MREC_MICROPHONE");
-    let expect_recovery = enabled("MREC_EXPECT_RECOVERY");
+    let expect_device_change = enabled("MREC_EXPECT_DEVICE_CHANGE");
     let expectations = Expectations {
         minimum_peak,
         allow_drops: enabled("MREC_ALLOW_DROPS"),
@@ -549,9 +549,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         let start = started + duration.saturating_sub(pause) / 2;
         (start, start + pause)
     });
-    let mut saw_recovering = false;
-    let mut saw_recovered = false;
-    let mut previous_health = recording.health();
+    let mut saw_device_change = false;
     while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
         if let Some((start, end)) = pause_window {
@@ -563,16 +561,15 @@ fn main() -> Result<(), Box<dyn StdError>> {
                 recording.pause();
             }
         }
-        let health = recording.health();
-        saw_recovering |= health == CaptureHealth::Recovering;
-        saw_recovered |=
-            previous_health == CaptureHealth::Recovering && health == CaptureHealth::Running;
-        previous_health = health;
-        if health == CaptureHealth::Failed {
-            break;
+        while let Some(event) = recording.try_recv_event() {
+            println!("track event: {event:?}");
+            saw_device_change |= matches!(event, TrackEvent::DeviceChanged { .. });
         }
     }
-    let terminal_failure = recording.failure();
+    let interrupted = recording.system_audio().is_interrupted()
+        || recording
+            .microphone()
+            .is_some_and(|track| track.is_interrupted());
     recording.stop();
 
     let system = system_worker.join().map_err(|_| "system reader panicked")?;
@@ -583,11 +580,11 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .map(|worker| worker.join().map_err(|_| "mixed audio reader panicked"))
         .transpose()?;
 
-    if let Some(error) = terminal_failure {
-        return Err(error.into());
+    if interrupted {
+        return Err("a track was still interrupted at the end".into());
     }
-    if expect_recovery && (!saw_recovering || !saw_recovered) {
-        return Err("expected a complete recovering -> running transition".into());
+    if expect_device_change && !saw_device_change {
+        return Err("expected a microphone device change".into());
     }
 
     let expected_duration = duration.saturating_sub(pause.unwrap_or_default());

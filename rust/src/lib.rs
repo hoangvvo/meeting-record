@@ -29,6 +29,7 @@ pub use mixed_audio::{MixedAudio, MixedAudioChunk, MixedAudioOptions};
 
 use std::{
     cell::UnsafeCell,
+    collections::VecDeque,
     error::Error as StdError,
     ffi::{c_char, c_int, c_void, CStr},
     fmt::{Display, Formatter, Result as FmtResult},
@@ -230,13 +231,13 @@ pub enum Permission {
     Accessibility,
 }
 
+/// Windows has no prompts: system audio and accessibility are always granted,
+/// and the microphone follows its privacy settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionStatus {
     Unknown,
     Granted,
     Denied,
-    /// The platform does not require an explicit prompt for this permission.
-    NotRequired,
 }
 
 impl From<i32> for PermissionStatus {
@@ -244,7 +245,6 @@ impl From<i32> for PermissionStatus {
         match value {
             1 => PermissionStatus::Granted,
             2 => PermissionStatus::Denied,
-            3 => PermissionStatus::NotRequired,
             _ => PermissionStatus::Unknown,
         }
     }
@@ -293,10 +293,7 @@ pub mod permissions {
             token.check()?;
         }
         let current = status(permission);
-        if matches!(
-            current,
-            PermissionStatus::Granted | PermissionStatus::NotRequired
-        ) {
+        if current == PermissionStatus::Granted {
             return Ok(current);
         }
         request(permission)?;
@@ -312,12 +309,7 @@ pub mod permissions {
                 thread::sleep(delay);
             }
             let current = status(permission);
-            if matches!(
-                current,
-                PermissionStatus::Granted
-                    | PermissionStatus::Denied
-                    | PermissionStatus::NotRequired
-            ) {
+            if current != PermissionStatus::Unknown {
                 return Ok(current);
             }
         }
@@ -619,25 +611,161 @@ pub enum CaptureState {
     Stopped,
 }
 
-/// Runtime health of the native audio devices, independent of pause/resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureHealth {
-    Stopped,
-    Running,
-    /// A device or format changed and the backend is retrying automatically.
-    Recovering,
-    /// Automatic recovery was exhausted. Stop or drop this session before
-    /// retrying.
-    Failed,
+pub enum Track {
+    SystemAudio,
+    Microphone,
 }
 
-fn capture_health() -> CaptureHealth {
-    match unsafe { sys::mrec_capture_health_status() } {
-        sys::MREC_CAPTURE_RUNNING => CaptureHealth::Running,
-        sys::MREC_CAPTURE_RECOVERING => CaptureHealth::Recovering,
-        sys::MREC_CAPTURE_FAILED => CaptureHealth::Failed,
-        _ => CaptureHealth::Stopped,
+/// Why a track was interrupted, after WASAPI's session disconnect reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptionReason {
+    /// Unplugged, disabled, or none left.
+    DeviceRemoved,
+    /// The device in use changed and did not reopen.
+    DeviceChanged,
+    FormatChanged,
+    /// Every captured app exited.
+    AppExited,
+    /// The audio service restarted.
+    ServiceReset,
+    Unknown,
+}
+
+impl From<i32> for InterruptionReason {
+    fn from(value: i32) -> Self {
+        match value {
+            sys::MREC_TRACK_REASON_DEVICE_REMOVED => InterruptionReason::DeviceRemoved,
+            sys::MREC_TRACK_REASON_DEVICE_CHANGED => InterruptionReason::DeviceChanged,
+            sys::MREC_TRACK_REASON_FORMAT_CHANGED => InterruptionReason::FormatChanged,
+            sys::MREC_TRACK_REASON_APP_EXITED => InterruptionReason::AppExited,
+            sys::MREC_TRACK_REASON_SERVICE_RESET => InterruptionReason::ServiceReset,
+            _ => InterruptionReason::Unknown,
+        }
     }
+}
+
+/// A source change. A lost source never stops the recording: its track is
+/// interrupted and retried until the source returns, like an
+/// `AVCaptureSession` interruption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackEvent {
+    /// No audio until `Resumed`; the track's timestamps show the gap.
+    Interrupted {
+        track: Track,
+        reason: InterruptionReason,
+        message: String,
+    },
+    Resumed {
+        track: Track,
+    },
+    /// The microphone moved to another device.
+    DeviceChanged {
+        track: Track,
+        device_name: String,
+    },
+}
+
+/// What a track's events have said so far.
+#[derive(Default)]
+struct TrackStatus {
+    interrupted: AtomicBool,
+    device_name: Mutex<Option<String>>,
+}
+
+/// Track events in arrival order, until capture stops.
+#[derive(Default)]
+struct EventQueue {
+    events: Mutex<VecDeque<TrackEvent>>,
+    ready: Condvar,
+    closed: AtomicBool,
+}
+
+impl EventQueue {
+    fn push(&self, event: TrackEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_back(event);
+        self.ready.notify_all();
+    }
+
+    fn close(&self) {
+        let _events = self
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.closed.store(true, Ordering::Release);
+        self.ready.notify_all();
+    }
+
+    fn recv(&self) -> Option<TrackEvent> {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            if let Some(event) = events.pop_front() {
+                return Some(event);
+            }
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            events = self
+                .ready
+                .wait(events)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    fn try_recv(&self) -> Option<TrackEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+    }
+}
+
+struct EventContext {
+    queue: Arc<EventQueue>,
+    system_audio: Arc<TrackStatus>,
+    microphone: Arc<TrackStatus>,
+}
+
+unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_data: *mut c_void) {
+    if event.is_null() || user_data.is_null() {
+        return;
+    }
+    let context = &*(user_data as *const EventContext);
+    let event = &*event;
+    let (track, status) = if event.track == sys::MREC_TRACK_MICROPHONE {
+        (Track::Microphone, &context.microphone)
+    } else {
+        (Track::SystemAudio, &context.system_audio)
+    };
+    let event = match event.kind {
+        sys::MREC_TRACK_INTERRUPTED => {
+            status.interrupted.store(true, Ordering::Release);
+            TrackEvent::Interrupted {
+                track,
+                reason: event.reason.into(),
+                message: c_string(&event.message),
+            }
+        }
+        sys::MREC_TRACK_RESUMED => {
+            status.interrupted.store(false, Ordering::Release);
+            TrackEvent::Resumed { track }
+        }
+        _ => {
+            let device_name = c_string(&event.device_name);
+            *status
+                .device_name
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(device_name.clone());
+            TrackEvent::DeviceChanged { track, device_name }
+        }
+    };
+    context.queue.push(event);
 }
 
 #[derive(Debug)]
@@ -839,10 +967,6 @@ impl TrackQueue {
             if closed {
                 return None;
             }
-            if capture_health() == CaptureHealth::Failed {
-                self.close();
-                continue;
-            }
             let guard = self
                 .wake_lock
                 .lock()
@@ -910,6 +1034,7 @@ pub struct AudioTrack {
     sample_rate: f64,
     channels: u32,
     queue: Arc<TrackQueue>,
+    status: Arc<TrackStatus>,
 }
 
 impl AudioTrack {
@@ -935,6 +1060,20 @@ impl AudioTrack {
     pub fn recv(&self) -> Option<AudioChunk> {
         self.queue.recv()
     }
+
+    /// True while the source is lost and being reopened.
+    pub fn is_interrupted(&self) -> bool {
+        self.status.interrupted.load(Ordering::Acquire)
+    }
+
+    /// The microphone in use; `None` for system audio.
+    pub fn device_name(&self) -> Option<String> {
+        self.status
+            .device_name
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
 }
 
 struct TrackCallbackContext {
@@ -946,6 +1085,7 @@ struct TrackCallbackContext {
 struct CaptureCallbackContexts {
     system_audio: Box<TrackCallbackContext>,
     microphone: Option<Box<TrackCallbackContext>>,
+    events: Box<EventContext>,
 }
 
 static CAPTURE_CONTEXTS: Mutex<Option<CaptureCallbackContexts>> = Mutex::new(None);
@@ -986,21 +1126,13 @@ struct CaptureControl {
     state: Arc<AtomicUsize>,
     queues: Vec<Arc<TrackQueue>>,
     raw_queues: Vec<Arc<TrackQueue>>,
+    events: Arc<EventQueue>,
     lifecycle: Mutex<()>,
-    failure: Mutex<Option<String>>,
 }
 
 impl CaptureControl {
     fn phase(&self) -> usize {
         self.state.load(Ordering::Acquire) & STATE_MASK
-    }
-
-    fn health(&self) -> CaptureHealth {
-        if self.phase() == STATE_STOPPED {
-            CaptureHealth::Stopped
-        } else {
-            capture_health()
-        }
     }
 
     fn pause(&self) {
@@ -1045,30 +1177,16 @@ impl CaptureControl {
         if state & STATE_MASK == STATE_STOPPED {
             return;
         }
-        if capture_health() == CaptureHealth::Failed {
-            *self
-                .failure
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(Self::failure_detail());
-        }
         self.state
             .store((state & !STATE_MASK) | STATE_STOPPED, Ordering::Release);
         unsafe { sys::mrec_stop() };
         for queue in &self.queues {
             queue.close();
         }
+        self.events.close();
         *CAPTURE_CONTEXTS
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
-    }
-
-    fn failure_detail() -> String {
-        let detail = last_error();
-        if detail.is_empty() || detail == "no error" {
-            "automatic capture recovery failed".to_owned()
-        } else {
-            detail
-        }
     }
 }
 
@@ -1093,9 +1211,6 @@ impl CaptureSession {
     }
 
     pub fn state(&self) -> CaptureState {
-        if self.health() == CaptureHealth::Failed {
-            return CaptureState::Stopped;
-        }
         match self.control.phase() {
             STATE_PAUSED => CaptureState::Paused,
             STATE_STOPPED => CaptureState::Stopped,
@@ -1103,22 +1218,14 @@ impl CaptureSession {
         }
     }
 
-    /// Native device health. Transient interruptions recover automatically.
-    pub fn health(&self) -> CaptureHealth {
-        self.control.health()
+    /// Waits for the next source change, or returns `None` once capture stops.
+    pub fn recv_event(&self) -> Option<TrackEvent> {
+        self.control.events.recv()
     }
 
-    /// The terminal recovery error, if automatic recovery was exhausted.
-    pub fn failure(&self) -> Option<Error> {
-        let mut failure = self
-            .control
-            .failure
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if failure.is_none() && self.health() == CaptureHealth::Failed {
-            *failure = Some(CaptureControl::failure_detail());
-        }
-        failure.clone().map(Error::Capture)
+    /// The next source change, if one is waiting.
+    pub fn try_recv_event(&self) -> Option<TrackEvent> {
+        self.control.events.try_recv()
     }
 
     /// Discard incoming frames until resume; paused time is omitted.
@@ -1163,6 +1270,9 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
     let state = Arc::new(AtomicUsize::new(STATE_RECORDING));
     let system_queue = Arc::new(TrackQueue::new());
     let microphone_queue = options.microphone.map(|_| Arc::new(TrackQueue::new()));
+    let events = Arc::new(EventQueue::default());
+    let system_status = Arc::new(TrackStatus::default());
+    let microphone_status = Arc::new(TrackStatus::default());
     let system_mix_queue = options.mix.map(|_| Arc::new(TrackQueue::new()));
     let microphone_mix_queue = options
         .mix
@@ -1189,6 +1299,11 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
                 state: Arc::clone(&state),
             })
         }),
+        events: Box::new(EventContext {
+            queue: Arc::clone(&events),
+            system_audio: Arc::clone(&system_status),
+            microphone: Arc::clone(&microphone_status),
+        }),
     };
     let system_context = (&mut *contexts.system_audio) as *mut TrackCallbackContext as *mut c_void;
     let microphone_context = contexts
@@ -1196,6 +1311,7 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
         .as_mut()
         .map(|context| (&mut **context) as *mut TrackCallbackContext as *mut c_void)
         .unwrap_or(ptr::null_mut());
+    let event_context = (&mut *contexts.events) as *mut EventContext as *mut c_void;
     let mut context_slot = CAPTURE_CONTEXTS
         .lock()
         .map_err(|error| Error::Internal(error.to_string()))?;
@@ -1212,8 +1328,8 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
             .chain(mix_queues.iter().cloned())
             .collect(),
         raw_queues,
+        events,
         lifecycle: Mutex::new(()),
-        failure: Mutex::new(None),
     });
     let result = (|| {
         let status = unsafe {
@@ -1237,15 +1353,14 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
                     .microphone
                     .map(|_| audio_trampoline as RawAudioCallback),
                 microphone_context,
+                Some(track_event_trampoline),
+                event_context,
             )
         };
         if let Some(token) = &options.cancellation {
             token.check()?;
         }
         check(status)?;
-        if capture_health() == CaptureHealth::Failed {
-            return Err(Error::Capture(last_error()));
-        }
         let mut system_sample_rate = 0.0;
         let mut system_channels = 0;
         check(unsafe { sys::mrec_current_format(&mut system_sample_rate, &mut system_channels) })?;
@@ -1253,10 +1368,20 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
             let mut sample_rate = 0.0;
             let mut channels = 0;
             check(unsafe { sys::mrec_current_microphone_format(&mut sample_rate, &mut channels) })?;
+            let mut name = [0 as c_char; 256];
+            if unsafe { sys::mrec_current_microphone_name(name.as_mut_ptr(), name.len()) }
+                == sys::MREC_OK
+            {
+                *microphone_status
+                    .device_name
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(c_string(&name));
+            }
             Some(AudioTrack {
                 sample_rate,
                 channels,
                 queue,
+                status: microphone_status,
             })
         } else {
             None
@@ -1273,6 +1398,7 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
                 sample_rate: system_sample_rate,
                 channels: system_channels,
                 queue: system_queue,
+                status: system_status,
             },
             microphone,
             mixed_audio,
@@ -1598,8 +1724,8 @@ mod capture_tests {
             state: Arc::clone(&state),
             queues: vec![Arc::clone(&queue)],
             raw_queues: vec![Arc::clone(&queue)],
+            events: Arc::default(),
             lifecycle: Mutex::new(()),
-            failure: Mutex::new(None),
         });
         let token = CancellationToken::new();
         token.register(&control).unwrap();

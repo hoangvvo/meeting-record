@@ -147,7 +147,6 @@ fn label(status: PermissionStatus) -> &'static str {
     match status {
         PermissionStatus::Granted => "granted",
         PermissionStatus::Denied => "denied",
-        PermissionStatus::NotRequired => "not-required",
         PermissionStatus::Unknown => "unknown",
     }
 }
@@ -161,10 +160,7 @@ fn permission_status(name: String) -> &'static str {
 async fn request_permission(name: String) -> &'static str {
     let permission = permission_of(&name);
     let current = permissions::status(permission);
-    if matches!(
-        current,
-        PermissionStatus::Granted | PermissionStatus::NotRequired
-    ) {
+    if current == PermissionStatus::Granted {
         return label(current);
     }
 

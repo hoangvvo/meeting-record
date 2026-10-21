@@ -5,7 +5,7 @@
 // - MREC_DURATION_SECONDS: capture duration (default: 6).
 // - MREC_MONO=1: request a mono system-audio track instead of stereo.
 // - MREC_MICROPHONE=1: require a non-silent default-microphone track.
-// - MREC_EXPECT_RECOVERY=1: require an interrupted -> recovered transition.
+// - MREC_EXPECT_DEVICE_CHANGE=1: require a microphone device change.
 // - MREC_MIN_PEAK: minimum absolute sample peak (default: 0.0001).
 // - MREC_ALLOW_DROPS=1: permit bounded-queue drops.
 // - MREC_EXPECT_FREQUENCIES: comma-separated tones (Hz) the system track must
@@ -309,7 +309,7 @@ const ended = (streams) =>
 
 /** The app of a meeting that both a scan and the watcher report as recordable. */
 async function findMeeting(platform, pid) {
-  const found = MeetingRecord.meetings.scan();
+  const found = await MeetingRecord.meetings.scan();
   for (const meeting of found) console.log(`scan: ${JSON.stringify(meeting)}`);
   const meeting = found.find(
     (candidate) =>
@@ -319,9 +319,9 @@ async function findMeeting(platform, pid) {
   );
   if (!meeting) throw new Error(`no recordable ${platform} meeting was detected`);
 
-  // The watcher reports the current state as soon as it starts.
+  // The watcher reports a meeting once it has been seen for about 2 s.
   const reported = (async () => {
-    const events = on(MeetingRecord.meetings, "started", { signal: AbortSignal.timeout(5000) });
+    const events = on(MeetingRecord.meetings, "started", { signal: AbortSignal.timeout(8000) });
     for await (const [candidate] of events) {
       if (candidate.pid === meeting.pid) return candidate;
     }
@@ -358,7 +358,7 @@ async function restartCycles(target, options, cycles) {
     await recording.stopRecording();
     await finished;
     if (frames === 0) throw new Error(`restart cycle ${cycle}: no audio before stop`);
-    if (recording.health !== "stopped" || MeetingRecord.capture.running) {
+    if (recording.state !== "stopped" || MeetingRecord.capture.running) {
       throw new Error(`restart cycle ${cycle}: capture still running after stop`);
     }
   }
@@ -378,7 +378,7 @@ async function main() {
       ? { type: "system" }
       : { type: "process", pid: targetPid };
   const includeMicrophone = enabled("MREC_MICROPHONE");
-  const expectRecovery = enabled("MREC_EXPECT_RECOVERY");
+  const expectDeviceChange = enabled("MREC_EXPECT_DEVICE_CHANGE");
   const expectations = {
     minimumPeak: number("MREC_MIN_PEAK", 0.0001),
     allowDrops: enabled("MREC_ALLOW_DROPS"),
@@ -418,10 +418,20 @@ async function main() {
       (level) => (mixed.peakLevel = Math.max(mixed.peakLevel, level)),
     );
   }
-  let sawInterrupted = false;
-  let sawRecovered = false;
-  recording.on("interrupted", () => (sawInterrupted = true));
-  recording.on("recovered", () => (sawRecovered = true));
+  let sawDeviceChange = false;
+  for (const [name, track] of [
+    ["system", recording.systemAudio],
+    ["microphone", recording.microphone],
+  ]) {
+    track?.on("interrupted", (reason, message) =>
+      console.log(`${name} interrupted (${reason}): ${message}`),
+    );
+    track?.on("resumed", () => console.log(`${name} resumed`));
+    track?.on("devicechange", (deviceName) => {
+      console.log(`${name} device: ${deviceName}`);
+      sawDeviceChange = true;
+    });
+  }
   const finished = ended([recording.systemAudio, recording.microphone, recording.mixedAudio]);
 
   const started = performance.now();
@@ -445,15 +455,16 @@ async function main() {
         recording.pauseRecording();
       }
     }
-    if (recording.health === "failed") break;
   }
-  const terminalFailure = recording.failure;
+  const interrupted = [recording.systemAudio, recording.microphone].filter(
+    (track) => track?.interrupted,
+  );
   await recording.stopRecording();
   await finished;
 
-  if (terminalFailure) throw terminalFailure;
-  if (expectRecovery && (!sawInterrupted || !sawRecovered)) {
-    throw new Error("expected a complete interrupted -> recovered transition");
+  if (interrupted.length > 0) throw new Error("a track was still interrupted at the end");
+  if (expectDeviceChange && !sawDeviceChange) {
+    throw new Error("expected a microphone device change");
   }
 
   const expectedSeconds = durationSeconds - (pauseSeconds ?? 0);

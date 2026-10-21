@@ -21,16 +21,6 @@ struct DetectedMeeting {
 /// Accessibility only adds a title or URL, so full confidence is reachable without
 /// it.
 enum MeetingDetector {
-    /// Confidence weights. A known app being open is not a meeting on its own.
-    private enum Score {
-        static let knownApp: Int32 = 40
-        static let playingAudio: Int32 = 30
-        static let usingMic: Int32 = 25
-        static let recognisedURL: Int32 = 5
-        /// Below this, callers should not start recording.
-        static let recordThreshold: Int32 = 70
-    }
-
     static func scan() -> [DetectedMeeting] {
         let processes = AudioProcessRegistry.all().filter {
             $0.pid != getpid() && AudioProcessRegistry.isAlive($0.pid)
@@ -39,7 +29,7 @@ enum MeetingDetector {
         // Group by application. Helper processes carry the parent's bundle id
         // prefix.
         var byPlatform: [MeetingPlatform: [AudioProcess]] = [:]
-        var browserProcesses: [(BrowserApp, AudioProcess)] = []
+        var browserProcesses: [(String, AudioProcess)] = []
 
         for process in processes {
             if let platform = MeetingCatalog.nativePlatform(forBundleID: process.bundleID) {
@@ -67,12 +57,11 @@ enum MeetingDetector {
         let playing = processes.filter(\.isRunningOutput)
         let listening = processes.filter(\.isRunningInput)
 
-        var confidence = Score.knownApp
-        if !playing.isEmpty { confidence += Score.playingAudio }
-        if !listening.isEmpty { confidence += Score.usingMic }
-
         // An open app with no audio is not reported.
-        guard !playing.isEmpty || !listening.isEmpty else { return nil }
+        let confidence = MeetingCatalog.confidence(
+            isBrowser: false, playingAudio: !playing.isEmpty, usingMic: !listening.isEmpty,
+            recognised: nil)
+        guard confidence > 0 else { return nil }
 
         // `pid` is the user-visible app; `audioPIDs` is what carries the audio.
         let owner = ownerPID(for: processes) ?? processes[0].pid
@@ -89,7 +78,7 @@ enum MeetingDetector {
             url: "",
             isUsingMic: !listening.isEmpty,
             isPlayingAudio: !playing.isEmpty,
-            confidence: min(confidence, 100)
+            confidence: confidence
         )
     }
 
@@ -99,32 +88,30 @@ enum MeetingDetector {
     /// browser counts as a meeting only when the URL or title names a known service,
     /// or the microphone is live.
     private static func buildBrowser(
-        _ entries: [(BrowserApp, AudioProcess)]) -> [DetectedMeeting] {
-        var grouped: [String: (browser: BrowserApp, processes: [AudioProcess])] = [:]
+        _ entries: [(String, AudioProcess)]) -> [DetectedMeeting] {
+        // Keyed by the browser's bundle-id prefix, which its helpers share.
+        var grouped: [String: [AudioProcess]] = [:]
         for (browser, process) in entries {
-            grouped[browser.bundlePrefix, default: (browser, [])].processes.append(process)
+            grouped[browser, default: []].append(process)
         }
 
         var meetings: [DetectedMeeting] = []
-        for (_, entry) in grouped {
-            let playing = entry.processes.filter(\.isRunningOutput)
-            let listening = entry.processes.filter(\.isRunningInput)
+        for processes in grouped.values {
+            let playing = processes.filter(\.isRunningOutput)
+            let listening = processes.filter(\.isRunningInput)
             guard !playing.isEmpty || !listening.isEmpty else { continue }
 
-            let owner = ownerPID(for: entry.processes) ?? entry.processes[0].pid
+            let owner = ownerPID(for: processes) ?? processes[0].pid
             let url = Accessibility.browserURL(pid: owner) ?? ""
-            let title = Accessibility.focusedWindowTitle(pid: owner) ?? ""
+            let page = MeetingCatalog.platform(
+                forTitle: Accessibility.focusedWindowTitle(pid: owner) ?? "")
+            let matched = MeetingCatalog.platform(forURL: url) ?? page.platform
 
-            let matched = MeetingCatalog.platform(forURLOrTitle: url)
-                ?? MeetingCatalog.platform(forURLOrTitle: title)
-
-            // Without a URL match, the microphone is the only usable signal.
-            guard matched != nil || !listening.isEmpty else { continue }
-
-            var confidence = Score.knownApp
-            if !playing.isEmpty { confidence += Score.playingAudio }
-            if !listening.isEmpty { confidence += Score.usingMic }
-            if matched != nil { confidence += Score.recognisedURL }
+            // Without a recognised meeting, the microphone is the only usable signal.
+            let confidence = MeetingCatalog.confidence(
+                isBrowser: true, playingAudio: !playing.isEmpty, usingMic: !listening.isEmpty,
+                recognised: matched)
+            guard confidence > 0 else { continue }
 
             let audioPIDs = Array(Set(playing.map(\.pid) + listening.map(\.pid))).sorted()
 
@@ -132,12 +119,12 @@ enum MeetingDetector {
                 platform: matched ?? .genericBrowser,
                 pid: owner,
                 audioPIDs: Array(audioPIDs.prefix(16)),
-                appName: processName(of: owner, in: entry.processes),
-                title: title,
+                appName: processName(of: owner, in: processes),
+                title: page.title,
                 url: url,
                 isUsingMic: !listening.isEmpty,
                 isPlayingAudio: !playing.isEmpty,
-                confidence: min(confidence, 100)
+                confidence: confidence
             ))
         }
         return meetings
@@ -178,8 +165,6 @@ enum MeetingDetector {
         }
         return processes.first?.name ?? ""
     }
-
-    static var recordThreshold: Int32 { Score.recordThreshold }
 }
 
 enum AudioAppRegistry {

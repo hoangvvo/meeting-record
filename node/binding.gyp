@@ -35,10 +35,13 @@
         }],
         ["OS=='win'", {
           "sources": [
+            "../native/common/meeting-catalog.c",
+            "../native/common/tracks.c",
             "../native/windows/ProcessLoopback.cpp",
             "../native/windows/MeetingDetector.cpp"
           ],
-          "libraries": ["ole32.lib", "oleaut32.lib", "mmdevapi.lib", "user32.lib"],
+          "include_dirs": ["../native/common"],
+          "libraries": ["advapi32.lib", "ole32.lib", "oleaut32.lib", "mmdevapi.lib", "user32.lib"],
           "msvs_settings": {
             "VCCLCompilerTool": { "ExceptionHandling": 1, "AdditionalOptions": ["/std:c++17"] }
           }

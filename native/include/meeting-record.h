@@ -14,13 +14,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "meeting-record-events.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum {
   MREC_OK = 0,
-  MREC_ERR_UNSUPPORTED_OS = -1, /* macOS < 14.2 / Windows < 10 20348 */
+  MREC_ERR_UNSUPPORTED_OS = -1, /* macOS < 14.2 / Windows < 10 19041 */
   MREC_ERR_PERMISSION = -2,     /* TCC grant missing, or Windows privacy denies it */
   MREC_ERR_ALREADY_RUNNING = -3,
   MREC_ERR_NOT_RUNNING = -4,
@@ -36,11 +38,10 @@ typedef enum {
   MREC_PERM_UNKNOWN = 0,
   MREC_PERM_GRANTED = 1,
   MREC_PERM_DENIED = 2,
-  MREC_PERM_NOT_REQUIRED = 3, /* Windows: loopback needs no TCC equivalent */
 } mrec_permission;
 
 /*
- * macOS: whether this app holds kTCCServiceAudioCapture.
+ * macOS: whether this app holds kTCCServiceAudioCapture. Windows: always GRANTED.
  *
  * No preflight API exists, so this starts at most one throwaway tap probe. A
  * status call waits briefly for that probe and otherwise returns UNKNOWN; the
@@ -63,9 +64,8 @@ mrec_permission mrec_audio_permission_status(void);
 mrec_status mrec_request_audio_permission(void);
 
 /*
- * macOS microphone permission. Windows currently reports NOT_REQUIRED; when its
- * privacy settings deny desktop apps the microphone, starting capture fails with
- * MREC_ERR_PERMISSION instead.
+ * macOS: the TCC microphone grant. Windows: Settings > Privacy & security >
+ * Microphone for this app; there is no prompt, so a request changes nothing.
  */
 mrec_permission mrec_microphone_permission_status(void);
 mrec_status mrec_request_microphone_permission(void);
@@ -131,6 +131,10 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
                          int32_t mute_captured_output, mrec_audio_callback cb,
                          void *user_data);
 
+/*
+ * DEFAULT is the user's microphone. Windows: the one the captured apps record
+ * from, else the default communications microphone. macOS: the default input.
+ */
 typedef enum {
   MREC_MICROPHONE_NONE = 0,
   MREC_MICROPHONE_DEFAULT = 1,
@@ -139,12 +143,14 @@ typedef enum {
 /*
  * Extended entry point used by the Rust and Node bindings. System audio and the
  * microphone remain separate tracks and may negotiate different formats.
+ * `event_cb`, which may be NULL, receives track interruptions and device changes.
  */
 int32_t mrec_start_tracks_raw(
     const uint32_t *pids, size_t pid_count, int32_t global_mixdown, int32_t mono,
     int32_t mute_captured_output, int32_t microphone,
     mrec_audio_callback system_audio_cb, void *system_audio_user_data,
-    mrec_audio_callback microphone_cb, void *microphone_user_data);
+    mrec_audio_callback microphone_cb, void *microphone_user_data,
+    mrec_track_event_callback event_cb, void *event_user_data);
 
 static inline void mrec_config_defaults(mrec_config *cfg) {
   if (!cfg) return;
@@ -170,20 +176,8 @@ static inline mrec_status mrec_start(const mrec_config *cfg,
 mrec_status mrec_stop(void);
 int32_t mrec_is_running(void);
 
-/*
- * Runtime health is separate from the caller-controlled recording state. A
- * backend may briefly recover after an audio device or format change. FAILED is
- * terminal for the current session: read mrec_last_error(), then call
- * mrec_stop() to release the session before starting another one.
- */
-typedef enum {
-  MREC_CAPTURE_STOPPED = 0,
-  MREC_CAPTURE_RUNNING = 1,
-  MREC_CAPTURE_RECOVERING = 2,
-  MREC_CAPTURE_FAILED = 3,
-} mrec_capture_health;
-
-mrec_capture_health mrec_capture_health_status(void);
+/* The microphone in use, which may change mid-session; NOT_RUNNING without one. */
+mrec_status mrec_current_microphone_name(char *name, size_t capacity);
 
 /* Initial negotiated format, valid once running. A recovery may renegotiate it. */
 mrec_status mrec_current_format(double *sample_rate, uint32_t *channels);

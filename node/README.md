@@ -33,7 +33,7 @@ MeetingRecord.meetings.on("ended", (meeting) => {
 MeetingRecord.meetings.watch();
 
 // Or scan for active meetings at any time.
-const meeting = MeetingRecord.meetings.scan().find((item) => item.shouldRecord);
+const meeting = (await MeetingRecord.meetings.scan()).find((item) => item.shouldRecord);
 if (!meeting) throw new Error("no active meeting");
 
 // Start recording the meeting process and its audio helpers.
@@ -43,9 +43,10 @@ const recording = await MeetingRecord.capture.start(
   { microphone: "default" },
 );
 
-recording.on("interrupted", () => console.warn("audio device changed; recovering"));
-recording.on("recovered", () => console.log("capture recovered"));
-recording.on("failed", (error) => console.error("capture failed", error));
+// A lost source never stops the recording; its track resumes when it returns.
+recording.systemAudio.on("interrupted", (reason, message) => console.warn(reason, message));
+recording.systemAudio.on("resumed", () => console.log("system audio resumed"));
+recording.microphone?.on("devicechange", (deviceName) => console.log("now on", deviceName));
 
 // Process captured application or system audio.
 recording.systemAudio.on("data", (chunk) => {
@@ -90,6 +91,7 @@ recording.mixedAudio.setMicrophoneMuted(true);
 - After stopping, await `end` to consume the final tail.
 - No echo cancellation.
 - `AbortSignal` in `capture.start()` stops capture; in `permissions.request()` it cancels the wait.
+- A lost source pauses only its own track in the mix.
 
 ## License
 

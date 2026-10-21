@@ -1,5 +1,5 @@
 export type PermissionName = "system-audio" | "microphone" | "accessibility";
-export type PermissionStatus = "granted" | "denied" | "unknown" | "not-required";
+export type PermissionStatus = "granted" | "denied" | "unknown";
 export type MeetingEventKind = "started" | "updated" | "ended";
 
 /** `id` is opaque: the backend holds the real meeting object and looks it up

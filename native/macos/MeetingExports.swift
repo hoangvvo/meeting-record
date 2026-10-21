@@ -109,7 +109,7 @@ private func fill(_ base: UnsafeMutableRawPointer, with meeting: DetectedMeeting
         .assumingMemoryBound(to: Int32.self).pointee = meeting.confidence
     base.advanced(by: Layout.shouldRecord)
         .assumingMemoryBound(to: Int32.self).pointee =
-        meeting.confidence >= MeetingDetector.recordThreshold ? 1 : 0
+        meeting.confidence >= MeetingCatalog.recordThreshold ? 1 : 0
     base.advanced(by: Layout.detectedAt)
         .assumingMemoryBound(to: UInt64.self).pointee = hostTimeNanoseconds()
 }
@@ -192,34 +192,12 @@ public func mrec_request_accessibility_permission() -> Int32 {
     return 0
 }
 
-/// Allocated once and never freed: the C contract is a borrowed pointer with no
-/// matching free, so per-call allocation would leak.
-private let allPlatforms: [MeetingPlatform] = [
-    .unknown, .zoom, .teams, .meet, .webex, .slack, .discord, .genericBrowser,
-]
-
-private func cachedStrings(_ value: @escaping (MeetingPlatform) -> String)
-    -> [Int32: UnsafePointer<CChar>] {
-    var table: [Int32: UnsafePointer<CChar>] = [:]
-    for platform in allPlatforms {
-        table[platform.rawValue] = UnsafePointer(strdup(value(platform)))
-    }
-    return table
-}
-
-private let platformIDs = cachedStrings { $0.id }
-
-@_cdecl("mrec_platform_id")
-public func mrec_platform_id(_ platform: Int32) -> UnsafePointer<CChar>? {
-    platformIDs[platform] ?? platformIDs[MeetingPlatform.unknown.rawValue]
-}
-
 
 // MARK: - Recording a detected meeting
 
 /// Start capture for a detected meeting.
 ///
-/// Re-scans and prefers the current pids for the same platform, since the caller's
+/// Re-scans and prefers the current pids for the same meeting, since the caller's
 /// list may be stale. The passed-in list is the fallback.
 @_cdecl("mrec_start_meeting")
 public func mrec_start_meeting(_ meeting: UnsafeRawPointer?,
@@ -229,9 +207,14 @@ public func mrec_start_meeting(_ meeting: UnsafeRawPointer?,
 
     let platform = meeting.advanced(by: Layout.platform)
         .assumingMemoryBound(to: Int32.self).pointee
+    let pid = meeting.advanced(by: Layout.pid)
+        .assumingMemoryBound(to: UInt32.self).pointee
 
+    // Two browsers can both host Meet, so the pid identifies the meeting first.
+    let current = MeetingDetector.scan()
     var pids: [UInt32] = []
-    if let fresh = MeetingDetector.scan().first(where: { $0.platform.rawValue == platform }) {
+    if let fresh = current.first(where: { UInt32(bitPattern: $0.pid) == pid })
+        ?? current.first(where: { $0.platform.rawValue == platform }) {
         pids = fresh.audioPIDs.map(UInt32.init)
     } else {
         let count = min(meeting.advanced(by: Layout.audioPIDCount)

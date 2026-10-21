@@ -112,7 +112,6 @@ const PERMISSION_TEXT: Record<
   unknown: "ask",
   granted: "granted",
   denied: "denied",
-  "not-required": "granted",
 };
 
 // a want rather than the checkbox state: granting the permission later re-arms
@@ -121,20 +120,19 @@ let micWanted = true;
 let micStatus: PermissionStatus = "unknown";
 
 function syncMicrophone(): void {
-  const allowed = micStatus === "granted" || micStatus === "not-required";
+  const allowed = micStatus === "granted";
   ui.microphone.checked = allowed && micWanted;
   ui.microphone.disabled = !allowed || state !== "idle";
   ui.microphoneToggle.dataset.allowed = String(allowed);
 }
 
 function showPermission(permission: PermissionUi, status: PermissionStatus): void {
-  permission.notice.hidden = status === "not-required";
   permission.notice.dataset.status = status;
   permission.text.textContent = permission[PERMISSION_TEXT[status]];
   // re-asking after a refusal never prompts again, so only System Settings helps
   permission.button.hidden = status !== "unknown";
   permission.button.disabled = false;
-  ui.notices.hidden = PERMISSIONS.every((entry) => entry.notice.hidden);
+  ui.notices.hidden = false;
   if (permission.name === "microphone") {
     micStatus = status;
     syncMicrophone();

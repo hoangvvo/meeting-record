@@ -30,7 +30,7 @@ final class TapCapture {
 
     private let stateBox: CaptureStateBox
     let identifier = UUID()
-    private let onConfigurationChange: (UUID, String) -> Void
+    private let onConfigurationChange: (UUID, mrec_track_reason, String) -> Void
     private let monitorQueue = DispatchQueue(label: "meetingrecord.capture-monitor")
     private var monitors: [PropertyMonitor] = []
 
@@ -41,7 +41,8 @@ final class TapCapture {
     }
 
     init(stateBox: CaptureStateBox,
-         onConfigurationChange: @escaping (UUID, String) -> Void = { _, _ in }) {
+         onConfigurationChange: @escaping (UUID, mrec_track_reason, String) -> Void =
+             { _, _, _ in }) {
         self.stateBox = stateBox
         self.onConfigurationChange = onConfigurationChange
     }
@@ -194,26 +195,31 @@ final class TapCapture {
     private func installMonitors() {
         addMonitor(object: HAL.system,
                    address: HAL.address(kAudioHardwarePropertyDefaultOutputDevice),
+                   cause: MREC_TRACK_REASON_DEVICE_CHANGED,
                    reason: "default output device changed")
         addMonitor(object: aggregateID,
                    address: HAL.address(kAudioDevicePropertyDeviceIsAlive),
+                   cause: MREC_TRACK_REASON_DEVICE_REMOVED,
                    reason: "capture aggregate device changed")
         addMonitor(object: aggregateID,
                    address: HAL.address(kAudioDevicePropertyNominalSampleRate),
+                   cause: MREC_TRACK_REASON_FORMAT_CHANGED,
                    reason: "capture sample rate changed")
         addMonitor(object: tapID,
                    address: HAL.address(kAudioTapPropertyFormat),
+                   cause: MREC_TRACK_REASON_FORMAT_CHANGED,
                    reason: "process tap format changed")
     }
 
     private func addMonitor(object: AudioObjectID,
                             address initialAddress: AudioObjectPropertyAddress,
+                            cause: mrec_track_reason,
                             reason: String) {
         guard object != kAudioObjectUnknown else { return }
         var address = initialAddress
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
-            self.onConfigurationChange(self.identifier, reason)
+            self.onConfigurationChange(self.identifier, cause, reason)
         }
         if AudioObjectAddPropertyListenerBlock(object, &address, monitorQueue, block) == noErr {
             monitors.append(PropertyMonitor(object: object, address: address, block: block))

@@ -33,36 +33,54 @@ clang++ -std=c++17 -Wall -Wextra -Werror \
   -o "$BUILD/audio_app_process_test" "$ROOT/native/tests/audio_app_process_test.cpp"
 "$BUILD/audio_app_process_test"
 
-# The Windows catalog and stream mixer are portable C++.
-echo "==> Windows meeting catalog tests"
-clang++ -std=c++17 -Wall -Wextra -Werror -I"$ROOT/native/include" \
-  -o "$BUILD/meeting_catalog_test" "$ROOT/native/tests/meeting_catalog_test.cpp"
+echo "==> meeting catalog tests"
+clang -std=c11 -Wall -Wextra -Werror -I"$ROOT/native/include" -I"$ROOT/native/common" \
+  -o "$BUILD/meeting_catalog_test" "$ROOT/native/tests/meeting_catalog_test.c" \
+  "$ROOT/native/common/meeting-catalog.c"
 "$BUILD/meeting_catalog_test"
 
+echo "==> track recovery tests"
+clang -std=c11 -Wall -Wextra -Werror -I"$ROOT/native/include" -I"$ROOT/native/common" \
+  -o "$BUILD/tracks_test" "$ROOT/native/tests/tracks_test.c" "$ROOT/native/common/tracks.c"
+"$BUILD/tracks_test"
+
+# The Windows stream mixer is portable C++.
 echo "==> Windows timeline mixer tests"
 clang++ -std=c++17 -Wall -Wextra -Werror -I"$ROOT/native/include" \
   -o "$BUILD/timeline_mixer_test" "$ROOT/native/tests/timeline_mixer_test.cpp"
 "$BUILD/timeline_mixer_test"
+
+# Rules shared with the Windows backend; Swift imports them through Bridging.h.
+BRIDGING_HEADER="$ROOT/native/macos/Bridging.h"
+for source in meeting-catalog tracks; do
+  clang -O2 -std=c11 -Wall -Wextra -Werror -target "$SWIFT_TARGET" -I"$ROOT/native/include" \
+    -c -o "$BUILD/$source.o" "$ROOT/native/common/$source.c"
+done
 
 echo "==> swiftc: libmeetingrecord_macos.a"
 swiftc -O \
   -parse-as-library \
   -emit-library -static \
   -target "$SWIFT_TARGET" \
+  -import-objc-header "$BRIDGING_HEADER" \
   -o "$BUILD/libmeetingrecord_macos.a" \
   "$ROOT"/native/macos/*.swift
+ar rs "$BUILD/libmeetingrecord_macos.a" "$BUILD/meeting-catalog.o" "$BUILD/tracks.o"
 
 echo "    $(du -h "$BUILD/libmeetingrecord_macos.a" | cut -f1) $BUILD/libmeetingrecord_macos.a"
 
 # Detection needs no entitlements or bundle.
 echo "==> classification tests"
-swiftc -O -target "$SWIFT_TARGET" -o "$BUILD/catalog_test" \
+swiftc -O -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
+  -o "$BUILD/catalog_test" \
   "$ROOT/native/tests/catalog_test.swift" \
-  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses}.swift
+  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses}.swift \
+  "$BUILD/meeting-catalog.o"
 "$BUILD/catalog_test" | tail -2
 
 echo "==> tap description tests"
-swiftc -O -parse-as-library -target "$SWIFT_TARGET" -o "$BUILD/tap_description_test" \
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
+  -o "$BUILD/tap_description_test" \
   "$ROOT/native/tests/tap_description_test.swift" \
   "$ROOT/native/macos/"{TapCapture,CaptureState,AudioProcesses}.swift
 "$BUILD/tap_description_test" | tail -2

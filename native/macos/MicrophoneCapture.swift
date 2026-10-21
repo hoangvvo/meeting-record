@@ -1,5 +1,6 @@
 import AVFAudio
 import AVFoundation
+import CoreAudio
 import Foundation
 
 final class MicrophoneCapture {
@@ -12,15 +13,24 @@ final class MicrophoneCapture {
 
     private let stateBox: CaptureStateBox
     let identifier = UUID()
-    private let onConfigurationChange: (UUID, String) -> Void
+    private let onConfigurationChange: (UUID, mrec_track_reason, String) -> Void
     private var engine: AVAudioEngine?
     private var tapped = false
     private var configurationObserver: NSObjectProtocol?
 
     init(stateBox: CaptureStateBox,
-         onConfigurationChange: @escaping (UUID, String) -> Void = { _, _ in }) {
+         onConfigurationChange: @escaping (UUID, mrec_track_reason, String) -> Void =
+             { _, _, _ in }) {
         self.stateBox = stateBox
         self.onConfigurationChange = onConfigurationChange
+    }
+
+    /// The name of the default input device, which the engine records from.
+    static func defaultInputName() -> String? {
+        let device = HAL.value(HAL.system, kAudioHardwarePropertyDefaultInputDevice,
+                               default: AudioObjectID(kAudioObjectUnknown))
+        guard device != kAudioObjectUnknown else { return nil }
+        return HAL.string(device, kAudioObjectPropertyName)
     }
 
     func start() throws {
@@ -61,7 +71,8 @@ final class MicrophoneCapture {
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
-            self.onConfigurationChange(self.identifier, "default input device changed")
+            self.onConfigurationChange(self.identifier, MREC_TRACK_REASON_DEVICE_CHANGED,
+                                       "default input device changed")
         }
     }
 

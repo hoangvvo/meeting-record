@@ -11,7 +11,7 @@
  */
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
-#include "MeetingCatalog.h"
+#include "meeting-catalog.h"
 
 #include <audiopolicy.h>
 #include <mmdeviceapi.h>
@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -36,18 +35,26 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-using meeting_record::IsBrowser;
-using meeting_record::NativePlatformFor;
-using meeting_record::PlatformForText;
-using meeting_record::PlatformForTitle;
-using meeting_record::ToLower;
+mrec_platform AppPlatform(const std::string &executable) {
+  return static_cast<mrec_platform>(mrec_catalog_executable_platform(executable.c_str()));
+}
 
-/* Must match the macOS backend. */
-constexpr int32_t kScoreKnownApp = 40;
-constexpr int32_t kScorePlayingAudio = 30;
-constexpr int32_t kScoreUsingMic = 25;
-constexpr int32_t kScoreRecognisedUrl = 5;
-constexpr int32_t kRecordThreshold = 70;
+bool IsBrowser(const std::string &executable) {
+  return mrec_catalog_executable_browser(executable.c_str()) != nullptr;
+}
+
+mrec_platform UrlPlatform(const std::string &url) {
+  return static_cast<mrec_platform>(mrec_catalog_url_platform(url.c_str()));
+}
+
+/* The meeting `title` names; narrows it to the page title. */
+mrec_platform TitlePlatform(std::string &title) {
+  size_t length = title.size();
+  const auto platform =
+      static_cast<mrec_platform>(mrec_catalog_title_platform(title.c_str(), &length));
+  title.resize(length);
+  return platform;
+}
 
 /* UI Automation bounds, as for macOS Accessibility: each call is synchronous IPC. */
 constexpr DWORD kAccessibilityTimeoutMs = 250;
@@ -166,7 +173,6 @@ struct VisibleWindow {
   HWND handle = nullptr;
   DWORD pid = 0;
   std::string executable;
-  std::string executable_lower;
   std::string title;
   uint64_t area = 0;
 };
@@ -199,7 +205,7 @@ BOOL CALLBACK CollectWindowProc(HWND window, LPARAM param) {
            static_cast<uint64_t>(rect.bottom - rect.top);
   }
   windows->push_back(
-      {window, pid, executable, ToLower(executable), std::move(title), area});
+      {window, pid, executable, std::move(title), area});
   return TRUE;
 }
 
@@ -368,8 +374,8 @@ BrowserMeeting FindBrowserMeeting(const std::vector<VisibleWindow> &windows,
     if (!front.window) front = {&window, MREC_PLATFORM_UNKNOWN, window.title, content.url};
 
     std::string title = window.title;
-    const auto title_platform = PlatformForTitle(title);
-    if (const auto platform = PlatformForText(content.url);
+    const auto title_platform = TitlePlatform(title);
+    if (const auto platform = UrlPlatform(content.url);
         platform != MREC_PLATFORM_UNKNOWN) {
       return {&window, platform, std::move(title), std::move(content.url)};
     }
@@ -378,7 +384,7 @@ BrowserMeeting FindBrowserMeeting(const std::vector<VisibleWindow> &windows,
     }
     /* A background tab's URL is not exposed, only its title. */
     for (auto &tab : content.tab_titles) {
-      if (const auto platform = PlatformForTitle(tab); platform != MREC_PLATFORM_UNKNOWN) {
+      if (const auto platform = TitlePlatform(tab); platform != MREC_PLATFORM_UNKNOWN) {
         return {&window, platform, std::move(tab), {}};
       }
     }
@@ -423,6 +429,7 @@ std::vector<Detected> Scan() {
 
   /* Group by platform (native) or by the browser instance that owns the audio. */
   std::map<mrec_platform, Detected> native;
+  std::map<mrec_platform, std::vector<DWORD>> native_owners;
   std::map<DWORD, Detected> browser;
 
   for (const auto &[pid, state] : activity) {
@@ -434,18 +441,17 @@ std::vector<Detected> Scan() {
     /* Audio often comes from a helper, such as new Teams' WebView2: use its owner app. */
     const auto *root = meeting_record::FindAudioAppRoot(processes, pid, shell_pid);
     std::string exe = Narrow(process->second.executable);
-    const std::string exe_lower = ToLower(exe);
-    const bool is_browser = IsBrowser(exe_lower);
-    mrec_platform platform = NativePlatformFor(exe_lower);
+    const bool is_browser = IsBrowser(exe);
+    mrec_platform platform = AppPlatform(exe);
     if (platform == MREC_PLATFORM_UNKNOWN && !is_browser && root) {
       exe = Narrow(root->executable);
-      platform = NativePlatformFor(ToLower(exe));
+      platform = AppPlatform(exe);
     }
 
     if (platform != MREC_PLATFORM_UNKNOWN) {
       Detected &entry = native[platform];
       entry.platform = platform;
-      if (entry.pid == 0) entry.pid = root ? root->pid : pid;
+      native_owners[platform].push_back(root ? root->pid : pid);
       entry.audio_pids.push_back(pid);
       entry.app_name = exe;
       entry.mic = entry.mic || state.capturing;
@@ -463,15 +469,25 @@ std::vector<Detected> Scan() {
   std::vector<Detected> results;
 
   for (auto &[platform, entry] : native) {
+    /*
+     * The pid is the capture target, so it must own the audio and stay put while
+     * windows resize: the lowest owner with a window, else the lowest owner.
+     */
+    auto &owners = native_owners[platform];
+    std::sort(owners.begin(), owners.end());
+    const auto windowed = std::find_if(owners.begin(), owners.end(), [&processes](DWORD pid) {
+      const auto process = processes.find(pid);
+      return process != processes.end() && process->second.has_app_window;
+    });
+    entry.pid = windowed != owners.end() ? *windowed : owners.front();
     if (const auto *window = BestWindow(windows, [platform](const VisibleWindow &candidate) {
-          return NativePlatformFor(candidate.executable_lower) == platform;
+          return AppPlatform(candidate.executable) == platform;
         })) {
-      entry.pid = window->pid;
       entry.app_name = window->executable;
       entry.title = window->title;
     }
-    entry.confidence = kScoreKnownApp + (entry.output ? kScorePlayingAudio : 0) +
-                       (entry.mic ? kScoreUsingMic : 0);
+    entry.confidence =
+        mrec_catalog_confidence(0, entry.output, entry.mic, MREC_PLATFORM_UNKNOWN);
     results.push_back(entry);
   }
 
@@ -485,18 +501,11 @@ std::vector<Detected> Scan() {
     if (meeting.window) entry.app_name = meeting.window->executable;
     entry.title = std::move(meeting.title);
     entry.url = std::move(meeting.url);
-    /*
-     * A video tab and a call tab are indistinguishable at the process level, so
-     * require a recognised URL or title, or a live microphone.
-     */
     const mrec_platform matched = meeting.platform;
-    if (matched == MREC_PLATFORM_UNKNOWN && !entry.mic) continue;
-
+    entry.confidence = mrec_catalog_confidence(1, entry.output, entry.mic, matched);
+    if (entry.confidence == 0) continue;
     entry.platform =
         matched != MREC_PLATFORM_UNKNOWN ? matched : MREC_PLATFORM_GENERIC_BROWSER;
-    entry.confidence = kScoreKnownApp + (entry.output ? kScorePlayingAudio : 0) +
-                       (entry.mic ? kScoreUsingMic : 0) +
-                       (matched != MREC_PLATFORM_UNKNOWN ? kScoreRecognisedUrl : 0);
     results.push_back(entry);
   }
 
@@ -522,7 +531,7 @@ void Fill(mrec_meeting *out, const Detected &d) {
   out->is_using_mic = d.mic ? 1 : 0;
   out->is_playing_audio = d.output ? 1 : 0;
   out->confidence = (std::min)(d.confidence, 100);
-  out->should_record = out->confidence >= kRecordThreshold ? 1 : 0;
+  out->should_record = out->confidence >= MREC_CATALOG_RECORD_THRESHOLD ? 1 : 0;
 
   out->detected_at_ns = MonotonicTimeNs();
 }
@@ -566,7 +575,7 @@ public:
       if (stopping_from_callback) {
         thread_.detach();
         running_ = false;
-        active_.clear();
+        tracked_.clear();
         callback_ = nullptr;
         user_data_ = nullptr;
       }
@@ -575,7 +584,7 @@ public:
     if (thread_.joinable()) thread_.join();
     std::lock_guard<std::mutex> lock(mutex_);
     running_ = false;
-    active_.clear();
+    tracked_.clear();
     callback_ = nullptr;
     return MREC_OK;
   }
@@ -606,35 +615,52 @@ private:
     CoUninitialize();
   }
 
+  struct Tracked {
+    Detected meeting;
+    uint64_t first_seen_ns = 0;
+    uint64_t last_seen_ns = 0;
+    bool started = false;
+  };
+
   void Rescan(uint64_t generation) {
     if (ShouldStop(generation)) return;
-    auto found = Scan();
-    std::map<DWORD, Detected> next;
-    for (auto &entry : found) next[entry.pid] = entry;
+    const auto found = Scan();
+    const uint64_t now = MonotonicTimeNs();
 
     mrec_meeting payload;
-    for (const auto &[pid, entry] : next) {
+    for (const auto &entry : found) {
       if (ShouldStop(generation)) return;
-      auto previous = active_.find(pid);
-      if (previous == active_.end()) {
+      auto [it, inserted] = tracked_.try_emplace(entry.pid);
+      Tracked &tracked = it->second;
+      if (inserted) tracked.first_seen_ns = now;
+      tracked.last_seen_ns = now;
+      const bool changed = Changed(tracked.meeting, entry);
+      tracked.meeting = entry;
+      if (!tracked.started) {
+        if (now - tracked.first_seen_ns < kStartDelayNs) continue;
+        tracked.started = true;
         Fill(&payload, entry);
         callback_(&payload, MREC_MEETING_STARTED, user_data_);
-      } else if (Changed(previous->second, entry)) {
+      } else if (changed) {
         Fill(&payload, entry);
         callback_(&payload, MREC_MEETING_UPDATED, user_data_);
       }
-      if (ShouldStop(generation)) return;
     }
-    for (const auto &[pid, entry] : active_) {
+    for (auto it = tracked_.begin(); it != tracked_.end();) {
       if (ShouldStop(generation)) return;
-      if (next.find(pid) == next.end()) {
-        Fill(&payload, entry);
+      const Tracked &tracked = it->second;
+      if (tracked.last_seen_ns == now ||
+          (tracked.started && now - tracked.last_seen_ns < kEndDelayNs)) {
+        ++it;
+        continue;
+      }
+      if (tracked.started) {
+        Fill(&payload, tracked.meeting);
         callback_(&payload, MREC_MEETING_ENDED, user_data_);
         if (ShouldStop(generation)) return;
       }
+      it = tracked_.erase(it);
     }
-    if (ShouldStop(generation)) return;
-    active_ = std::move(next);
   }
 
   static bool Changed(const Detected &a, const Detected &b) {
@@ -642,12 +668,15 @@ private:
            a.mic != b.mic || a.output != b.output || a.audio_pids != b.audio_pids;
   }
 
+  static constexpr uint64_t kStartDelayNs = MREC_CATALOG_START_DELAY_MS * 1000000ull;
+  static constexpr uint64_t kEndDelayNs = MREC_CATALOG_END_DELAY_MS * 1000000ull;
+
   std::mutex mutex_;
   bool running_ = false;
   std::atomic<bool> stop_{false};
   std::atomic<uint64_t> generation_{0};
   std::thread thread_;
-  std::map<DWORD, Detected> active_;
+  std::map<DWORD, Tracked> tracked_;
   mrec_meeting_callback callback_ = nullptr;
   void *user_data_ = nullptr;
 };
@@ -671,20 +700,36 @@ mrec_status mrec_start_meeting(const mrec_meeting *meeting,
                                void *user_data) {
   if (!meeting) return MREC_ERR_INTERNAL;
 
-  /* INCLUDE_PROCESS_TREE should start at the visible owner, not at each current
-   * audio helper: that follows helpers created later and prevents double capture.
-   * Refresh the owner because the caller may have held the meeting for a while. */
-  uint32_t target = meeting->pid;
+  /*
+   * The visible owner's tree follows helpers created later; audio processes
+   * outside it, such as Teams' call container, are added. Capture drops those
+   * inside the tree. Refresh both, since the caller may have held the meeting
+   * for a while; match the pid first, as two browsers can both host Meet.
+   */
   const auto current = Scan();
-  const auto fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
-    return item.platform == meeting->platform;
+  auto fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
+    return item.pid == meeting->pid;
   });
-  if (fresh != current.end() && fresh->pid != 0) target = fresh->pid;
-  if (target == 0 && meeting->audio_pid_count > 0) target = meeting->audio_pids[0];
-  if (target == 0) return MREC_ERR_NO_PROCESSES;
+  if (fresh == current.end()) {
+    fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
+      return item.platform == meeting->platform;
+    });
+  }
+  std::vector<uint32_t> targets;
+  if (fresh != current.end()) {
+    targets.push_back(fresh->pid);
+    targets.insert(targets.end(), fresh->audio_pids.begin(), fresh->audio_pids.end());
+  } else {
+    targets.push_back(meeting->pid);
+    targets.insert(targets.end(), meeting->audio_pids,
+                   meeting->audio_pids +
+                       (std::min)(meeting->audio_pid_count, size_t{MREC_MAX_AUDIO_PIDS}));
+  }
+  targets.erase(std::remove(targets.begin(), targets.end(), 0u), targets.end());
+  if (targets.empty()) return MREC_ERR_NO_PROCESSES;
 
-  return static_cast<mrec_status>(
-      mrec_start_raw(&target, 1, 0, 1, 0, callback, user_data));
+  return static_cast<mrec_status>(mrec_start_raw(targets.data(), targets.size(), 0, 1, 0,
+                                                 callback, user_data));
 }
 
 mrec_status mrec_watch_start(mrec_meeting_callback cb,
@@ -703,23 +748,9 @@ int32_t mrec_is_watching(void) {
 
 mrec_permission mrec_accessibility_permission_status(void) {
   /* UI Automation and EnumWindows need no grant on Windows. */
-  return MREC_PERM_NOT_REQUIRED;
+  return MREC_PERM_GRANTED;
 }
 
 mrec_status mrec_request_accessibility_permission(void) { return MREC_OK; }
-
-const char *mrec_platform_id(mrec_platform platform) {
-  switch (platform) {
-    case MREC_PLATFORM_ZOOM: return "zoom";
-    case MREC_PLATFORM_TEAMS: return "teams";
-    case MREC_PLATFORM_MEET: return "meet";
-    case MREC_PLATFORM_WEBEX: return "webex";
-    case MREC_PLATFORM_SLACK: return "slack";
-    case MREC_PLATFORM_DISCORD: return "discord";
-    case MREC_PLATFORM_GENERIC_BROWSER: return "browser";
-    case MREC_PLATFORM_UNKNOWN: break;
-  }
-  return "unknown";
-}
 
 } // extern "C"

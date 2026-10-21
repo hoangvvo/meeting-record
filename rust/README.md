@@ -9,7 +9,7 @@ System-audio and microphone capture with meeting detection for macOS and Windows
 | Platform | Minimum version | Architectures |
 | -------- | --------------- | ------------- |
 | macOS    | 14.2            | arm64, x86-64 |
-| Windows  | 10 build 20348  | arm64, x86-64 |
+| Windows  | 10 build 19041  | arm64, x86-64 |
 
 ## Install
 
@@ -24,16 +24,9 @@ use std::thread;
 use std::time::Duration;
 
 use meeting_record::{
-    capture, meetings, permissions, CaptureOptions, CaptureState, CaptureTarget, Error,
-    MicrophoneSource, Permission, PermissionStatus,
+    capture, meetings, permissions, CaptureOptions, CaptureTarget, Error, MicrophoneSource,
+    Permission, PermissionStatus, TrackEvent,
 };
-
-fn permission_ready(permission: Permission) -> bool {
-    matches!(
-        permissions::status(permission),
-        PermissionStatus::Granted | PermissionStatus::NotRequired
-    )
-}
 
 fn main() -> Result<(), Error> {
     // Audio permission requests return immediately; rerun after granting them.
@@ -41,7 +34,7 @@ fn main() -> Result<(), Error> {
         (Permission::SystemAudio, "system audio"),
         (Permission::Microphone, "microphone"),
     ] {
-        if !permission_ready(permission) {
+        if permissions::status(permission) != PermissionStatus::Granted {
             permissions::request(permission)?;
             eprintln!("grant {name} access, then rerun");
             return Ok(());
@@ -49,7 +42,7 @@ fn main() -> Result<(), Error> {
     }
 
     // Request accessibility permission to read meeting titles and URLs for detection.
-    if !permission_ready(Permission::Accessibility) {
+    if permissions::status(Permission::Accessibility) != PermissionStatus::Granted {
         permissions::request(Permission::Accessibility)?;
     }
 
@@ -86,18 +79,18 @@ fn main() -> Result<(), Error> {
             }
         });
 
+        // A lost source never stops the recording; its track resumes when it returns.
         scope.spawn(|| {
-            let mut health = recording.health();
-            while recording.state() != CaptureState::Stopped {
-                let next = recording.health();
-                if next != health {
-                    println!("capture health: {next:?}");
-                    health = next;
+            while let Some(event) = recording.recv_event() {
+                match event {
+                    TrackEvent::Interrupted { track, reason, .. } => {
+                        eprintln!("{track:?} interrupted: {reason:?}")
+                    }
+                    TrackEvent::Resumed { track } => println!("{track:?} resumed"),
+                    TrackEvent::DeviceChanged { device_name, .. } => {
+                        println!("microphone: {device_name}")
+                    }
                 }
-                thread::sleep(Duration::from_millis(250));
-            }
-            if let Some(error) = recording.failure() {
-                eprintln!("capture failed: {error}");
             }
         });
 
@@ -142,6 +135,7 @@ while let Some(chunk) = mixed.recv() {
 - After stopping, drain it to consume the final tail.
 - No echo cancellation.
 - `CaptureOptions::cancellation`: a cloned `CancellationToken` stops capture.
+- A lost source pauses only its own track in the mix.
 - `permissions::request_and_wait(permission, timeout, Some(&token))`: cancellable permission wait.
 
 ## License

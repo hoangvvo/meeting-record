@@ -111,8 +111,9 @@ typedef void (*mrec_meeting_callback)(const mrec_meeting *meeting,
                                        void *user_data);
 
 /*
- * Watch for meetings starting and ending. Driven by app lifecycle notifications
- * and CoreAudio process-list changes, with a low-frequency poll as a backstop.
+ * Watch for meetings starting and ending. macOS rescans on app lifecycle and
+ * CoreAudio process-list changes, with a 5 s backstop; Windows polls every 2 s.
+ * STARTED needs about 2 s of detection and ENDED about 3 s of absence.
  */
 mrec_status mrec_watch_start(mrec_meeting_callback cb,
                                          void *user_data);
@@ -123,7 +124,7 @@ int32_t mrec_is_watching(void);
  * Needed only for titles, URLs and participants, never for deciding whether to
  * record. Backed by AXIsProcessTrusted, so this is a real preflight check.
  *
- * On Windows returns NOT_REQUIRED.
+ * On Windows returns GRANTED.
  */
 mrec_permission mrec_accessibility_permission_status(void);
 

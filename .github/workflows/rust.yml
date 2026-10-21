@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: |
           ./scripts/stage-rust-package.sh
-          for directory in include macos windows; do
+          for directory in common include macos windows; do
             diff -qr "native/$directory" "rust/native/$directory"
           done
 

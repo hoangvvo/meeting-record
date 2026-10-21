@@ -211,8 +211,8 @@ ipcMain.handle("permission:request", (_event, name: PermissionName) =>
   MeetingRecord.permissions.request(name),
 );
 
-ipcMain.handle("meetings:scan", () => {
-  const found = MeetingRecord.meetings.scan();
+ipcMain.handle("meetings:scan", async () => {
+  const found = await MeetingRecord.meetings.scan();
   detected.clear();
   for (const meeting of found) detected.set(idOf(meeting), meeting.pid);
   return found.map(toView);

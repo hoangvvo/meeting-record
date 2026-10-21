@@ -8,7 +8,7 @@
 # on the microphone track and in the mixed output.
 #
 # -SwitchMicrophone makes another recording device the default mid-capture, then
-# restores the original, and requires a recovery.
+# restores the original, and requires a microphone device change.
 [CmdletBinding()]
 param(
     [ValidateSet("System", "Process", "Meeting", "All")]
@@ -30,8 +30,7 @@ param(
     [int]$RestartCycles = 2,
     [switch]$Microphone,
     [string]$MicrophoneDevice,
-    [string]$SwitchMicrophone,
-    [switch]$ExpectRecovery
+    [string]$SwitchMicrophone
 )
 
 Set-StrictMode -Version Latest
@@ -52,7 +51,7 @@ $variableNames = @(
     "MREC_MIN_PEAK",
     "MREC_MONO",
     "MREC_MICROPHONE",
-    "MREC_EXPECT_RECOVERY",
+    "MREC_EXPECT_DEVICE_CHANGE",
     "MREC_EXPECT_FREQUENCIES",
     "MREC_REJECT_FREQUENCIES",
     "MREC_MIX_SAMPLE_RATE",
@@ -137,7 +136,7 @@ try {
         }
     }
 
-    $bindings = if ($Binding -eq "All") { @("Rust", "Node") } else { @($Binding) }
+    $bindings = @(if ($Binding -eq "All") { "Rust", "Node" } else { $Binding })
     if ($bindings -contains "Rust") {
         Invoke-Native "building the Rust E2E harness" { cargo build --locked -p meeting-record-windows-e2e }
     }
@@ -145,7 +144,7 @@ try {
         Invoke-Native "building the Node.js package" { npm run build --workspace meeting-record }
     }
 
-    $modes = if ($Mode -eq "All") { @("System", "Process") } else { @($Mode) }
+    $modes = @(if ($Mode -eq "All") { "System", "Process" } else { $Mode })
     $runSeconds = ($DurationSeconds + 2) * $modes.Count * $bindings.Count + 30
     if ($Mode -ne "Meeting") {
         $target = Start-Tone $targetFrequency $runSeconds
@@ -161,7 +160,7 @@ try {
     Set-HarnessVariable "MREC_MICROPHONE" $(if ($Microphone -or $MicrophoneDevice -or $SwitchMicrophone) { "1" })
     # A switched microphone carries another device's audio for a while.
     Set-HarnessVariable "MREC_MICROPHONE_FREQUENCIES" $(if ($MicrophoneDevice -and -not $SwitchMicrophone) { $microphoneFrequency })
-    Set-HarnessVariable "MREC_EXPECT_RECOVERY" $(if ($ExpectRecovery -or $SwitchMicrophone) { "1" })
+    Set-HarnessVariable "MREC_EXPECT_DEVICE_CHANGE" $(if ($SwitchMicrophone) { "1" })
     Set-HarnessVariable "MREC_MIX_SAMPLE_RATE" $(if ($MixSampleRate -gt 0) { $MixSampleRate })
     # Pause cuts tracks up to a block apart; a switched microphone can be silent there.
     Set-HarnessVariable "MREC_PAUSE_SECONDS" $(if ($PauseSeconds -gt 0 -and -not $SwitchMicrophone) { $PauseSeconds.ToString([Globalization.CultureInfo]::InvariantCulture) })

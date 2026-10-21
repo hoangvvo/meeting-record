@@ -11,4 +11,4 @@ esac
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
-cp -R "$ROOT/native/include" "$ROOT/native/macos" "$ROOT/native/windows" "$DEST/"
+cp -R "$ROOT/native/common" "$ROOT/native/include" "$ROOT/native/macos" "$ROOT/native/windows" "$DEST/"
