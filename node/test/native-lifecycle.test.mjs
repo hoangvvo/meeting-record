@@ -465,6 +465,44 @@ test("an interruption during initialization remains visible after start", async 
   assert.equal(api.capture.running, true);
 });
 
+test("startup source events reach listeners attached after awaiting start, in order", async () => {
+  native.testConfigure({ initialPackets: 0, tailPackets: 0 });
+  const captureStart = native.captureStart;
+  native.captureStart = (options, system, microphone, event) => {
+    event({ track: "systemAudio", type: "interrupted", reason: "service-reset", message: "lost" });
+    event({ track: "microphone", type: "devicechange", deviceName: "Replacement microphone" });
+    event({ track: "systemAudio", type: "resumed" });
+    return captureStart(options, system, microphone, event);
+  };
+  let recording;
+  try {
+    recording = await start(undefined, { microphone: api.MicrophoneSource.Default });
+  } finally {
+    native.captureStart = captureStart;
+  }
+  const events = [];
+  recording.systemAudio.on("interrupted", (reason, message) => {
+    events.push(["interrupted", reason, message, recording.systemAudio.availability]);
+  });
+  recording.microphone.on("devicechange", (name) => {
+    events.push(["devicechange", name, recording.microphone.deviceName]);
+  });
+  recording.systemAudio.on("resumed", () => {
+    events.push(["resumed", recording.systemAudio.availability]);
+  });
+  native.testEvent({ track: "systemAudio", type: 3, reason: 5, message: "later" });
+  recording.systemAudio.on("degraded", (reason, message) => {
+    events.push(["degraded", reason, message, recording.systemAudio.availability]);
+  });
+  await until(() => events.length === 4);
+  assert.deepEqual(events, [
+    ["interrupted", "service-reset", "lost", "interrupted"],
+    ["devicechange", "Replacement microphone", "Replacement microphone"],
+    ["resumed", "live"],
+    ["degraded", "service-reset", "later", "degraded"],
+  ]);
+});
+
 test("native overflow reports interleaved sample loss on the affected track", async () => {
   native.testConfigure({ initialPackets: 0, tailPackets: 0 });
   const recording = await start(undefined, { microphone: api.MicrophoneSource.Default });

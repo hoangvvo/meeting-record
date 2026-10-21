@@ -603,6 +603,7 @@ interface NativeTrackEvent {
   message: string;
 }
 
+/** Attach source-event listeners immediately after awaiting start; startup notifications are delivered on the next turn. */
 function startCapture(
   target: CaptureTarget,
   options: CaptureOptions & { mix: MixedAudioOptions },
@@ -671,8 +672,9 @@ async function startCapture(
     receive("microphone", pendingMicrophone, chunk, info);
   };
   const pendingEvents: NativeTrackEvent[] = [];
+  let eventsReady = false;
   const onTrackEvent = (event: NativeTrackEvent) => {
-    if (!session) {
+    if (!session || !eventsReady) {
       pendingEvents.push(event);
       return;
     }
@@ -712,15 +714,22 @@ async function startCapture(
           formats.microphone.deviceName || undefined,
         )
       : undefined;
-    session = new CaptureSessionImpl(systemAudio, microphone, options.mix, options.signal);
+    const recording = new CaptureSessionImpl(systemAudio, microphone, options.mix, options.signal);
+    session = recording;
     for (const { chunk, info } of pendingSystemAudio) {
       systemAudio.pushAudio(chunk, info);
     }
     for (const { chunk, info } of pendingMicrophone) {
       microphone?.pushAudio(chunk, info);
     }
-    for (const event of pendingEvents) session[event.track]?.pushEvent(event);
-    return session;
+    pendingSystemAudio.length = 0;
+    pendingMicrophone.length = 0;
+    setImmediate(() => {
+      for (const event of pendingEvents) recording[event.track]?.pushEvent(event);
+      pendingEvents.length = 0;
+      eventsReady = true;
+    });
+    return recording;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     throw asLibraryError(error);
