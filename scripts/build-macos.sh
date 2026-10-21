@@ -66,6 +66,11 @@ clang++ -std=c++17 -Wall -Wextra -Werror -I"$ROOT/native/include" \
   -o "$BUILD/timeline_mixer_test" "$ROOT/native/tests/timeline_mixer_test.cpp"
 "$BUILD/timeline_mixer_test"
 
+echo "==> Windows capture root tests"
+clang++ -std=c++17 -Wall -Wextra -Werror \
+  -o "$BUILD/capture_roots_test" "$ROOT/native/tests/capture_roots_test.cpp"
+"$BUILD/capture_roots_test"
+
 # Rules shared with the Windows backend; Swift imports them through Bridging.h.
 BRIDGING_HEADER="$ROOT/native/macos/Bridging.h"
 for source in meeting-catalog tracks; do

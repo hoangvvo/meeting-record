@@ -21,6 +21,8 @@ private final class Session {
     var microphoneEnabled = false
     var systemTargetExited = false
     var exitTimer: DispatchSourceTimer?
+    var deviceListener: AudioObjectPropertyListenerBlock?
+    let deviceQueue = DispatchQueue(label: "meetingrecord.device-changes")
     let restartQueue = DispatchQueue(label: "meetingrecord.capture-restart")
     let microphoneRestartQueue = DispatchQueue(label: "meetingrecord.microphone-restart")
     let errorLock = NSLock()
@@ -51,7 +53,37 @@ private func releaseSession() {
     session.microphoneEnabled = false
     session.systemStateBox.clear()
     session.microphoneStateBox.clear()
+    stopListeningForDevices()
     mrec_tracks_close()
+}
+
+/// The system properties that change when an input device appears, leaves, or becomes default.
+private let deviceAddresses = [kAudioHardwarePropertyDefaultInputDevice,
+                               kAudioHardwarePropertyDevices].map {
+    AudioObjectPropertyAddress(mSelector: $0, mScope: kAudioObjectPropertyScopeGlobal,
+                               mElement: kAudioObjectPropertyElementMain)
+}
+
+/// Device notifications retry lost sources at once instead of at the next interval.
+private func listenForDevices(trackSession: UInt64) {
+    let session = Session.shared
+    let block: AudioObjectPropertyListenerBlock = { _, _ in mrec_tracks_wake(trackSession) }
+    for var address in deviceAddresses {
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address,
+                                            session.deviceQueue, block)
+    }
+    session.deviceListener = block
+}
+
+/// The caller holds `Session.lock`.
+private func stopListeningForDevices() {
+    let session = Session.shared
+    guard let block = session.deviceListener else { return }
+    for var address in deviceAddresses {
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address,
+                                               session.deviceQueue, block)
+    }
+    session.deviceListener = nil
 }
 
 private struct SystemCaptureConfiguration {
@@ -147,24 +179,13 @@ private let reopenSource: mrec_track_attempt = { context, deviceName, capacity i
     return 0
 }
 
-/// Sleeps without the lock, so stopping never waits for a retry.
-private let waitForRetry: mrec_track_wait = { context, milliseconds in
-    guard let context else { return 0 }
-    let recovery = Unmanaged<Recovery>.fromOpaque(context).takeUnretainedValue()
-    Thread.sleep(forTimeInterval: TimeInterval(milliseconds) / 1000)
-    let session = Session.shared
-    session.lock.lock()
-    defer { session.lock.unlock() }
-    return session.generation == recovery.generation
-        && !(recovery.track == MREC_TRACK_SYSTEM_AUDIO && session.systemTargetExited) ? 1 : 0
-}
-
 /// Never stops the recording: retries until the source returns or the session ends.
+/// tracks.c paces the retries; stopping the session ends them at once.
 private func recover(_ track: mrec_track, reason: mrec_track_reason, message: String,
                      generation: Int, trackSession: UInt64, reopen: @escaping () throws -> String?) {
     let context = Unmanaged.passRetained(Recovery(generation: generation, track: track, reopen: reopen))
     defer { context.release() }
-    _ = mrec_track_recover(trackSession, track, 0, reason, message, reopenSource, waitForRetry,
+    _ = mrec_track_recover(trackSession, track, 0, reason, message, reopenSource,
                            context.toOpaque())
 }
 
@@ -521,6 +542,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
             return -9
         }
     }
+    listenForDevices(trackSession: session.trackSession)
     if !configuration.globalMixdown {
         session.exitTimer = watchSources(generation: session.generation)
     }

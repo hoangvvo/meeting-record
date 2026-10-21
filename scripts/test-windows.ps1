@@ -49,6 +49,7 @@ try {
   Test-Native capture_pump_test @("$root/native/tests/capture_pump_test.cpp", "tracks.obj") -Cxx
   Test-Native audio_app_process_test @("$root/native/tests/audio_app_process_test.cpp") -Cxx
   Test-Native timeline_mixer_test @("$root/native/tests/timeline_mixer_test.cpp") -Cxx
+  Test-Native capture_roots_test @("$root/native/tests/capture_roots_test.cpp") -Cxx
 } finally {
   Pop-Location
 }

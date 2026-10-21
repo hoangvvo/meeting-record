@@ -192,6 +192,26 @@ void StalledSourceIsSilenceAfterTheWatermark() {
   }
 }
 
+void AddedSourceJoinsAtTheCurrentTimeline() {
+  std::vector<Block> blocks;
+  TimelineMixer mixer;
+  mixer.Reset(1, 1, Collect, &blocks);
+  const auto packet = Constant(kFramesPerBlock, 0.25f);
+  mixer.Add(0, packet.data(), kFramesPerBlock, false, false, BlockTime(10));
+  mixer.Add(0, packet.data(), kFramesPerBlock, false, false, BlockTime(11));
+  assert(blocks.size() == 2);
+  assert(mixer.AddSource() == 1);
+  // Committed blocks stay committed; the next one waits briefly for the new source.
+  mixer.Add(0, packet.data(), kFramesPerBlock, false, false, BlockTime(12));
+  assert(blocks.size() == 2);
+  mixer.Add(1, packet.data(), kFramesPerBlock, false, false, BlockTime(12));
+  assert(blocks.size() == 3);
+  assert(blocks[2].host_time_ns == BlockTime(12));
+  assert(All(blocks[2].samples, 0, kFramesPerBlock, 0.5f));
+  mixer.Flush();
+  assert(All(blocks[1].samples, 0, kFramesPerBlock, 0.25f));
+}
+
 void SilentPacketsAdvanceTheTimeline() {
   std::vector<Block> blocks;
   TimelineMixer mixer;
@@ -232,6 +252,7 @@ int main() {
   BackwardJumpNeverDoublesASource();
   SourcesAreSummedOnTheSharedTimelineAndClamped();
   StalledSourceIsSilenceAfterTheWatermark();
+  AddedSourceJoinsAtTheCurrentTimeline();
   SilentPacketsAdvanceTheTimeline();
   FlushEndsTheSession();
   std::cout << "timeline mixer tests passed\n";

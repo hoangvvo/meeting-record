@@ -12,11 +12,7 @@
 #include <pthread.h>
 #endif
 
-enum {
-  kTrackCount = 2,
-  kFirstRetryDelayMs = 100,
-  kMaxRetryDelayMs = 2000,
-};
+enum { kTrackCount = 2 };
 
 typedef struct {
   unsigned char *stopped;
@@ -31,11 +27,19 @@ static int g_open;
 static uint64_t g_session;
 static mrec_track_event_callback g_callback;
 static void *g_user_data;
+/* Counts wakes, so a retry also sees one that came during its attempt. */
+static uint64_t g_wakes;
 
 #ifdef _WIN32
 static SRWLOCK g_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_changed = CONDITION_VARIABLE_INIT;
 static void Lock(void) { AcquireSRWLockExclusive(&g_lock); }
 static void Unlock(void) { ReleaseSRWLockExclusive(&g_lock); }
+static void Broadcast(void) { WakeAllConditionVariable(&g_changed); }
+/* Caller holds the lock. */
+static void WaitForChange(uint32_t milliseconds) {
+  SleepConditionVariableSRW(&g_changed, &g_lock, milliseconds, 0);
+}
 
 /* The clock the Windows backend stamps audio with. */
 static uint64_t HostTimeNs(void) {
@@ -51,8 +55,15 @@ static uint64_t HostTimeNs(void) {
 }
 #else
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_changed = PTHREAD_COND_INITIALIZER;
 static void Lock(void) { pthread_mutex_lock(&g_lock); }
 static void Unlock(void) { pthread_mutex_unlock(&g_lock); }
+static void Broadcast(void) { pthread_cond_broadcast(&g_changed); }
+/* Caller holds the lock. */
+static void WaitForChange(uint32_t milliseconds) {
+  const struct timespec timeout = {milliseconds / 1000, (long)(milliseconds % 1000) * 1000000};
+  pthread_cond_timedwait_relative_np(&g_changed, &g_lock, &timeout);
+}
 
 /* The clock the macOS backend stamps audio with. */
 static uint64_t HostTimeNs(void) {
@@ -101,6 +112,7 @@ uint64_t mrec_tracks_open(mrec_track_event_callback callback, void *user_data) {
   g_callback = callback;
   g_user_data = user_data;
   const uint64_t session = g_session;
+  Broadcast();
   Unlock();
   return session;
 }
@@ -111,6 +123,16 @@ void mrec_tracks_close(void) {
   g_open = 0;
   g_callback = NULL;
   g_user_data = NULL;
+  Broadcast();
+  Unlock();
+}
+
+void mrec_tracks_wake(uint64_t session) {
+  Lock();
+  if (IsSession(session)) {
+    g_wakes++;
+    Broadcast();
+  }
   Unlock();
 }
 
@@ -135,6 +157,31 @@ int32_t mrec_track_started(uint64_t session, mrec_track track, size_t source_cou
   return 1;
 }
 
+int32_t mrec_track_add_source(uint64_t session, mrec_track track) {
+  if (!IsTrack(track)) return 0;
+  Lock();
+  Track *state = &g_tracks[track];
+  if (!IsSession(session) || !state->source_count || state->whole_stopped) {
+    Unlock();
+    return 0;
+  }
+  unsigned char *sources = (unsigned char *)realloc(state->stopped, state->source_count + 1);
+  if (!sources) {
+    Unlock();
+    return 0;
+  }
+  const int previous = Availability(state);
+  state->stopped = sources;
+  state->stopped[state->source_count++] = 0;
+  const int current = Availability(state);
+  if (current != previous) {
+    Publish(track, current == 0 ? MREC_TRACK_RESUMED : MREC_TRACK_DEGRADED,
+            MREC_TRACK_REASON_UNKNOWN, NULL);
+  }
+  Unlock();
+  return 1;
+}
+
 void mrec_track_interrupted(uint64_t session, mrec_track track, uint32_t source,
                             mrec_track_reason reason, const char *message) {
   if (!IsTrack(track)) return;
@@ -155,6 +202,8 @@ void mrec_track_interrupted(uint64_t session, mrec_track track, uint32_t source,
       Publish(track, current == 2 ? MREC_TRACK_INTERRUPTED : MREC_TRACK_DEGRADED,
               reason, message);
     }
+    /* An exited target ends its pending retries. */
+    if (state->whole_stopped != whole_stopped) Broadcast();
   }
   Unlock();
 }
@@ -187,41 +236,57 @@ void mrec_track_resumed(uint64_t session, mrec_track track, uint32_t source,
   Unlock();
 }
 
-uint32_t mrec_track_retry_delay_ms(uint32_t failures) {
-  const uint32_t limit = kMaxRetryDelayMs;
-  if (failures >= 5) return limit;
-  const uint32_t delay = (uint32_t)kFirstRetryDelayMs << failures;
-  return delay < limit ? delay : limit;
+/* Caller holds the lock. */
+static int CanRecover(uint64_t session, mrec_track track, uint32_t source) {
+  const Track *state = &g_tracks[track];
+  return IsSession(session) && source < state->source_count && !state->whole_stopped;
 }
 
-static int CanRecover(uint64_t session, mrec_track track, uint32_t source) {
-  if (!IsTrack(track)) return 0;
+/* The wake count, or 0 with `*active` cleared once recovery must stop. */
+static uint64_t RecoveryWakes(uint64_t session, mrec_track track, uint32_t source,
+                              int *active) {
   Lock();
-  const Track *state = &g_tracks[track];
-  const int active = IsSession(session) && source < state->source_count && !state->whole_stopped;
+  *active = CanRecover(session, track, source);
+  const uint64_t wakes = g_wakes;
+  Unlock();
+  return wakes;
+}
+
+/* Waits out the interval unless woken since `wakes`: 0 once recovery must stop. */
+static int WaitToRetry(uint64_t session, mrec_track track, uint32_t source, uint64_t wakes) {
+  const uint64_t deadline = HostTimeNs() + MREC_TRACK_RETRY_INTERVAL_MS * 1000000ull;
+  Lock();
+  int active = CanRecover(session, track, source);
+  while (active && g_wakes == wakes) {
+    const uint64_t now = HostTimeNs();
+    if (now >= deadline) break;
+    WaitForChange((uint32_t)((deadline - now + 999999) / 1000000));
+    active = CanRecover(session, track, source);
+  }
   Unlock();
   return active;
 }
 
 int32_t mrec_track_recover(uint64_t session, mrec_track track, uint32_t source,
-                           mrec_track_reason reason,
-                           const char *message, mrec_track_attempt attempt,
-                           mrec_track_wait wait, void *context) {
-  if (!attempt || !wait) return 0;
-  for (uint32_t failures = 0; CanRecover(session, track, source);) {
+                           mrec_track_reason reason, const char *message,
+                           mrec_track_attempt attempt, void *context) {
+  if (!attempt || !IsTrack(track)) return 0;
+  for (int first = 1;; first = 0) {
+    int active = 0;
+    const uint64_t wakes = RecoveryWakes(session, track, source, &active);
+    if (!active) return 0;
     char device_name[256] = "";
     const int reopened = attempt(context, device_name, sizeof device_name);
     device_name[sizeof device_name - 1] = '\0';
-    if (!CanRecover(session, track, source)) return 0;
+    RecoveryWakes(session, track, source, &active);
+    if (!active) return 0;
     if (reopened) {
       mrec_track_resumed(session, track, source, device_name);
       return 1;
     }
-    if (failures == 0) mrec_track_interrupted(session, track, source, reason, message);
-    if (!wait(context, mrec_track_retry_delay_ms(failures))) return 0;
-    if (failures < 5) failures++;
+    if (first) mrec_track_interrupted(session, track, source, reason, message);
+    if (!WaitToRetry(session, track, source, wakes)) return 0;
   }
-  return 0;
 }
 
 mrec_status mrec_current_microphone_name(char *name, size_t capacity) {

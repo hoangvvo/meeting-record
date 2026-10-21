@@ -28,7 +28,7 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 - macOS microphone: separate `AVAudioEngine` input tap.
 - Windows: one loopback client per PID, aligned on QPC into one 10 ms track.
 - Source loss, shared by both backends: `native/common/tracks.c`. Recording never stops for it.
-- Lost source: reopen at once (published as a device change), else `INTERRUPTED` and retry with backoff (≤ 2 s apart) until it returns, then `RESUMED`.
+- Lost source: reopen at once (published as a device change), else `INTERRUPTED` and retry every 500 ms until it returns, then `RESUMED`. A device notification retries at once (Windows `IMMNotificationClient`, macOS default-input and device-list listeners); stop ends pending retries at once.
 - Microphone: `DEVICE_CHANGED` on a new device. Events are serialized and never arrive after stop.
 - Every captured app exited → system `INTERRUPTED` (`APP_EXITED`); stop system callbacks and retries, and keep the microphone/session alive. Do not follow a relaunched app.
 - Track recovery publications carry a session identity. A stale retry cannot change a replacement session.
@@ -70,7 +70,7 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 - Watchers: STARTED after ~2 s detected, ENDED after ~3 s missing (shared constants).
 - Browsers: need mic activity or a recognised URL or title.
 - `Meet - abc-defg-hij` titles match without a URL.
-- Process targets: native code expands app PIDs. Windows follows the process tree plus sibling processes; macOS refreshes helper membership every second.
+- Process targets: native code expands app PIDs. Windows follows the process tree plus sibling processes (same conferencing app or package), and adds siblings started later, such as a call host, within a second; macOS refreshes helper membership every second.
 - Windows: attribute each audio session to its window-owning app (WebView2 → host app); one meeting per browser instance.
 - Windows: a native meeting's `pid` is the lowest window-owning owner of its audio, stable across window changes.
 - Windows: UI Automation reads address bars and tab strips; 250 ms call timeout, 500 ms walk, node budget, never inside documents.

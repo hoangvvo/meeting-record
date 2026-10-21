@@ -98,10 +98,88 @@ void CloseWaitsForCallbacksAndPreventsLaterEvents() {
                          MREC_TRACK_REASON_DEVICE_REMOVED, "late");
   assert(callback.calls == 1);
 }
+
+/* Well inside the retry interval, so only a wake or a stop explains it. */
+constexpr auto kPrompt = std::chrono::milliseconds(MREC_TRACK_RETRY_INTERVAL_MS / 2);
+
+struct Retry {
+  std::atomic<int> attempts{0};
+  std::atomic<bool> reopen{false};
+
+  static int32_t Attempt(void *context, char *, size_t) {
+    auto &retry = *static_cast<Retry *>(context);
+    retry.attempts++;
+    return retry.reopen ? 1 : 0;
+  }
+
+  /* Recovers `source` on another thread once the first attempt has failed. */
+  std::future<int32_t> Start(uint64_t session, mrec_track track, uint32_t source) {
+    auto result = std::async(std::launch::async, [this, session, track, source] {
+      return mrec_track_recover(session, track, source, MREC_TRACK_REASON_DEVICE_REMOVED,
+                                "lost", Attempt, this);
+    });
+    while (attempts == 0) std::this_thread::yield();
+    std::this_thread::sleep_for(20ms);
+    return result;
+  }
+};
+
+void WakeFromAnotherThreadRetriesAtOnce() {
+  Retry retry;
+  const auto session = mrec_tracks_open(nullptr, nullptr);
+  assert(mrec_track_started(session, MREC_TRACK_MICROPHONE, 1, "Input"));
+  auto recovering = retry.Start(session, MREC_TRACK_MICROPHONE, 0);
+  retry.reopen = true;
+  mrec_tracks_wake(session);
+  assert(recovering.wait_for(kPrompt) == std::future_status::ready);
+  assert(recovering.get() == 1 && retry.attempts == 2);
+  mrec_tracks_close();
+}
+
+void StopEndsAPendingRetryAtOnce() {
+  Retry retry;
+  const auto session = mrec_tracks_open(nullptr, nullptr);
+  assert(mrec_track_started(session, MREC_TRACK_MICROPHONE, 1, "Input"));
+  auto recovering = retry.Start(session, MREC_TRACK_MICROPHONE, 0);
+  mrec_tracks_close();
+  assert(recovering.wait_for(kPrompt) == std::future_status::ready);
+  assert(recovering.get() == 0 && retry.attempts == 1);
+}
+
+void ExitEndsAPendingSystemRetryAtOnce() {
+  Retry retry;
+  const auto session = mrec_tracks_open(nullptr, nullptr);
+  assert(mrec_track_started(session, MREC_TRACK_SYSTEM_AUDIO, 2, nullptr));
+  auto recovering = retry.Start(session, MREC_TRACK_SYSTEM_AUDIO, 1);
+  mrec_track_interrupted(session, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+                         MREC_TRACK_REASON_APP_EXITED, "exited");
+  assert(recovering.wait_for(kPrompt) == std::future_status::ready);
+  assert(recovering.get() == 0 && retry.attempts == 1);
+  mrec_tracks_close();
+}
+
+void ReplacementEndsAPendingRetryAtOnce() {
+  Retry retry;
+  Events events;
+  const auto session = mrec_tracks_open(nullptr, nullptr);
+  assert(mrec_track_started(session, MREC_TRACK_MICROPHONE, 1, "Input"));
+  auto recovering = retry.Start(session, MREC_TRACK_MICROPHONE, 0);
+  retry.reopen = true;
+  const auto replacement = mrec_tracks_open(Record, &events);
+  assert(mrec_track_started(replacement, MREC_TRACK_MICROPHONE, 1, "Input"));
+  assert(recovering.wait_for(kPrompt) == std::future_status::ready);
+  assert(recovering.get() == 0 && retry.attempts == 1);
+  mrec_tracks_close();
+  assert(events.count == 0);
+}
 } // namespace
 
 int main() {
   ConcurrentSourcesPublishSerialTransitions();
   CloseWaitsForCallbacksAndPreventsLaterEvents();
+  WakeFromAnotherThreadRetriesAtOnce();
+  StopEndsAPendingRetryAtOnce();
+  ExitEndsAPendingSystemRetryAtOnce();
+  ReplacementEndsAPendingRetryAtOnce();
   std::cout << "track concurrency tests passed\n";
 }

@@ -2,6 +2,7 @@
 #include "meeting-record.h"
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
+#include "CaptureRoots.h"
 #include "CapturePump.h"
 #include "TimelineMixer.h"
 #include "meeting-catalog.h"
@@ -19,8 +20,10 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -34,6 +37,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
+using meeting_record::InTrees;
 using meeting_record::kSampleRate;
 using meeting_record::TimelineMixer;
 
@@ -192,6 +196,30 @@ private:
   ComPtr<IAudioClient> client_;
 };
 
+/* Reports audio device arrivals, removals, state changes, and new capture defaults. */
+class DeviceNotifications
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IMMNotificationClient> {
+public:
+  explicit DeviceNotifications(std::function<void()> changed) : changed_(std::move(changed)) {}
+
+  STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override { return Changed(); }
+  STDMETHODIMP OnDeviceAdded(LPCWSTR) override { return Changed(); }
+  STDMETHODIMP OnDeviceRemoved(LPCWSTR) override { return Changed(); }
+  STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole, LPCWSTR) override {
+    return flow == eCapture ? Changed() : S_OK;
+  }
+  STDMETHODIMP OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+
+private:
+  HRESULT Changed() {
+    changed_();
+    return S_OK;
+  }
+
+  std::function<void()> changed_;
+};
+
 /* One activated loopback client plus the thread draining it. */
 struct LoopbackStream {
   ComPtr<IAudioClient> client;
@@ -294,18 +322,6 @@ std::map<uint32_t, ProcessEntry> ProcessSnapshot() {
   }
   CloseHandle(snapshot);
   return processes;
-}
-
-/* Whether `pid` is one of `roots` or descends from one. */
-bool InTrees(const std::map<uint32_t, ProcessEntry> &processes, uint32_t pid,
-             const std::vector<uint32_t> &roots) {
-  for (size_t remaining = processes.size() + 1; remaining > 0; remaining--) {
-    if (std::find(roots.begin(), roots.end(), pid) != roots.end()) return true;
-    const auto process = processes.find(pid);
-    if (process == processes.end() || process->second.parent == pid) return false;
-    pid = process->second.parent;
-  }
-  return false;
 }
 
 std::wstring DeviceId(IMMDevice *device) {
@@ -423,54 +439,40 @@ bool InSession(uint32_t pid, DWORD session) {
   return ProcessIdToSessionId(pid, &process_session) && process_session == session;
 }
 
-/* Include sibling app and package processes outside the selected trees.
- * Remove nested targets to avoid capturing their audio twice. */
-std::vector<uint32_t> CaptureRoots(std::vector<uint32_t> pids) {
-  const auto processes = ProcessSnapshot();
-  if (processes.empty()) return pids;
-
-  std::vector<int32_t> apps;
-  std::vector<std::wstring> packages;
-  for (uint32_t pid : pids) {
-    const auto process = processes.find(pid);
-    if (process != processes.end() && process->second.platform != MREC_PLATFORM_UNKNOWN) {
-      apps.push_back(process->second.platform);
-    }
-    if (auto package = PackageFamilyName(pid)) packages.push_back(std::move(*package));
-  }
-  DWORD session = 0;
-  ProcessIdToSessionId(GetCurrentProcessId(), &session);
-  for (const auto &[pid, process] : processes) {
-    bool sibling = process.platform != MREC_PLATFORM_UNKNOWN &&
-                   std::find(apps.begin(), apps.end(), process.platform) != apps.end();
-    if (!sibling && !packages.empty()) {
-      const auto package = PackageFamilyName(pid);
-      sibling = package && std::find(packages.begin(), packages.end(), *package) != packages.end();
-    }
-    if (sibling && InSession(pid, session)) pids.push_back(pid);
-  }
-  std::sort(pids.begin(), pids.end());
-  pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
-
-  const auto inside_another = [&](uint32_t pid) {
-    uint32_t current = pid;
-    for (size_t remaining = processes.size(); remaining > 0; remaining--) {
-      const auto process = processes.find(current);
-      if (process == processes.end() || process->second.parent == current ||
-          process->second.parent == pid) {
-        return false;
+/* Which other processes belong to the captured apps: those of the same
+ * conferencing app, or of the same package, in the recorder's session. Windows may
+ * start them outside the app's tree, as new Teams does with its call host. */
+class SiblingRule {
+public:
+  SiblingRule() = default;
+  SiblingRule(const std::vector<uint32_t> &pids,
+              const std::map<uint32_t, ProcessEntry> &processes) {
+    for (uint32_t pid : pids) {
+      const auto process = processes.find(pid);
+      if (process != processes.end() && process->second.platform != MREC_PLATFORM_UNKNOWN) {
+        apps_.push_back(process->second.platform);
       }
-      current = process->second.parent;
-      if (std::binary_search(pids.begin(), pids.end(), current)) return true;
+      if (auto package = PackageFamilyName(pid)) packages_.push_back(std::move(*package));
     }
-    return false;
-  };
-  std::vector<uint32_t> roots;
-  for (uint32_t pid : pids) {
-    if (!inside_another(pid)) roots.push_back(pid);
+    ProcessIdToSessionId(GetCurrentProcessId(), &session_);
   }
-  return roots;
-}
+
+  bool operator()(uint32_t pid, const ProcessEntry &process) const {
+    bool sibling = process.platform != MREC_PLATFORM_UNKNOWN &&
+                   std::find(apps_.begin(), apps_.end(), process.platform) != apps_.end();
+    if (!sibling && !packages_.empty()) {
+      const auto package = PackageFamilyName(pid);
+      sibling = package && std::find(packages_.begin(), packages_.end(), *package) !=
+                               packages_.end();
+    }
+    return sibling && InSession(pid, session_);
+  }
+
+private:
+  std::vector<int32_t> apps_;
+  std::vector<std::wstring> packages_;
+  DWORD session_ = 0;
+};
 
 bool SupportsProcessLoopback() {
   using RtlGetVersionFn = LONG(WINAPI *)(OSVERSIONINFOW *);
@@ -534,7 +536,11 @@ public:
         SetLastErrorMessage("none of the requested pids are running");
         return MREC_ERR_NO_PROCESSES;
       }
-      targets = CaptureRoots(std::move(targets));
+      const auto processes = ProcessSnapshot();
+      if (!processes.empty()) {
+        sibling_rule_ = SiblingRule(targets, processes);
+        targets = meeting_record::SelectCaptureRoots(processes, std::move(targets), sibling_rule_);
+      }
     }
 
     if (microphone != MREC_MICROPHONE_NONE && microphone != MREC_MICROPHONE_DEFAULT &&
@@ -563,7 +569,7 @@ public:
         mta_usage_.reset();
         return MREC_ERR_TAP_FAILED;
       }
-      streams_.push_back(std::move(*stream));
+      streams_.push_back(std::make_unique<LoopbackStream>(std::move(*stream)));
     } else {
       for (uint32_t pid : targets) {
         auto stream = Activate(pid, /*exclude=*/false);
@@ -571,7 +577,7 @@ public:
           /* One dead or unsupported process should not sink the session. */
           continue;
         }
-        streams_.push_back(std::move(*stream));
+        streams_.push_back(std::make_unique<LoopbackStream>(std::move(*stream)));
       }
       if (streams_.empty()) {
         SetLastErrorMessage("could not create a loopback client for any pid");
@@ -611,7 +617,7 @@ public:
       return MREC_ERR_INTERNAL;
     }
     for (size_t i = 0; i < streams_.size(); i++) {
-      HRESULT hr = streams_[i].client->Start();
+      HRESULT hr = streams_[i]->client->Start();
       if (FAILED(hr)) {
         SetLastErrorMessage(HResultMessage("IAudioClient::Start", hr));
         StopLocked();
@@ -619,8 +625,9 @@ public:
       }
       workers_.emplace_back([this, i] { Drain(i); });
     }
-    if (!targets_.empty()) exit_worker_ = std::thread([this] { WatchForExit(); });
+    if (!targets_.empty()) targets_worker_ = std::thread([this] { WatchTargets(); });
     if (microphone_) {
+      ListenForDevices();
       HRESULT hr = microphone_->client->Start();
       if (FAILED(hr)) {
         SetLastErrorMessage(HResultMessage("microphone IAudioClient::Start", hr));
@@ -800,7 +807,7 @@ private:
     /* Each drain thread needs its own COM apartment. */
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-    LoopbackStream &stream = streams_[index];
+    LoopbackStream &stream = Stream(index);
 
     while (!stop_requested_.load(std::memory_order_relaxed) &&
            !system_exited_.load(std::memory_order_relaxed)) {
@@ -828,9 +835,10 @@ private:
     while (!stop_requested_.load(std::memory_order_relaxed)) {
       if (!microphone_) break;
       const uint64_t now = MonotonicTimeNs();
-      if (now >= next_device_check) {
+      /* A notification rechecks at once; the poll catches anything it misses. */
+      if (now >= next_device_check || devices_changed_.exchange(false)) {
         next_device_check = now + 500000000ull;
-        const auto preferred = PreferredMicrophoneId(targets_, microphone_source_);
+        const auto preferred = PreferredMicrophoneId(Targets(), microphone_source_);
         if (!preferred) {
           RecoverMicrophone(MREC_TRACK_REASON_DEVICE_REMOVED, "no microphone is available");
           continue;
@@ -869,42 +877,100 @@ private:
     return !finished();
   }
 
-  /* Check exits separately so a blocked recovery cannot hide them. */
-  void WatchForExit() {
+  /* Once a second, separately so a blocked recovery cannot hide anything: every
+   * captured app exiting ends system audio, and the apps' processes started outside
+   * the captured trees join it, as macOS refreshes its helpers. */
+  void WatchTargets() {
+    /* Activating a new target's client needs COM. */
+    ScopedComApartment apartment;
     while (WaitWhileRunning(1000, nullptr)) {
       const auto processes = ProcessSnapshot();
+      if (processes.empty()) continue;
+      const auto targets = Targets();
       const bool has_processes = std::any_of(processes.begin(), processes.end(),
-          [this, &processes](const auto &entry) {
-            return InTrees(processes, entry.first, targets_) && IsProcessRunning(entry.first);
+          [&processes, &targets](const auto &entry) {
+            return InTrees(processes, entry.first, targets) && IsProcessRunning(entry.first);
           });
-      if (!processes.empty() && !has_processes) {
+      if (!has_processes) {
         system_exited_ = true;
         mrec_track_interrupted(track_session_, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
                                MREC_TRACK_REASON_APP_EXITED, "the captured apps exited");
         return;
       }
+      const auto roots = meeting_record::SelectCaptureRoots(processes, {}, sibling_rule_);
+      for (uint32_t pid : meeting_record::UncapturedRoots(processes, roots, targets)) {
+        AddTarget(pid);
+      }
     }
+  }
+
+  /* Captures another process tree alongside the others, as a new live source. */
+  void AddTarget(uint32_t pid) {
+    if (std::find(unavailable_targets_.begin(), unavailable_targets_.end(), pid) !=
+        unavailable_targets_.end()) {
+      return;
+    }
+    auto stream = Activate(pid, /*exclude=*/false);
+    if (!stream || FAILED(stream->client->Start())) {
+      unavailable_targets_.push_back(pid);
+      return;
+    }
+    std::lock_guard<std::mutex> lock(sources_mutex_);
+    if (stop_requested_ || !mrec_track_add_source(track_session_, MREC_TRACK_SYSTEM_AUDIO)) {
+      stream->client->Stop();
+      return;
+    }
+    const size_t index = system_mixer_.AddSource();
+    streams_.push_back(std::make_unique<LoopbackStream>(std::move(*stream)));
+    targets_.push_back(pid);
+    workers_.emplace_back([this, index] { Drain(index); });
+  }
+
+  LoopbackStream &Stream(size_t index) {
+    std::lock_guard<std::mutex> lock(sources_mutex_);
+    return *streams_[index];
+  }
+
+  std::vector<uint32_t> Targets() {
+    std::lock_guard<std::mutex> lock(sources_mutex_);
+    return targets_;
+  }
+
+  /* Device changes retry a lost microphone at once, between the timed retries. */
+  void ListenForDevices() {
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(&device_enumerator_)))) {
+      return;
+    }
+    const uint64_t session = track_session_;
+    notifications_ = Microsoft::WRL::Make<DeviceNotifications>([this, session] {
+      devices_changed_ = true;
+      mrec_tracks_wake(session);
+    });
+    if (!notifications_ ||
+        FAILED(device_enumerator_->RegisterEndpointNotificationCallback(notifications_.Get()))) {
+      notifications_.Reset();
+      device_enumerator_.Reset();
+    }
+  }
+
+  void StopListeningForDevices() {
+    if (device_enumerator_ && notifications_) {
+      device_enumerator_->UnregisterEndpointNotificationCallback(notifications_.Get());
+    }
+    notifications_.Reset();
+    device_enumerator_.Reset();
   }
 
   struct Recovery {
     Session *session;
     size_t index;
-    mrec_track track;
   };
-
-  static int32_t WaitForRetry(void *context, uint32_t milliseconds) {
-    const auto *recovery = static_cast<Recovery *>(context);
-    const Session *session = recovery->session;
-    const bool system = recovery->track == MREC_TRACK_SYSTEM_AUDIO;
-    return session->WaitWhileRunning(milliseconds, system ? &session->system_exited_ : nullptr)
-               ? 1
-               : 0;
-  }
 
   static int32_t ReopenLoopback(void *context, char *, size_t) {
     auto *recovery = static_cast<Recovery *>(context);
     if (recovery->session->system_exited_.load(std::memory_order_relaxed)) return 0;
-    LoopbackStream &stream = recovery->session->streams_[recovery->index];
+    LoopbackStream &stream = recovery->session->Stream(recovery->index);
     auto replacement = recovery->session->Activate(stream.pid, stream.exclude);
     if (!replacement) return 0;
     HRESULT hr = replacement->client->Start();
@@ -921,7 +987,7 @@ private:
     mrec_status failure = MREC_ERR_DEVICE_FAILED;
     auto replacement =
         session->ActivateMicrophone(
-            PreferredMicrophoneId(session->targets_, session->microphone_source_), failure);
+            PreferredMicrophoneId(session->Targets(), session->microphone_source_), failure);
     if (!replacement) return 0;
     HRESULT hr = replacement->client->Start();
     if (FAILED(hr)) {
@@ -933,41 +999,49 @@ private:
     return 1;
   }
 
+  /* tracks.c retries every MREC_TRACK_RETRY_INTERVAL_MS, or at once on a notification. */
   void RecoverLoopback(size_t index, mrec_track_reason reason, const std::string &detail) {
-    if (streams_[index].client) streams_[index].client->Stop();
+    LoopbackStream &stream = Stream(index);
+    if (stream.client) stream.client->Stop();
     const std::string message = "system audio interrupted: " + detail;
     SetLastErrorMessage(message);
-    Recovery recovery{this, index, MREC_TRACK_SYSTEM_AUDIO};
+    Recovery recovery{this, index};
     mrec_track_recover(track_session_, MREC_TRACK_SYSTEM_AUDIO, static_cast<uint32_t>(index),
-                       reason, message.c_str(), ReopenLoopback, WaitForRetry, &recovery);
+                       reason, message.c_str(), ReopenLoopback, &recovery);
   }
 
   void RecoverMicrophone(mrec_track_reason reason, const std::string &detail) {
     if (microphone_ && microphone_->client) microphone_->client->Stop();
     const std::string message = "microphone interrupted: " + detail;
     SetLastErrorMessage(message);
-    Recovery recovery{this, 0, MREC_TRACK_MICROPHONE};
+    Recovery recovery{this, 0};
     mrec_track_recover(track_session_, MREC_TRACK_MICROPHONE, 0, reason, message.c_str(),
-                       ReopenMicrophone, WaitForRetry, &recovery);
+                       ReopenMicrophone, &recovery);
   }
 
   void StopLocked() {
     stop_requested_ = true;
+    StopListeningForDevices();
+    /* Ends pending retries at once; nothing is published after this. */
+    mrec_tracks_close();
+    /* The watcher adds drain threads, so it stops first. */
+    if (targets_worker_.joinable()) targets_worker_.join();
     for (auto &worker : workers_) {
       if (worker.joinable()) worker.join();
     }
     workers_.clear();
     if (microphone_worker_.joinable()) microphone_worker_.join();
-    if (exit_worker_.joinable()) exit_worker_.join();
     system_mixer_.Flush();
     if (microphone_) microphone_mixer_.Flush();
     for (auto &stream : streams_) {
-      if (stream.client) stream.client->Stop();
+      if (stream->client) stream->client->Stop();
     }
     streams_.clear();
     if (microphone_ && microphone_->client) microphone_->client->Stop();
     microphone_.reset();
     targets_.clear();
+    unavailable_targets_.clear();
+    sibling_rule_ = SiblingRule();
     mta_usage_.reset();
     microphone_enabled_ = false;
     callback_ = nullptr;
@@ -975,7 +1049,6 @@ private:
     microphone_callback_ = nullptr;
     microphone_user_data_ = nullptr;
     running_ = false;
-    mrec_tracks_close();
   }
 
   std::mutex mutex_;
@@ -983,16 +1056,25 @@ private:
   std::optional<ScopedMtaUsage> mta_usage_;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> system_exited_{false};
+  std::atomic<bool> devices_changed_{false};
+  /* Guards adding targets while drain and microphone threads read them. */
+  std::mutex sources_mutex_;
   /* Capture roots, which also pick the microphone; empty for system capture. */
   std::vector<uint32_t> targets_;
-  std::vector<LoopbackStream> streams_;
+  /* Index `i` feeds mixer source `i` and system track source `i`. */
+  std::vector<std::unique_ptr<LoopbackStream>> streams_;
   std::vector<std::thread> workers_;
+  SiblingRule sibling_rule_;
+  /* Processes that could not be captured; the watcher does not retry them. */
+  std::vector<uint32_t> unavailable_targets_;
+  ComPtr<IMMDeviceEnumerator> device_enumerator_;
+  ComPtr<DeviceNotifications> notifications_;
   std::optional<MicrophoneStream> microphone_;
   bool microphone_enabled_ = false;
   int32_t microphone_source_ = MREC_MICROPHONE_NONE;
   uint64_t track_session_ = 0;
   std::thread microphone_worker_;
-  std::thread exit_worker_;
+  std::thread targets_worker_;
   TimelineMixer system_mixer_;
   TimelineMixer microphone_mixer_;
   mrec_audio_callback callback_ = nullptr;

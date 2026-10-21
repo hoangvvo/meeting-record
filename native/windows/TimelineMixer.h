@@ -38,6 +38,13 @@ public:
     max_observed_frame_ = 0;
   }
 
+  /* A source that starts later joins at the current timeline position. Returns its index. */
+  size_t AddSource() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    progress_.push_back(max_observed_frame_);
+    return source_count_++;
+  }
+
   /* `discontinuity` is WASAPI's report that samples were lost before this packet. */
   void Add(size_t source, const float *samples, uint32_t frame_count, bool silent,
            bool discontinuity, uint64_t host_time_ns) {

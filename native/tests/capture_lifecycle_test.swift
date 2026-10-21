@@ -346,7 +346,7 @@ private func run(_ body: () -> Void) {
             }
             old.0.change(old.0.identifier, MREC_TRACK_REASON_DEVICE_REMOVED, "lost")
             old.1.change(old.1.identifier, MREC_TRACK_REASON_DEVICE_REMOVED, "lost")
-            waitUntil("retry backoff did not advance") {
+            waitUntil("retries did not advance") {
                 TestSources.read {
                     TestSources.tapAttempts >= 5 && TestSources.microphoneAttempts >= 5
                 }

@@ -132,6 +132,7 @@ fn build_windows(native: &Path) {
         "include/meeting-record-events.h",
         "windows/ProcessLoopback.cpp",
         "windows/AudioAppProcess.h",
+        "windows/CaptureRoots.h",
         "windows/CapturePump.h",
         "windows/MeetingDetector.cpp",
         "windows/TimelineMixer.h",

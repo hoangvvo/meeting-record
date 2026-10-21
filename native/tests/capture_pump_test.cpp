@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -212,22 +213,24 @@ void ThrowingConsumerStillReleases() {
 
 struct Recovery {
   Packets &source;
-  int attempts = 0;
   bool cancel = false;
-  std::vector<uint32_t> delays;
+  uint64_t session = 0;
+  int attempts = 0;
 
+  /* Each failure comes with a device notification; cancelling stops on the second try. */
   static int32_t Reopen(void *context, char *, size_t) {
     auto &state = *static_cast<Recovery *>(context);
     assert(!state.source.held);
-    if (++state.attempts < 3) return 0;
+    if (++state.attempts < 3) {
+      if (state.cancel && state.attempts == 2) {
+        mrec_tracks_close();
+      } else {
+        mrec_tracks_wake(state.session);
+      }
+      return 0;
+    }
     state.source.next_status = 0;
     return 1;
-  }
-
-  static int32_t Wait(void *context, uint32_t delay) {
-    auto &state = *static_cast<Recovery *>(context);
-    state.delays.push_back(delay);
-    return state.cancel ? 0 : 1;
   }
 };
 
@@ -236,12 +239,14 @@ void PumpFailuresUseSharedRecoveryAndResumeAudio() {
     Packets source;
     source.next_status = -101;
     Capture capture;
-    Recovery recovery{source, 0, cancel, {}};
+    Recovery recovery{source, cancel};
     std::vector<mrec_track_event_type> events;
     const auto session = mrec_tracks_open([](const mrec_track_event *event, void *context) {
       static_cast<std::vector<mrec_track_event_type> *>(context)->push_back(event->type);
     }, &events);
     assert(mrec_track_started(session, MREC_TRACK_SYSTEM_AUDIO, 1, nullptr));
+    recovery.session = session;
+    const auto started = std::chrono::steady_clock::now();
     PumpCapture(source,
         [](const float *, uint32_t, bool, bool, uint64_t) { assert(false); },
         [] { return uint64_t{0}; },
@@ -249,17 +254,18 @@ void PumpFailuresUseSharedRecoveryAndResumeAudio() {
           assert(failure == -101);
           const auto resumed = mrec_track_recover(
               session, MREC_TRACK_SYSTEM_AUDIO, 0, MREC_TRACK_REASON_DEVICE_REMOVED,
-              "capture failed", Recovery::Reopen, Recovery::Wait, &recovery);
+              "capture failed", Recovery::Reopen, &recovery);
           assert(resumed == (recovery.cancel ? 0 : 1));
         }, [] { assert(false); });
+    /* Notifications retry at once, never waiting out the interval. */
+    assert(std::chrono::steady_clock::now() - started <
+           std::chrono::milliseconds(MREC_TRACK_RETRY_INTERVAL_MS));
     assert(events.front() == MREC_TRACK_INTERRUPTED);
     if (cancel) {
-      assert(recovery.attempts == 1 && events.size() == 1);
-      assert(recovery.delays == std::vector<uint32_t>{100});
+      assert(recovery.attempts == 2 && events.size() == 1);
     } else {
       assert(recovery.attempts == 3 && events.size() == 2);
       assert(events.back() == MREC_TRACK_RESUMED);
-      assert(recovery.delays == (std::vector<uint32_t>{100, 200}));
       capture.Poll(source);
       assert(capture.blocks.size() == 1 && All(capture.blocks[0], 0.25f));
     }
