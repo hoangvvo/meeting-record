@@ -7,6 +7,8 @@
 #
 # System and Process play test tones. Meeting needs a call receiving audio. Exit
 # ends the captured app mid-capture: only its system audio may stop, with app-exited.
+# Helper captures a conferencing app, then starts another of its processes outside
+# the captured tree, as Teams does with its call host; that audio must join.
 #
 # -MicrophoneDevice plays a third tone into an output device that loops back to the
 # default microphone, such as a virtual cable's "CABLE Input", and requires that tone
@@ -17,7 +19,8 @@
 #
 # -RemoveMicrophone disables that recording device mid-capture, then restores it.
 # The microphone track must resume, or move to another device when one exists,
-# while system audio and the mix continue.
+# while system audio and the mix continue. Device notifications must bring it back
+# promptly after the restore.
 #
 # -SwitchOutput makes another playback device the default mid-capture, then restores
 # the original; capture must continue without gaps.
@@ -25,7 +28,7 @@
 # Unless a scenario expects them, any track event fails the run.
 [CmdletBinding()]
 param(
-    [ValidateSet("System", "Process", "Exit", "Meeting", "All")]
+    [ValidateSet("System", "Process", "Exit", "Helper", "Meeting", "All")]
     [string]$Mode,
     [string]$MeetingPlatform = "meet",
     [ValidateRange(0, [int]::MaxValue)]
@@ -62,6 +65,12 @@ $targetFrequency = 997
 $otherFrequency = 440
 $microphoneFrequency = 660
 $excludedFrequency = 880
+$helperFrequency = 523
+# A copy of PowerShell named like a conferencing app, so the backend treats its
+# processes as one app wherever they start.
+$appDirectory = Join-Path ([IO.Path]::GetTempPath()) "meeting-record-e2e-app"
+$appExecutable = Join-Path $appDirectory "Zoom.exe"
+$restoredFile = Join-Path ([IO.Path]::GetTempPath()) "meeting-record-e2e-restored-$PID"
 if (-not $Mode) {
     $shared = @{ Mode = "All" }
     foreach ($name in "Binding", "DurationSeconds", "MinimumPeak", "MixSampleRate", "PauseSeconds", "RestartCycles", "Microphone") {
@@ -141,7 +150,10 @@ $variableNames = @(
     "MREC_MICROPHONE_FREQUENCIES",
     "MREC_EXCLUDED_TONE_FREQUENCY",
     "MREC_TONE_POWERSHELL",
-    "MREC_EXPECT_APP_EXIT"
+    "MREC_EXPECT_APP_EXIT",
+    "MREC_HELPER_TONE_FREQUENCY",
+    "MREC_HELPER_EXE",
+    "MREC_MICROPHONE_RESTORED_FILE"
 )
 $originalEnvironment = @{}
 foreach ($name in $variableNames) {
@@ -162,7 +174,7 @@ function Invoke-Native([string]$Description, [scriptblock]$Command) {
     }
 }
 
-function Start-Tone([int]$Frequency, [int]$Seconds, [string]$Device) {
+function Start-Tone([int]$Frequency, [int]$Seconds, [string]$Device, [string]$Executable) {
     $readyFile = Join-Path ([IO.Path]::GetTempPath()) "meeting-record-tone-ready-$([Guid]::NewGuid().ToString('N'))"
     $arguments = @(
         "-NoProfile",
@@ -175,7 +187,8 @@ function Start-Tone([int]$Frequency, [int]$Seconds, [string]$Device) {
     if ($Device) {
         $arguments += @("-Device", ('"' + $Device + '"'))
     }
-    $process = Start-Process -PassThru -WindowStyle Hidden -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments
+    $program = if ($Executable) { $Executable } else { (Get-Process -Id $PID).Path }
+    $process = Start-Process -PassThru -WindowStyle Hidden -FilePath $program -ArgumentList $arguments
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     while (-not (Test-Path -LiteralPath $readyFile)) {
         if ($process.HasExited) {
@@ -235,7 +248,11 @@ try {
         Invoke-Native "building the Node.js package" { npm run build --workspace meeting-record }
     }
 
-    $modes = @(if ($Mode -eq "All") { "System", "Process", "Exit" } else { $Mode })
+    $modes = @(if ($Mode -eq "All") { "System", "Process", "Exit", "Helper" } else { $Mode })
+    if ($modes -contains "Helper") {
+        New-Item -ItemType Directory -Force $appDirectory | Out-Null
+        Copy-Item -LiteralPath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" $appExecutable -Force
+    }
     $runSeconds = ($DurationSeconds + 2) * $modes.Count * $bindings.Count + 30
     if ($modes -contains "System") { $runSeconds += 20 * $bindings.Count }
     if ($Mode -notin "Meeting", "Exit") {
@@ -266,6 +283,8 @@ try {
         foreach ($run in $modes) {
             Set-HarnessVariable "MREC_EXCLUDED_TONE_FREQUENCY" $null
             Set-HarnessVariable "MREC_EXPECT_APP_EXIT" $null
+            Set-HarnessVariable "MREC_HELPER_TONE_FREQUENCY" $null
+            Set-HarnessVariable "MREC_HELPER_EXE" $null
             if ($run -eq "Meeting") {
                 # The detected meeting's app, with whatever audio the call carries.
                 Write-Host "`n==> Windows $MeetingPlatform meeting E2E ($harness)"
@@ -295,6 +314,18 @@ try {
                 Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" $null
                 Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $null
                 Set-HarnessVariable "MREC_EXPECT_APP_EXIT" "1"
+            } elseif ($run -eq "Helper") {
+                # The harness starts a second copy of the app after capture begins.
+                $appTone = Start-Tone $targetFrequency ($DurationSeconds + 30) -Executable $appExecutable
+                $tones += $appTone
+                Write-Host "`n==> Windows app-helper E2E ($harness, pid $($appTone.Process.Id))"
+                Set-HarnessVariable "MREC_EXPECT_MEETING" $null
+                Set-HarnessVariable "MREC_TARGET_PID" $appTone.Process.Id
+                Set-HarnessVariable "MREC_MONO" "1"
+                Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" "$targetFrequency,$helperFrequency"
+                Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $(if ($MicrophoneDevice) { "$otherFrequency,$microphoneFrequency" } else { $otherFrequency })
+                Set-HarnessVariable "MREC_HELPER_TONE_FREQUENCY" $helperFrequency
+                Set-HarnessVariable "MREC_HELPER_EXE" $appExecutable
             } else {
                 # Mono process tree: only the target's tone is present.
                 Write-Host "`n==> Windows process-audio E2E ($harness, pid $($target.Process.Id))"
@@ -305,6 +336,8 @@ try {
                 Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $(if ($MicrophoneDevice) { "$otherFrequency,$microphoneFrequency" } else { $otherFrequency })
             }
             $changes = @()
+            Remove-Item -LiteralPath $restoredFile -Force -ErrorAction SilentlyContinue
+            Set-HarnessVariable "MREC_MICROPHONE_RESTORED_FILE" $(if ($RemoveMicrophone -and $run -ne "Exit") { $restoredFile })
             if ($run -ne "Exit") {
                 # Change a quarter of the way into capture, and back a quarter later.
                 $changeAt = $RestartCycles * 0.4 + $DurationSeconds / 4
@@ -315,9 +348,11 @@ try {
                 }
                 if ($RemoveMicrophone) {
                     $changes += Start-DeviceChange $RemoveMicrophone $changeAt @("-Action", "Disable")
-                    $changes += Start-DeviceChange $RemoveMicrophone $restoreAt @("-Action", "Enable")
+                    # Off the 500 ms retry grid: only a device notification brings it back at once.
+                    $changes += Start-DeviceChange $RemoveMicrophone ($restoreAt + 0.25) @("-Action", "Enable", "-DoneFile", ('"' + $restoredFile + '"'))
                 }
-                if ($SwitchOutput) {
+                # A helper starting mid-switch opens on whichever output is default then.
+                if ($SwitchOutput -and $run -ne "Helper") {
                     $changes += Start-DeviceChange $SwitchOutput $changeAt @("-Output")
                     $changes += Start-DeviceChange $originalOutput $restoreAt @("-Output")
                 }
@@ -331,12 +366,16 @@ try {
             }
             finally {
                 foreach ($change in $changes) { $change.WaitForExit() }
+                # Another run's copy of the app would join as a sibling.
+                if ($run -eq "Helper") { Stop-Tone $appTone }
             }
         }
     }
 }
 finally {
     foreach ($tone in $tones) { Stop-Tone $tone }
+    Remove-Item -LiteralPath $restoredFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $appDirectory -Recurse -Force -ErrorAction SilentlyContinue
     if ($RemoveMicrophone) {
         & $deviceScript -Device $RemoveMicrophone -Action Enable | Out-Null
     }

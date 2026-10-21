@@ -3,6 +3,7 @@
 use std::{
     env,
     error::Error as StdError,
+    ffi::OsString,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -34,6 +35,9 @@ const MAX_MICROPHONE_DROPOUTS: usize = 2;
 const STARTUP: Duration = Duration::from_millis(100);
 /// System audio already in flight when the exited app is reported.
 const MAX_AFTER_EXIT: Duration = Duration::from_millis(50);
+/// A notification brings a restored microphone back this soon; a timed retry alone
+/// takes ~250 ms. Events are polled, so this includes up to one polling interval.
+const MAX_RECOVERY_MS: i128 = 150;
 
 #[derive(Default)]
 struct TrackMetrics {
@@ -432,27 +436,30 @@ fn frequencies(name: &str) -> Result<Vec<f64>, Box<dyn StdError>> {
         .collect()
 }
 
-struct ExcludedTone {
+/// A tone the harness starts from `program` once capture has begun.
+struct LateTone {
     child: Child,
     ready_file: PathBuf,
+    frequency: u32,
 }
 
-impl ExcludedTone {
+impl LateTone {
     fn start(
         frequency: Option<u32>,
         duration: Duration,
+        program: Option<OsString>,
     ) -> Result<Option<Self>, Box<dyn StdError>> {
         let Some(frequency) = frequency else {
             return Ok(None);
         };
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let ready_file = env::temp_dir().join(format!(
-            "meeting-record-excluded-{}-{nonce}",
+            "meeting-record-late-{}-{nonce}",
             std::process::id()
         ));
-        let mut command = Command::new(
-            env::var_os("MREC_TONE_POWERSHELL").unwrap_or_else(|| "powershell.exe".into()),
-        );
+        let mut command = Command::new(program.unwrap_or_else(|| {
+            env::var_os("MREC_TONE_POWERSHELL").unwrap_or_else(|| "powershell.exe".into())
+        }));
         command
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../windows-tone.ps1"))
@@ -472,12 +479,13 @@ impl ExcludedTone {
         let mut tone = Self {
             child: command.spawn()?,
             ready_file,
+            frequency,
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         while !tone.ready_file.exists() {
             tone.assert_alive()?;
             if Instant::now() >= deadline {
-                return Err("timed out starting the excluded tone".into());
+                return Err(format!("timed out starting the {frequency} Hz tone").into());
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -487,13 +495,13 @@ impl ExcludedTone {
 
     fn assert_alive(&mut self) -> Result<(), Box<dyn StdError>> {
         if self.child.try_wait()?.is_some() {
-            return Err("the excluded tone exited during capture".into());
+            return Err(format!("the {} Hz tone exited during capture", self.frequency).into());
         }
         Ok(())
     }
 }
 
-impl Drop for ExcludedTone {
+impl Drop for LateTone {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -502,6 +510,31 @@ impl Drop for ExcludedTone {
             env::temp_dir().join(format!("meeting-record-tone-{}.wav", self.child.id())),
         );
     }
+}
+
+fn unix_millis() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i128)
+}
+
+/// Device notifications bring a restored microphone back without waiting for a
+/// timed retry.
+fn verify_recovery_latency(recovered_at: Option<i128>) -> Result<(), Box<dyn StdError>> {
+    let Some(file) = env::var_os("MREC_MICROPHONE_RESTORED_FILE") else {
+        return Ok(());
+    };
+    let restored_at: i128 = std::fs::read_to_string(file)?.trim().parse()?;
+    let recovered_at = recovered_at.ok_or("the microphone never came back")?;
+    let latency = recovered_at - restored_at;
+    println!("microphone: back {latency} ms after the restore");
+    if latency > MAX_RECOVERY_MS {
+        return Err(format!(
+            "microphone: back {latency} ms after the restore, not within {MAX_RECOVERY_MS} ms"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// The app of a meeting that both a scan and the watcher report as recordable.
@@ -761,6 +794,13 @@ fn main() -> Result<(), Box<dyn StdError>> {
     if excluded_frequency.is_some() && !matches!(target, CaptureTarget::System) {
         return Err("the recorder exclusion check needs system capture".into());
     }
+    let helper_frequency = env::var("MREC_HELPER_TONE_FREQUENCY")
+        .ok()
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    if helper_frequency.is_some() && !matches!(target, CaptureTarget::Process { .. }) {
+        return Err("the helper check needs process capture".into());
+    }
     let expect_recovery = enabled("MREC_EXPECT_MICROPHONE_RECOVERY");
     let expectations = Expectations {
         minimum_peak,
@@ -787,7 +827,10 @@ fn main() -> Result<(), Box<dyn StdError>> {
 
     println!("starting {target:?} capture for {}s", duration.as_secs());
     let recording = Arc::new(capture::start(target, options)?);
-    let measuring = Arc::new(AtomicBool::new(excluded_frequency.is_none()));
+    // A late tone's check starts once it plays.
+    let measuring = Arc::new(AtomicBool::new(
+        excluded_frequency.is_none() && helper_frequency.is_none(),
+    ));
 
     let system_reader = Arc::clone(&recording);
     let system_measuring = Arc::clone(&measuring);
@@ -843,8 +886,13 @@ fn main() -> Result<(), Box<dyn StdError>> {
         })
     });
 
-    let mut excluded_tone = match ExcludedTone::start(excluded_frequency, duration) {
-        Ok(tone) => tone,
+    // The helper is another copy of the captured app, started outside its process tree.
+    let late_tones = LateTone::start(excluded_frequency, duration, None).and_then(|excluded| {
+        let helper = LateTone::start(helper_frequency, duration, env::var_os("MREC_HELPER_EXE"))?;
+        Ok([excluded, helper])
+    });
+    let mut late_tones = match late_tones {
+        Ok(tones) => tones,
         Err(error) => {
             recording.stop();
             return Err(error);
@@ -859,6 +907,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         (start, start + pause)
     });
     let mut events = Vec::new();
+    let mut microphone_recovered_at = None;
     while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
         if let Some((start, end)) = pause_window {
@@ -872,6 +921,9 @@ fn main() -> Result<(), Box<dyn StdError>> {
         }
         while let Some(event) = recording.try_recv_event() {
             println!("track event: {event:?}");
+            if microphone_resumed(&event) || microphone_changed(&event) {
+                microphone_recovered_at = Some(unix_millis());
+            }
             events.push(event);
         }
     }
@@ -880,10 +932,10 @@ fn main() -> Result<(), Box<dyn StdError>> {
             .microphone()
             .is_some_and(|track| track.is_interrupted());
     recording.stop();
-    if let Some(tone) = &mut excluded_tone {
+    for tone in late_tones.iter_mut().flatten() {
         tone.assert_alive()?;
     }
-    drop(excluded_tone);
+    drop(late_tones);
     while let Some(event) = recording.try_recv_event() {
         println!("track event: {event:?}");
         events.push(event);
@@ -901,6 +953,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         return Err("a track was still interrupted at the end".into());
     }
     verify_track_events(&events, expect_device_change, expect_recovery)?;
+    verify_recovery_latency(microphone_recovered_at)?;
 
     let expected_duration = duration.saturating_sub(pause.unwrap_or_default());
     system.report("system");

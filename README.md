@@ -131,7 +131,7 @@ Live audio tests on Windows:
 ./e2e/windows.ps1                                                 # every scenario, both bindings
 ./e2e/windows.ps1 -Binding Rust                                   # every scenario, one binding
 ./e2e/windows.ps1 -SwitchMicrophone "Stereo Mix"                  # choose a device instead of detecting one
-./e2e/windows.ps1 -Mode All                                       # system, process, and app exit only
+./e2e/windows.ps1 -Mode All                                       # system, process, app exit, and helpers only
 ./e2e/windows.ps1 -Mode Process -RemoveMicrophone "CABLE Output"  # one scenario
 ./e2e/windows.ps1 -Mode Meeting -MeetingPid 1234                  # a live meeting
 ```

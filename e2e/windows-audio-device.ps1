@@ -11,7 +11,9 @@ param(
     [ValidateSet("Default", "Disable", "Enable", "Find", "List")]
     [string]$Action = "Default",
     [ValidateRange(0, 600)]
-    [double]$DelaySeconds = 0
+    [double]$DelaySeconds = 0,
+    # Records when the change completed, in Unix milliseconds.
+    [string]$DoneFile
 )
 
 Set-StrictMode -Version Latest
@@ -191,5 +193,8 @@ $name = switch ($Action) {
     "Default" { [MeetingRecord.AudioDevices]::SetDefault($flow, $Device) }
     "Disable" { [MeetingRecord.AudioDevices]::Disable($flow, $Device) }
     "Enable" { [MeetingRecord.AudioDevices]::Enable($flow, $Device) }
+}
+if ($DoneFile) {
+    Set-Content -LiteralPath $DoneFile -Value ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
 }
 Write-Host "$($Action.ToLower()) $(if ($Output) { 'output' } else { 'microphone' }): $name"

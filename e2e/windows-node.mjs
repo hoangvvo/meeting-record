@@ -2,7 +2,7 @@
 import { on, once } from "node:events";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, rm } from "node:fs/promises";
+import { access, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -26,6 +26,8 @@ const MAX_MICROPHONE_DROPOUTS = 2;
 const STARTUP_SECONDS = 0.1;
 /** System audio already in flight when the exited app is reported. */
 const MAX_SECONDS_AFTER_EXIT = 0.05;
+/** A notification brings a restored microphone back this soon; a timed retry alone takes ~250 ms. */
+const MAX_RECOVERY_MS = 150;
 
 class TrackMetrics {
   frames = 0;
@@ -323,15 +325,35 @@ function verifyTrackEvents(events, expectDeviceChange, expectRecovery) {
   }
 }
 
+/** Device notifications bring a restored microphone back without waiting for a timed retry. */
+async function verifyRecoveryLatency(recoveredAt) {
+  const file = process.env.MREC_MICROPHONE_RESTORED_FILE;
+  if (!file) return;
+  const restoredAt = Number((await readFile(file, "utf8")).trim());
+  if (recoveredAt === undefined) throw new Error("the microphone never came back");
+  const latency = recoveredAt - restoredAt;
+  console.log(`microphone: back ${latency} ms after the restore`);
+  if (latency > MAX_RECOVERY_MS) {
+    throw new Error(
+      `microphone: back ${latency} ms after the restore, not within ${MAX_RECOVERY_MS} ms`,
+    );
+  }
+}
+
 /** Resolves once every listed stream has ended. */
 const ended = (streams) =>
   Promise.all(streams.filter(Boolean).map((stream) => once(stream, "end")));
 
-async function startExcludedTone(frequency, durationSeconds) {
+/** A tone the harness starts from `program` once capture has begun. */
+async function startLateTone(
+  frequency,
+  durationSeconds,
+  program = process.env.MREC_TONE_POWERSHELL ?? "powershell.exe",
+) {
   if (frequency === undefined) return undefined;
-  const readyFile = join(tmpdir(), `meeting-record-excluded-${randomUUID()}`);
+  const readyFile = join(tmpdir(), `meeting-record-late-${randomUUID()}`);
   const child = spawn(
-    process.env.MREC_TONE_POWERSHELL ?? "powershell.exe",
+    program,
     [
       "-NoProfile",
       "-ExecutionPolicy",
@@ -355,7 +377,7 @@ async function startExcludedTone(frequency, durationSeconds) {
   const assertAlive = () => {
     if (failure) throw failure;
     if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error("the excluded tone exited during capture");
+      throw new Error(`the ${frequency} Hz tone exited during capture`);
     }
   };
   const stop = async () => {
@@ -377,7 +399,8 @@ async function startExcludedTone(frequency, durationSeconds) {
         )
       )
         break;
-      if (performance.now() >= deadline) throw new Error("timed out starting the excluded tone");
+      if (performance.now() >= deadline)
+        throw new Error(`timed out starting the ${frequency} Hz tone`);
       await delay(50);
     }
     return { assertAlive, stop };
@@ -530,6 +553,10 @@ async function main() {
   if (excludedFrequency !== undefined && target.type !== "system") {
     throw new Error("the recorder exclusion check needs system capture");
   }
+  const helperFrequency = number("MREC_HELPER_TONE_FREQUENCY", undefined);
+  if (helperFrequency !== undefined && target.type !== "process") {
+    throw new Error("the helper check needs process capture");
+  }
   const expectRecovery = enabled("MREC_EXPECT_MICROPHONE_RECOVERY");
   const expectations = {
     minimumPeak: number("MREC_MIN_PEAK", 0.0001),
@@ -558,7 +585,8 @@ async function main() {
   const system = new TrackMetrics();
   const microphone = includeMicrophone ? new TrackMetrics() : undefined;
   const mixed = mixSampleRate === undefined ? undefined : new MixMetrics();
-  let measuring = excludedFrequency === undefined;
+  // A late tone's check starts once it plays.
+  let measuring = excludedFrequency === undefined && helperFrequency === undefined;
   recording.systemAudio.on("data", (chunk) => {
     if (measuring) system.add(chunk);
   });
@@ -584,6 +612,8 @@ async function main() {
   }
   /** @type {string[]} */
   const trackEvents = [];
+  /** When the microphone last resumed or moved, in Unix milliseconds. */
+  let microphoneRecoveredAt;
   for (const [name, track] of [
     ["system", recording.systemAudio],
     ["microphone", recording.microphone],
@@ -597,18 +627,23 @@ async function main() {
     track?.on("resumed", () => {
       console.log(`${name} resumed`);
       trackEvents.push(`${name} resumed`);
+      if (name === "microphone") microphoneRecoveredAt = Date.now();
     });
     track?.on("devicechange", (deviceName) => {
       console.log(`${name} device: ${deviceName}`);
       trackEvents.push(`${name} devicechange`);
+      if (name === "microphone") microphoneRecoveredAt = Date.now();
     });
   }
   const finished = ended([recording.systemAudio, recording.microphone, recording.mixedAudio]);
 
   let excludedTone;
+  let helperTone;
   let interrupted;
   try {
-    excludedTone = await startExcludedTone(excludedFrequency, durationSeconds);
+    excludedTone = await startLateTone(excludedFrequency, durationSeconds);
+    // Another copy of the captured app, started outside its process tree.
+    helperTone = await startLateTone(helperFrequency, durationSeconds, process.env.MREC_HELPER_EXE);
     measuring = true;
     const started = performance.now();
     const deadline = started + durationSeconds * 1000;
@@ -633,6 +668,7 @@ async function main() {
       }
     }
     excludedTone?.assertAlive();
+    helperTone?.assertAlive();
     interrupted = [recording.systemAudio, recording.microphone].filter(
       (track) => track?.interrupted,
     );
@@ -642,11 +678,13 @@ async function main() {
       await finished;
     } finally {
       await excludedTone?.stop();
+      await helperTone?.stop();
     }
   }
 
   if (interrupted.length > 0) throw new Error("a track was still interrupted at the end");
   verifyTrackEvents(trackEvents, expectDeviceChange, expectRecovery);
+  await verifyRecoveryLatency(microphoneRecoveredAt);
 
   const expectedSeconds = durationSeconds - (pauseSeconds ?? 0);
   system.report("system");
