@@ -102,6 +102,19 @@ test("stopping a paused recording excludes new native tail callbacks", async () 
   for await (const packet of recording.systemAudio) assert.ok(packet.hostTimeNs < 1_400_000_000n);
 });
 
+test("track events set availability and skip unknown native event types", async () => {
+  const recording = await api.capture.start({ type: "process", pid: 1 });
+  try {
+    assert.equal(recording.systemAudio.availability, "degraded");
+    assert.equal(recording.systemAudio.interrupted, false);
+  } finally {
+    // A live capture would keep the test process running.
+    await recording.stopRecording();
+  }
+  for await (const packet of recording.systemAudio) assert.equal(packet.channels, 1);
+  assert.equal(recording.systemAudio.availability, "degraded");
+});
+
 test("enumeration failures stay distinguishable from an empty source list", async () => {
   await assert.rejects(api.meetings.scan(), api.InternalError);
   assert.throws(() => api.meetings.audioProcesses(), api.InternalError);

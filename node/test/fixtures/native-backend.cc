@@ -13,6 +13,13 @@ void Packet(unsigned index) {
   const float samples[] = {0.25f, -0.25f};
   audio(samples, 2, 1, 48000, 1000000000ull + index * 10000000ull, audio_data);
 }
+void SystemEvent(mrec_track_event_callback callback, void *data, int type) {
+  mrec_track_event event{};
+  event.track = MREC_TRACK_SYSTEM_AUDIO;
+  event.type = static_cast<mrec_track_event_type>(type);
+  event.reason = MREC_TRACK_REASON_DEVICE_REMOVED;
+  callback(&event, data);
+}
 }
 extern "C" {
 mrec_permission mrec_audio_permission_status() { return MREC_PERM_GRANTED; }
@@ -28,12 +35,18 @@ mrec_status mrec_watch_start(mrec_meeting_callback, void *) { return MREC_OK; }
 mrec_status mrec_watch_stop() { return MREC_OK; }
 int32_t mrec_is_watching() { return 0; }
 const char *mrec_platform_id(mrec_platform) { return "unknown"; }
-int32_t mrec_start_tracks_raw(const uint32_t *, size_t, int32_t, int32_t, int32_t, int32_t,
-    mrec_audio_callback callback, void *data, mrec_audio_callback, void *, mrec_track_event_callback, void *) {
+int32_t mrec_start_tracks_raw(const uint32_t *, size_t pid_count, int32_t, int32_t, int32_t, int32_t,
+    mrec_audio_callback callback, void *data, mrec_audio_callback, void *,
+    mrec_track_event_callback event_callback, void *event_data) {
   audio = callback;
   audio_data = data;
   running = true;
   for (unsigned index = 0; index < 40; index++) Packet(index);
+  /* Process targets lose a source, then report an event type newer than the binding. */
+  if (pid_count > 0) {
+    SystemEvent(event_callback, event_data, MREC_TRACK_DEGRADED);
+    SystemEvent(event_callback, event_data, 99);
+  }
   return MREC_OK;
 }
 mrec_status mrec_current_format(double *rate, uint32_t *channels) { *rate = 48000; *channels = 1; return MREC_OK; }

@@ -1745,6 +1745,55 @@ mod capture_tests {
     }
 
     #[test]
+    fn track_events_update_availability_and_skip_unknown_types() {
+        use super::{
+            sys, track_event_trampoline, EventContext, EventQueue, InterruptionReason, Track,
+            TrackEvent, TrackStatus,
+        };
+        use std::{
+            mem,
+            sync::{atomic::Ordering, Arc},
+        };
+        let context = EventContext {
+            queue: Arc::new(EventQueue::default()),
+            system_audio: Arc::new(TrackStatus::default()),
+            microphone: Arc::new(TrackStatus::default()),
+        };
+        let publish = |kind| {
+            let mut event: sys::TrackEvent = unsafe { mem::zeroed() };
+            event.kind = kind;
+            event.reason = sys::MREC_TRACK_REASON_DEVICE_REMOVED;
+            unsafe {
+                track_event_trampoline(&event, (&context as *const EventContext).cast_mut().cast())
+            };
+        };
+        let availability = || context.system_audio.availability.load(Ordering::Acquire);
+
+        publish(sys::MREC_TRACK_DEGRADED);
+        // A newer native event type leaves the track as it was.
+        publish(99);
+        assert_eq!(availability(), 1);
+        assert!(matches!(
+            context.queue.try_recv(),
+            Some(TrackEvent::Degraded {
+                track: Track::SystemAudio,
+                reason: InterruptionReason::DeviceRemoved,
+                ..
+            })
+        ));
+        assert!(context.queue.try_recv().is_none());
+
+        publish(sys::MREC_TRACK_RESUMED);
+        assert_eq!(availability(), 0);
+        assert!(matches!(
+            context.queue.try_recv(),
+            Some(TrackEvent::Resumed {
+                track: Track::SystemAudio
+            })
+        ));
+    }
+
+    #[test]
     fn cancelled_requests_do_not_start_native_work() {
         use super::{
             capture, permissions, CancellationToken, CaptureOptions, CaptureTarget, Error,
