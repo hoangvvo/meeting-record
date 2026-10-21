@@ -1,3 +1,4 @@
+import CoreAudio
 import Foundation
 
 @_silgen_name("mrec_current_microphone_name")
@@ -70,6 +71,7 @@ private func run(_ body: () -> Void) {
     precondition(
         TestSources.read { TestSources.taps.values.allSatisfy { !$0.prepared && !$0.started } })
     precondition(TestSources.read { TestSources.microphones.values.allSatisfy { !$0.started } })
+    precondition(TestSources.read { TestSources.deviceListeners.isEmpty })
     precondition(mrec_current_format(nil, nil) == -4)
     precondition(mrec_current_microphone_format(nil, nil) == -4)
 }
@@ -84,6 +86,7 @@ private func run(_ body: () -> Void) {
         replacementFailures()
         staleCallbacks()
         stopDuringRecovery()
+        deviceChangesWakeRecovery()
         helperReplacement()
         appExitDuringRecovery()
         print("capture lifecycle tests passed")
@@ -333,6 +336,50 @@ private func run(_ body: () -> Void) {
                     TestSources.tapAttempts == 3 && TestSources.microphoneAttempts == 3
                         && TestSources.events.isEmpty
                 })
+        }
+    }
+
+    static func deviceChangesWakeRecovery() {
+        for selector in [kAudioHardwarePropertyDefaultInputDevice,
+                         kAudioHardwarePropertyDefaultOutputDevice] {
+            run {
+                precondition(start() == 0)
+                let old = TestSources.read { (TestSources.tap!, TestSources.microphone!) }
+                TestSources.read {
+                    TestSources.tapAvailable = false
+                    TestSources.microphoneAvailable = false
+                }
+                old.0.change(old.0.identifier, MREC_TRACK_REASON_DEVICE_REMOVED, "lost")
+                old.1.change(old.1.identifier, MREC_TRACK_REASON_DEVICE_REMOVED, "lost")
+                waitUntil("both sources did not interrupt") {
+                    events(MREC_TRACK_SYSTEM_AUDIO).last?.type == MREC_TRACK_INTERRUPTED
+                        && events(MREC_TRACK_MICROPHONE).last?.type == MREC_TRACK_INTERRUPTED
+                }
+
+                // Aggregate creation and teardown must not bypass the retry interval.
+                let attempts = TestSources.read { TestSources.tapAttempts + TestSources.microphoneAttempts }
+                let checkedAt = Date()
+                repeat {
+                    TestSources.deviceChanged(kAudioHardwarePropertyDevices)
+                    Thread.sleep(forTimeInterval: 0.01)
+                } while Date().timeIntervalSince(checkedAt) < 0.1
+                precondition(TestSources.read {
+                    TestSources.tapAttempts + TestSources.microphoneAttempts == attempts
+                }, "device-list notifications caused immediate retries")
+
+                TestSources.read {
+                    TestSources.tapAvailable = true
+                    TestSources.microphoneAvailable = true
+                }
+                let notifiedAt = Date()
+                TestSources.deviceChanged(selector)
+                waitUntil("device notification did not recover both sources") {
+                    events(MREC_TRACK_SYSTEM_AUDIO).last?.type == MREC_TRACK_RESUMED
+                        && events(MREC_TRACK_MICROPHONE).last?.type == MREC_TRACK_RESUMED
+                }
+                precondition(Date().timeIntervalSince(notifiedAt) < 0.25,
+                             "device notification waited for the retry interval")
+            }
         }
     }
 

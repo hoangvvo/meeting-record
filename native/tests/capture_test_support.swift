@@ -95,6 +95,7 @@ enum TestSources {
     static var events: [mrec_track_event] = []
     static var systemPackets: [TestAudioPacket] = []
     static var microphonePackets: [TestAudioPacket] = []
+    static var deviceListeners: [AudioObjectPropertySelector: AudioObjectPropertyListenerBlock] = [:]
 
     static func read<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
@@ -104,6 +105,7 @@ enum TestSources {
 
     static func reset() {
         read {
+            precondition(deviceListeners.isEmpty, "a device listener outlived its session")
             alive = [123, 456]
             helpers = [456]
             exitDuringHelperLookup = false
@@ -130,6 +132,39 @@ enum TestSources {
             microphonePackets = []
         }
     }
+
+    static func deviceChanged(_ selector: AudioObjectPropertySelector) {
+        let listener = read { deviceListeners[selector] }
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+                                                mScope: kAudioObjectPropertyScopeGlobal,
+                                                mElement: kAudioObjectPropertyElementMain)
+        withUnsafePointer(to: &address) { listener?(1, $0) }
+    }
+}
+
+@discardableResult
+func AudioObjectAddPropertyListenerBlock(_ object: AudioObjectID,
+                                        _ address: UnsafePointer<AudioObjectPropertyAddress>,
+                                        _ queue: DispatchQueue,
+                                        _ block: @escaping AudioObjectPropertyListenerBlock) -> OSStatus {
+    precondition(object == kAudioObjectSystemObject)
+    TestSources.read {
+        precondition(TestSources.deviceListeners[address.pointee.mSelector] == nil)
+        TestSources.deviceListeners[address.pointee.mSelector] = block
+    }
+    return noErr
+}
+
+@discardableResult
+func AudioObjectRemovePropertyListenerBlock(_ object: AudioObjectID,
+                                           _ address: UnsafePointer<AudioObjectPropertyAddress>,
+                                           _ queue: DispatchQueue,
+                                           _ block: AudioObjectPropertyListenerBlock) -> OSStatus {
+    precondition(object == kAudioObjectSystemObject)
+    TestSources.read {
+        precondition(TestSources.deviceListeners.removeValue(forKey: address.pointee.mSelector) != nil)
+    }
+    return noErr
 }
 
 final class TapCapture {

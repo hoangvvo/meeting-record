@@ -57,9 +57,9 @@ private func releaseSession() {
     mrec_tracks_close()
 }
 
-/// The system properties that change when an input device appears, leaves, or becomes default.
+/// Our aggregates change the device list; only default-device changes wake recovery.
 private let deviceAddresses = [kAudioHardwarePropertyDefaultInputDevice,
-                               kAudioHardwarePropertyDevices].map {
+                               kAudioHardwarePropertyDefaultOutputDevice].map {
     AudioObjectPropertyAddress(mSelector: $0, mScope: kAudioObjectPropertyScopeGlobal,
                                mElement: kAudioObjectPropertyElementMain)
 }
