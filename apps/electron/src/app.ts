@@ -114,8 +114,7 @@ const PERMISSION_TEXT: Record<
   denied: "denied",
 };
 
-// a want rather than the checkbox state: granting the permission later re-arms
-// the mic track, but only if the user didn't turn it off themselves
+// Keep the mic preference when permission is granted later.
 let micWanted = true;
 let micStatus: PermissionStatus = "unknown";
 
@@ -281,7 +280,7 @@ async function start(meetingId: string | null): Promise<void> {
 
   const withMic = ui.microphone.checked;
 
-  // first start can block ~6s while TCC makes up its mind
+  // Initial permission checks can take a few seconds.
   setState("starting");
   ui.elapsed.textContent = "0:00";
   detail("Starting…");
@@ -333,7 +332,7 @@ document.title = `meeting-record (${bridge.binding})`;
 bridge.onMeetingEvent(onMeetingEvent);
 bridge.onMeter(showMeter);
 
-// grants change behind our back in System Settings, so re-read on the way in
+// Refresh permissions when the window regains focus.
 window.addEventListener("focus", () => void refreshPermissions());
 
 await refreshPermissions();

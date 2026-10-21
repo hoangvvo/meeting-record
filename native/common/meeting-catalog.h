@@ -1,14 +1,4 @@
-/*
- * Meeting classification shared by the macOS and Windows backends: which apps
- * and browsers host calls, how URLs and titles name a meeting, and how audio
- * activity scores.
- *
- * Backends supply what their OS exposes: bundle ids or executable names, window
- * and tab titles, URLs, and audio activity.
- *
- * Internal. Platforms are mrec_platform values as plain integers, so Swift can
- * import this header without the public ones it implements.
- */
+/* Shared meeting classification. Integer platform values keep this Swift-compatible. */
 #ifndef MEETING_RECORD_MEETING_CATALOG_H
 #define MEETING_RECORD_MEETING_CATALOG_H
 
@@ -33,7 +23,7 @@ int32_t mrec_catalog_bundle_platform(const char *bundle_id);
 /* macOS: the bundle-id prefix of the browser owning `bundle_id`, or NULL. */
 const char *mrec_catalog_bundle_browser(const char *bundle_id);
 
-/* Windows: the conferencing app an executable name such as "zoom.exe" belongs to. */
+/* Windows: platform for a conferencing executable. */
 int32_t mrec_catalog_executable_platform(const char *executable);
 
 /* Windows: the browser executable `executable` names, or NULL. */

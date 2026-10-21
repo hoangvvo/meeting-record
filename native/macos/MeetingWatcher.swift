@@ -2,14 +2,7 @@ import AppKit
 import CoreAudio
 import Foundation
 
-/// Watches for meetings starting, changing and ending.
-///
-/// Three triggers:
-///  * `NSWorkspace` launch/terminate notifications.
-///  * A CoreAudio listener on `kAudioHardwarePropertyProcessObjectList`, which
-///    fires when a process starts or stops audio IO.
-///  * A slow timer, for state changes that leave the process set unchanged, such
-///    as unmuting or navigating to a different meeting.
+/// Rescan on app/audio changes, with a timer for changes those notifications miss.
 final class MeetingWatcher {
     /// Backstop interval for changes the other triggers miss.
     private static let backstopInterval: TimeInterval = 5.0

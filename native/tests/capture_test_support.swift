@@ -1,5 +1,4 @@
-// Fake OS sources for testing the actual macOS session coordinator without TCC
-// prompts or changing the user's audio devices.
+// Fake audio sources for session tests without permissions or device changes.
 import CoreAudio
 import Foundation
 

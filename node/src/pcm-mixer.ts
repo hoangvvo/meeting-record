@@ -42,8 +42,7 @@ export class PcmMixer {
     let position =
       this.#originFrame +
       Math.round((Number(chunk.hostTimeNs - this.#origin) * this.#sampleRate) / 1e9);
-    // When every source was absent for over a second, start a new segment.
-    // A live mix must not release minutes of backfilled silence on recovery.
+    // Skip gaps over a second when every source was absent.
     if (position > this.#end + this.#sampleRate) {
       this.finishSegment();
       this.restart();

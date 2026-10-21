@@ -1,8 +1,6 @@
 import Foundation
 
-/// Tests for the classification logic, which needs no live meeting.
-///
-/// Compiled against the real macOS sources and the shared catalog, not a copy.
+/// Meeting classification tests using the shared catalog.
 
 @main
 struct CatalogTests {
@@ -48,8 +46,7 @@ struct CatalogTests {
                     "unrelated app is not a meeting app")
         expectEqual(MeetingCatalog.nativePlatform(forBundleID: ""), nil,
                     "empty bundle id is not a match")
-        // A browser must not be classified as a native conferencing client, or every
-        // YouTube tab becomes a meeting.
+        // Browser audio alone must not count as a native meeting.
         expectEqual(MeetingCatalog.nativePlatform(forBundleID: "com.google.Chrome"), nil,
                     "browsers are not native meeting apps")
 

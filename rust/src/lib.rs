@@ -376,10 +376,7 @@ fn collect_processes(
     }
 }
 
-/// Conferencing platform.
-///
-/// [`Platform::as_str`] is a stable identifier. No human-readable labels are
-/// provided; presentation and localisation belong to the caller.
+/// Conferencing platform with a stable [`Platform::as_str`] identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Platform {
@@ -634,7 +631,7 @@ pub enum Track {
     Microphone,
 }
 
-/// Why a track was interrupted, after WASAPI's session disconnect reasons.
+/// Reason for source loss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InterruptionReason {
@@ -1232,8 +1229,7 @@ impl CaptureControl {
         if state & STATE_MASK == STATE_STOPPED {
             return;
         }
-        // Native stop can deliver the Windows mixer's final partial block.
-        // Keep accepting callbacks until it guarantees production has ended.
+        // Accept final callbacks until native teardown finishes.
         stop_native();
         self.state
             .store((state & !STATE_MASK) | STATE_STOPPED, Ordering::Release);

@@ -2,17 +2,7 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-/// System-audio capture via CoreAudio process taps (macOS 14.2+).
-///
-/// Process tap -> private aggregate device listing that tap ->
-/// `AudioDeviceCreateIOProcID` pulling interleaved float32.
-///
-/// `AudioDeviceCreateIOProcIDWithBlock` does not work on a tap-backed aggregate:
-/// it returns `noErr`, `IsRunning` stays 0, and the block is never invoked. With
-/// the TCC grant undetermined it blocks indefinitely. Use the C function pointer
-/// form.
-///
-/// A global tap captures every process except explicit exclusions.
+/// CoreAudio process tap feeding a private aggregate device.
 final class TapCapture {
     struct Format {
         var sampleRate: Double
@@ -64,9 +54,7 @@ final class TapCapture {
         try startPrepared()
     }
 
-    /// Build the permission-gated HAL objects without starting realtime I/O.
-    /// This may block while TCC is undetermined, so initial capture runs it under
-    /// a timeout before installing any host callback pointer in `stateBox`.
+    /// Prepare HAL objects before installing host callbacks; permission checks may block.
     func prepare(pids: [pid_t],
                  globalMixdown: Bool,
                  mono: Bool,
@@ -264,12 +252,9 @@ final class TapCapture {
         description.uuid = UUID()
         description.name = "meeting-record-tap"
         description.muteBehavior = muteCapturedOutput ? .muted : .unmuted
-        // `isExclusive` selects how `processes` is interpreted; it does not
-        // control whether other taps may coexist. An empty exclusive list means
-        // "all processes", while an empty non-exclusive list captures silence.
+        // Exclusive means an exclusion list; an empty one captures all processes.
         description.isExclusive = capturesGlobalMix
-        // A private tap is not published for UID lookup, so the aggregate binds a
-        // stream that only ever delivers zeros. The aggregate itself stays private.
+        // Publish the tap UID so the private aggregate can resolve it.
         description.isPrivate = false
         return description
     }

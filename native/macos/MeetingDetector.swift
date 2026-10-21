@@ -15,11 +15,7 @@ struct DetectedMeeting {
     var confidence: Int32
 }
 
-/// Decides whether the user is in a meeting, and which processes to record.
-///
-/// Identity and audio activity come from property reads that need no permission.
-/// Accessibility only adds a title or URL, so full confidence is reachable without
-/// it.
+/// Detect meetings from app identity and audio activity; accessibility adds titles and URLs.
 enum MeetingDetector {
     static func scan() -> [DetectedMeeting] {
         let processes = AudioProcessRegistry.all().filter {

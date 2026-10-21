@@ -1,10 +1,7 @@
 import CoreAudio
 import Foundation
 
-/// C ABI declared in native/include/meeting-record.h.
-///
-/// One process-wide capture session, matching the one tap and aggregate device
-/// pair a process can hold.
+/// C capture API. One process-wide session.
 
 private final class Session {
     static let shared = Session()
@@ -417,12 +414,8 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     let capture = TapCapture(stateBox: session.systemStateBox,
                              onConfigurationChange: scheduleCaptureRestart)
 
-    // Start under a timeout rather than probing permission first: a probe builds
-    // and tears down a second tap moments before this one, and that teardown races
-    // the new tap's auto-start, producing a running but silent stream.
-    //
-    // A timeout here means the TCC grant is undetermined, which is when CoreAudio
-    // blocks instead of failing.
+    // Avoid a separate permission probe: its teardown can race this tap.
+    // Time out if CoreAudio blocks on an unanswered permission request.
     let capturePIDs = AudioAppRegistry.includingHelpers(configuration.pids)
     let outcome: Int32? = withTimeout(seconds: 6) {
         do {

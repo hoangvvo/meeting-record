@@ -1,5 +1,4 @@
-// the addon can't load in a renderer under contextIsolation, so every library
-// call is an IPC round trip to main
+// Native calls run in the main process through IPC.
 import type {
   Bridge,
   MeetingEvent,

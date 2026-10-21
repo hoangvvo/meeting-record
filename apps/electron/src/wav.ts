@@ -1,6 +1,4 @@
-// RIFF sizes live in the header and aren't known until the end, so we write it
-// zeroed and patch it in finish(). a crash mid-recording therefore leaves a file
-// claiming zero length
+// Patch RIFF sizes in finish() once the sample count is known.
 import { createWriteStream, type WriteStream } from "node:fs";
 import { open } from "node:fs/promises";
 import { once } from "node:events";
@@ -54,12 +52,10 @@ export class WavWriter {
 
   /** Converts interleaved float32 to int16 and returns the peak magnitude seen. */
   write(chunk: Buffer): number {
-    // the capture stream can still flush buffered chunks after stop(), by which
-    // point the file is already closing
+    // Ignore chunks after the file starts closing.
     if (this.#stream.writableEnded) return 0;
 
-    // readFloatLE rather than a Float32Array view: chunks off the addon aren't
-    // guaranteed 4-byte aligned, and the view constructor throws if they aren't
+    // Buffers may not be aligned for a Float32Array view.
     const count = Math.floor(chunk.byteLength / 4);
     const out = Buffer.allocUnsafe(count * BYTES_PER_SAMPLE);
     let peak = 0;
@@ -67,8 +63,7 @@ export class WavWriter {
       const sample = chunk.readFloatLE(index * 4);
       const magnitude = Math.abs(sample);
       if (magnitude > peak) peak = magnitude;
-      // clamp before scaling: a tap mixing several processes can exceed 1.0 and
-      // the wrap sounds like loud clicks
+      // Clamp before scaling to avoid integer overflow.
       const clamped = sample < -1 ? -1 : sample > 1 ? 1 : sample;
       out.writeInt16LE(Math.round(clamped * 32767), index * BYTES_PER_SAMPLE);
     }

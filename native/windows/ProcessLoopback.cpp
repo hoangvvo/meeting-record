@@ -1,19 +1,4 @@
-/*
- * Windows backend: WASAPI application (process) loopback.
- *
- * Unlike render-endpoint loopback, process loopback captures a specific process
- * tree and is unaffected by the output device, volume, or mute state.
- *
- * Requires Windows 10 build 19041 / Windows 11. No permission prompt exists; API
- * availability is the only gate.
- *
- * Constraints:
- *   - activation is asynchronous via a completion handler
- *   - the client must be initialised in shared mode with an explicit format;
- *     GetMixFormat is unavailable on a loopback-activated client
- *   - INCLUDE_PROCESS_TREE also captures child processes, which is required for
- *     Chrome, Electron and Teams
- */
+/* WASAPI process-loopback and microphone capture. */
 #include "meeting-record.h"
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
@@ -51,10 +36,7 @@ namespace {
 using meeting_record::kSampleRate;
 using meeting_record::TimelineMixer;
 
-/*
- * Capacity, not latency: polling drains whatever is ready. A second rides out
- * scheduling stalls that a 5 ms sleep at the default timer resolution invites.
- */
+/* Buffer one second to tolerate scheduling stalls. */
 constexpr REFERENCE_TIME kBufferDuration = 10000000; /* 100-nanosecond units */
 
 std::mutex g_mutex;
@@ -235,7 +217,7 @@ mrec_track_reason ReasonFor(HRESULT hr) {
   }
 }
 
-/* The name Windows shows for `device`, such as "Headset Microphone (Jabra)". */
+/* Device display name. */
 std::string FriendlyName(IMMDevice *device) {
   /* PKEY_Device_FriendlyName, spelled out to avoid another import library. */
   static const PROPERTYKEY kFriendlyName = {
@@ -335,11 +317,7 @@ std::pair<int, int> CapturedSessions(IMMDevice *device,
   return counts;
 }
 
-/*
- * The microphone the captured apps record from, as Recall picks it: the capture
- * device holding most of their sessions. Otherwise the default communications
- * microphone, which calls use, as Granola picks it.
- */
+/* Prefer the device with the most target sessions, then the communications default. */
 std::optional<std::wstring> PreferredMicrophoneId(const std::vector<uint32_t> &targets,
                                                   int32_t source) {
   ComPtr<IMMDeviceEnumerator> enumerator;
@@ -415,13 +393,8 @@ bool InSession(uint32_t pid, DWORD session) {
   return ProcessIdToSessionId(pid, &process_session) && process_session == session;
 }
 
-/*
- * The process trees to capture for `pids`. A conferencing app brings its sibling
- * processes, and a packaged app the rest of its package: Windows may start them
- * outside the app's tree, as new Teams does with its call container. A process
- * inside another target's tree is dropped, since a second client would double
- * its audio.
- */
+/* Include sibling app and package processes outside the selected trees.
+ * Remove nested targets to avoid capturing their audio twice. */
 std::vector<uint32_t> CaptureRoots(std::vector<uint32_t> pids) {
   const auto processes = ProcessSnapshot();
   if (processes.empty()) return pids;
@@ -549,12 +522,8 @@ public:
     microphone_user_data_ = microphone_user_data;
     channels_ = mono ? 1 : 2;
 
-    /* One client per target process; EXCLUDE semantics produces a system-wide tap. */
     if (global_mixdown) {
-      /* WASAPI's system-wide form is "everything except this process tree" and
-       * still requires a real target pid. PID 0 is rejected on supported Windows
-       * builds. Excluding the recorder also prevents feedback from monitoring UI
-       * sounds. */
+      /* System capture needs a real PID to exclude; omit the recorder to avoid feedback. */
       auto stream = Activate(GetCurrentProcessId(), /*exclude=*/true);
       if (!stream) {
         mta_usage_.reset();
@@ -661,7 +630,7 @@ private:
     AUDIOCLIENT_ACTIVATION_PARAMS params{};
     params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
     params.ProcessLoopbackParams.TargetProcessId = pid;
-    /* Chrome, Electron and Teams render audio from helpers, not the visible pid. */
+    /* Include audio helpers in the target process tree. */
     params.ProcessLoopbackParams.ProcessLoopbackMode =
         exclude ? PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
                 : PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
@@ -696,10 +665,7 @@ private:
       return std::nullopt;
     }
 
-    /*
-     * A loopback-activated client cannot report a mix format. Float32 at 48 kHz
-     * matches the macOS backend.
-     */
+    /* Process-loopback clients require an explicit format. */
     WAVEFORMATEX format{};
     format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
     format.nChannels = static_cast<WORD>(channels_);
@@ -708,11 +674,7 @@ private:
     format.nBlockAlign = format.nChannels * format.wBitsPerSample / 8;
     format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
 
-    /*
-     * Polling mode, so no AUDCLNT_STREAMFLAGS_EVENTCALLBACK: that flag without a
-     * following SetEventHandle() makes Start() fail with
-     * AUDCLNT_E_EVENTHANDLE_NOT_SET.
-     */
+    /* Polling mode does not use an event handle. */
     hr = stream.client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                    AUDCLNT_STREAMFLAGS_LOOPBACK |
                                        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
@@ -734,7 +696,6 @@ private:
     return stream;
   }
 
-  /* `failure` receives the status to report; messages match the macOS backend. */
   std::optional<MicrophoneStream> ActivateMicrophone(
       const std::optional<std::wstring> &device_id, mrec_status &failure) {
     HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -910,10 +871,7 @@ private:
     return !finished();
   }
 
-  /*
-   * Exited targets deliver silence; say so, end system audio, and keep recording.
-   * Its own thread, like the macOS timer, so a drain stuck in recovery still sees it.
-   */
+  /* Check exits separately so a blocked recovery cannot hide them. */
   void WatchForExit() {
     while (WaitWhileRunning(1000, nullptr)) {
       const auto processes = ProcessSnapshot();
@@ -930,14 +888,12 @@ private:
     }
   }
 
-  /* What a recovery needs through the shared C callbacks. */
   struct Recovery {
     Session *session;
     size_t index;
     mrec_track track;
   };
 
-  /* System audio stops retrying once its apps exit, as on macOS. */
   static int32_t WaitForRetry(void *context, uint32_t milliseconds) {
     const auto *recovery = static_cast<Recovery *>(context);
     const Session *session = recovery->session;
@@ -979,7 +935,6 @@ private:
     return 1;
   }
 
-  /* Never stops the recording: retries until the source returns or Stop(). */
   void RecoverLoopback(size_t index, mrec_track_reason reason, const std::string &detail) {
     if (streams_[index].client) streams_[index].client->Stop();
     const std::string message = "system audio interrupted: " + detail;
@@ -1054,10 +1009,7 @@ private:
 extern "C" {
 
 mrec_permission mrec_audio_permission_status(void) {
-  /*
-   * No TCC analogue exists. The OS version gate surfaces as an activation failure
-   * from mrec_start rather than as a permission state.
-   */
+  /* Unsupported OS versions fail during activation. */
   return MREC_PERM_GRANTED;
 }
 

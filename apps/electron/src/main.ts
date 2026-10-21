@@ -30,8 +30,7 @@ interface Recording {
   windowPeak: number;
 }
 
-// capture and watching are process-wide singletons in the library, so this is
-// module state rather than something per-window
+// Capture and watching are shared across windows.
 const detected = new Map<string, number>();
 let recording: Recording | null = null;
 let win: BrowserWindow | null = null;
@@ -77,9 +76,7 @@ function wavPaths(): [string, string, string] {
   return [inDownloads(""), inDownloads("-system"), inDownloads("-mic")];
 }
 
-// the system mix is silent whenever the default output device is muted or isn't
-// the one actually playing, so aim at a process that is definitely producing
-// audio. the library resolves helper pids from this one itself
+// Prefer a process target when an audio app is available.
 function playingPid(): number {
   const playing = MeetingRecord.meetings.audioProcesses().find((entry) => entry.isPlayingAudio);
   if (!playing) throw new Error("nothing is playing audio");
@@ -94,8 +91,7 @@ function drain(
 ): Track {
   const track: Track = { writer, peak: 0, dropped: 0 };
 
-  // data arrives on the main thread already (the addon marshals it off the
-  // realtime thread), so int16 conversion and the write are fine here
+  // The addon delivers packets on the main thread.
   source.on("data", (chunk: MeetingRecord.AudioChunk) => {
     const peak = writer.write(chunk.pcm);
     if (peak > track.peak) track.peak = peak;
@@ -179,8 +175,7 @@ async function stopRecording(): Promise<RecordingStopped> {
   recording = null;
   clearInterval(state.meter);
   await state.session.stopRecording();
-  // the stems are only complete once both writers have, and the mix reads them
-  // straight back off disk
+  // Finish both stems before mixing them.
   await state.system.writer.finish();
   await state.microphone?.writer.finish();
 
@@ -252,8 +247,7 @@ app.on("window-all-closed", () => app.quit());
 let quitting = false;
 app.on("before-quit", (event) => {
   if (!recording || quitting) return;
-  // dying with a capture open leaks OS audio state and can wedge coreaudiod for
-  // the whole machine, so stop first and quit on the second pass
+  // Finish native teardown before quitting.
   event.preventDefault();
   quitting = true;
   void stopRecording()

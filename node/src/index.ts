@@ -1,9 +1,4 @@
-/**
- * meeting-record — system-audio and microphone capture with meeting detection.
- *
- * Wraps the native addon so callers never see helper-process pids, status codes,
- * or the realtime callback. The addon itself is not re-exported.
- */
+/** System-audio and microphone capture with meeting detection. */
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
@@ -20,10 +15,7 @@ export type Permission = "system-audio" | "microphone" | "accessibility";
  */
 export type PermissionStatus = "granted" | "denied" | "unknown";
 
-/**
- * Stable platform identifier; the values never change. No display labels are
- * provided — presentation and localisation belong to the caller.
- */
+/** Stable platform identifier. */
 export type Platform =
   | "zoom"
   | "teams"
@@ -300,15 +292,10 @@ export const meetings = new Meetings() as Meetings & {
   off<E extends keyof MeetingEvents>(event: E, listener: MeetingEvents[E]): Meetings;
 };
 
-/**
- * Interleaved float32 PCM.
- *
- * The native callback never waits for a slow consumer. If this stream is not read,
- * its preallocated ring buffer drops samples and emits `drop`.
- */
+/** Interleaved float32 PCM. Slow consumers lose samples, reported by `drop`. */
 export type CaptureState = "recording" | "paused" | "stopped";
 
-/** Why a track was interrupted, after WASAPI's session disconnect reasons. */
+/** Reason for source loss. */
 export type TrackInterruptionReason =
   | "device-removed"
   | "device-changed"
@@ -322,13 +309,7 @@ export interface AudioFormat {
   readonly channels: number;
 }
 
-/**
- * A PCM buffer with the capture time of its first frame.
- *
- * `hostTimeNs` is monotonic (not Unix time) and uses the same host clock for the
- * system and microphone tracks, so callers can align or echo-cancel them without
- * relying on callback arrival order.
- */
+/** PCM packet timed on a monotonic clock shared by both tracks. */
 export interface AudioChunk {
   /** Interleaved float32 PCM. Packet boundaries and metadata survive iteration. */
   readonly pcm: Buffer;

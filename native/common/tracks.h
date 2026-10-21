@@ -1,11 +1,4 @@
-/*
- * Source loss, shared by the macOS and Windows backends. A source that stops
- * interrupts its track and is retried until it returns; recording never stops
- * for it. Backends report what happened and how to reopen a source; this decides
- * what to publish, and when to retry.
- *
- * Internal; safe to import into Swift.
- */
+/* Shared source recovery and track events. Safe to import into Swift. */
 #ifndef MEETING_RECORD_TRACKS_H
 #define MEETING_RECORD_TRACKS_H
 

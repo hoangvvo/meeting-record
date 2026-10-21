@@ -10,8 +10,7 @@ import { promisify } from "node:util";
 
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../../", import.meta.url));
-// Loaded addons stay locked until process exit on Windows. Keep the fixture
-// alongside other build output so ordinary build cleanup can remove it later.
+// Windows locks loaded addons until exit; leave this fixture in build output.
 const directory = join(root, "node/build/test-native");
 let api;
 before(async () => {
@@ -51,7 +50,7 @@ before(async () => {
   );
   const entry = new URL("../dist/index.js", import.meta.url);
   let source = await readFile(entry, "utf8");
-  // Substitute only the private native loader; exercise the actual public wrapper.
+  // Inject the test backend into the public wrapper.
   source = source.replace(
     "let cachedNative;",
     "let cachedNative = globalThis.meetingRecordTestNative;",
@@ -68,7 +67,7 @@ after(() => {
 
 test("standard async iteration retains packet metadata and the native stop tail", async () => {
   const recording = await api.capture.start({ type: "system" });
-  // Let the unread object stream apply backpressure while the ring retains its tail.
+  // Fill the stream to test backpressure.
   for (let attempt = 0; recording.systemAudio.readableLength < 32 && attempt < 100; attempt++)
     await delay(5);
   assert.equal(recording.systemAudio.readableLength, 32);

@@ -28,4 +28,3 @@ Notes:
 
 - macOS dev mode: detection only; no permission prompts, no recording.
 - Windows dev mode: detection and recording.
-- The audio callback copies into an `rtrb` ring; a normal thread writes the WAV and emits level and elapsed at 10 Hz.

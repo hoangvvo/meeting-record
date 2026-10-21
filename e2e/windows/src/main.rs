@@ -1,27 +1,4 @@
-//! Windows live-audio E2E harness.
-//!
-//! Environment variables:
-//! - `MREC_TARGET_PID`: capture this process tree instead of system audio.
-//! - `MREC_DURATION_SECONDS`: capture duration (default: 6).
-//! - `MREC_MONO=1`: request a mono system-audio track instead of stereo.
-//! - `MREC_MICROPHONE=1`: require a non-silent default-microphone track.
-//! - `MREC_EXPECT_DEVICE_CHANGE=1`: require a microphone device change.
-//! - `MREC_MIN_PEAK`: minimum absolute sample peak (default: 0.0001).
-//! - `MREC_ALLOW_DROPS=1`: permit bounded-queue drops.
-//! - `MREC_EXPECT_FREQUENCIES`: comma-separated tones (Hz) the system track
-//!   must carry without dropouts.
-//! - `MREC_REJECT_FREQUENCIES`: comma-separated tones (Hz) the system track
-//!   must not carry, such as another process's audio.
-//! - `MREC_MICROPHONE_FREQUENCIES`: comma-separated tones (Hz) the microphone
-//!   track must carry without dropouts. The mixed output must carry those the
-//!   system track rejects; one it also carries may cancel out.
-//! - `MREC_MIX_SAMPLE_RATE`: also read the mixed output at this rate.
-//! - `MREC_PAUSE_SECONDS`: pause for this long mid-capture; paused audio must
-//!   be omitted from every track.
-//! - `MREC_RESTART_CYCLES`: start and stop this many short sessions first.
-//! - `MREC_EXPECT_MEETING`: a platform id such as `meet`. Scanning and watching
-//!   must both report a recordable meeting there, which becomes the capture
-//!   target. With `MREC_TARGET_PID`, the meeting must belong to that process.
+//! Rust live-audio harness. Run through e2e/windows.ps1.
 
 use std::{
     env,
@@ -46,12 +23,9 @@ const PRESENT_TONE_RATIO: f64 = 0.1;
 const SILENCE_LEVEL: f32 = 1e-4;
 /// Silence longer than this inside a continuous tone is a dropout.
 const MIN_DROPOUT: Duration = Duration::from_millis(1);
-/// Capture devices, virtual cables especially, drop a period on their own now
-/// and then. Misplaced packets drop many.
+/// Allow occasional device dropouts.
 const MAX_MICROPHONE_DROPOUTS: usize = 2;
-/// Sources start with silence, sometimes broken by a fragment: process loopback
-/// until the engine attaches the target's stream, a capture device while it
-/// fills. Both bindings' mixers also wait this long for every source.
+/// Allow startup silence while sources attach and fill their buffers.
 const STARTUP: Duration = Duration::from_millis(100);
 
 #[derive(Default)]

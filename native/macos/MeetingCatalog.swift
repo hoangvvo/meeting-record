@@ -12,9 +12,7 @@ enum MeetingPlatform: Int32 {
     case genericBrowser = 7
 }
 
-/// Meeting classification shared with the Windows backend in
-/// `native/common/meeting-catalog.c`. This backend supplies bundle ids, titles,
-/// URLs and audio activity.
+/// Swift access to the shared meeting catalog.
 enum MeetingCatalog {
     /// Below this confidence, callers should not record.
     static let recordThreshold = Int32(MREC_CATALOG_RECORD_THRESHOLD)

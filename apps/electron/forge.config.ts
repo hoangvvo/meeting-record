@@ -14,15 +14,10 @@ const requireFromApp = createRequire(path.join(appDir, "package.json"));
 const nodeGypBuildDir = path.dirname(requireFromApp.resolve("node-gyp-build/package.json"));
 const electronVersion: string = requireFromApp("electron/package.json").version;
 
-// An ad-hoc signature (`codesign -s -`) gets you no TCC prompt at all; an Apple
-// Development cert does. Never hardcode it.
+// Permission prompts require a signing identity.
 const identity = process.env.MREC_IDENTITY;
 
-// npm always links workspace packages into the *root* node_modules, whatever
-// install-strategy you pick, so this app's node_modules is empty and packager
-// copies no addon. Hence the two hooks below. Related: the addon can only be
-// compiled inside its own tree, since binding.gyp reaches ../native/build for the
-// Swift static lib.
+// Rebuild in the workspace package, then copy the hoisted dependencies into the app.
 const config: ForgeConfig = {
   packagerConfig: {
     name: "mrec-electron",
@@ -46,8 +41,7 @@ const config: ForgeConfig = {
   },
   rebuildConfig: {},
   hooks: {
-    // runs for both `start` and `package`. force, because `npm run build`
-    // leaves a node-ABI build behind and a stale .forge-meta would let it through
+    // Force a rebuild for the current runtime ABI.
     async generateAssets() {
       await rebuild({
         buildPath: appDir,
@@ -57,10 +51,7 @@ const config: ForgeConfig = {
         force: true,
       });
     },
-    // .forge-meta comes along so forge's own rebuild pass recognises the copy as
-    // already built and skips it. it would fail here, away from ../native/build
-    //
-    // @see https://github.com/electron/forge/pull/4232
+    // Keep .forge-meta to prevent rebuilding outside the native source tree.
     async packageAfterCopy(_forgeConfig, buildPath) {
       const target = path.join(buildPath, "node_modules", "meeting-record");
       const entries = [
@@ -75,9 +66,7 @@ const config: ForgeConfig = {
         await cp(path.join(addonDir, entry), to, { recursive: true });
       }
 
-      // meeting-record loads its native binary through this production
-      // dependency. npm hoists it to the workspace root too, so Forge does not
-      // discover it while walking this app's otherwise-empty node_modules.
+      // Copy the hoisted native loader too.
       await cp(nodeGypBuildDir, path.join(buildPath, "node_modules", "node-gyp-build"), {
         recursive: true,
       });

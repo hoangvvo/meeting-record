@@ -1,14 +1,4 @@
-/*
- * Windows meeting detection.
- *
- * Same layered design as the macOS backend. There is no equivalent of
- * kAudioHardwarePropertyProcessObjectList, so liveness comes from
- * IAudioSessionManager2 session enumeration: an ACTIVE render session on a
- * conferencing process is the equivalent signal.
- *
- * Window titles come from EnumWindows + GetWindowTextW, and browser URLs and tab
- * titles from UI Automation. Neither needs a permission.
- */
+/* Meeting detection from audio sessions, windows, and browser accessibility. */
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
 #include "meeting-catalog.h"
@@ -56,7 +46,7 @@ mrec_platform TitlePlatform(std::string &title) {
   return platform;
 }
 
-/* UI Automation bounds, as for macOS Accessibility: each call is synchronous IPC. */
+/* Bound synchronous UI Automation calls. */
 constexpr DWORD kAccessibilityTimeoutMs = 250;
 constexpr uint64_t kAccessibilityTraversalNs = 500000000;
 constexpr int kAccessibilityMaxDepth = 24;
@@ -68,8 +58,7 @@ std::string Narrow(const std::wstring &wide) {
   int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr,
                                  nullptr);
   if (size <= 1) return {};
-  /* `size` includes the terminating NUL. Reserve room for it before trimming it
-   * off; passing `size` into a `size - 1` string is a one-byte overwrite. */
+  /* Reserve space for the terminating NUL before trimming it. */
   std::string out(static_cast<size_t>(size), '\0');
   const int written = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1,
                                           out.data(), size, nullptr, nullptr);
@@ -258,10 +247,7 @@ struct BrowserWindowContent {
   std::vector<std::string> tab_titles;
 };
 
-/*
- * Browser URLs and tab titles through UI Automation; best effort, like macOS
- * Accessibility. Calls time out, the walk is bounded, and it never enters a document.
- */
+/* Read browser URLs and tab titles with a bounded walk that skips documents. */
 class BrowserAccessibility {
 public:
   BrowserWindowContent Read(HWND window, uint64_t deadline_ns) {
@@ -438,7 +424,7 @@ std::vector<Detected> Scan() {
     const auto process = processes.find(pid);
     if (process == processes.end()) continue;
 
-    /* Audio often comes from a helper, such as new Teams' WebView2: use its owner app. */
+    /* Attribute helper audio to its owning app. */
     const auto *root = meeting_record::FindAudioAppRoot(processes, pid, shell_pid);
     std::string exe = Narrow(process->second.executable);
     const bool is_browser = IsBrowser(exe);
@@ -469,10 +455,7 @@ std::vector<Detected> Scan() {
   std::vector<Detected> results;
 
   for (auto &[platform, entry] : native) {
-    /*
-     * The pid is the capture target, so it must own the audio and stay put while
-     * windows resize: the lowest owner with a window, else the lowest owner.
-     */
+    /* Pick a stable owner PID, preferring one with a window. */
     auto &owners = native_owners[platform];
     std::sort(owners.begin(), owners.end());
     const auto windowed = std::find_if(owners.begin(), owners.end(), [&processes](DWORD pid) {
@@ -595,10 +578,7 @@ public:
   }
 
 private:
-  /*
-   * Polled: IAudioSessionNotification fires only on session creation, not on the
-   * inactive->active transition that marks a call going live.
-   */
+  /* Poll because session notifications do not report inactive-to-active changes. */
   bool ShouldStop(uint64_t generation) const {
     return stop_.load(std::memory_order_acquire) ||
            generation_.load(std::memory_order_acquire) != generation;
@@ -700,12 +680,7 @@ mrec_status mrec_start_meeting(const mrec_meeting *meeting,
                                void *user_data) {
   if (!meeting) return MREC_ERR_INTERNAL;
 
-  /*
-   * The visible owner's tree follows helpers created later; audio processes
-   * outside it, such as Teams' call container, are added. Capture drops those
-   * inside the tree. Refresh both, since the caller may have held the meeting
-   * for a while; match the pid first, as two browsers can both host Meet.
-   */
+  /* Refresh helpers for this owner PID without selecting another meeting. */
   const auto current = Scan();
   auto fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
     return item.pid == meeting->pid;

@@ -2,17 +2,7 @@ import ApplicationServices
 import AppKit
 import Foundation
 
-/// Accessibility helpers for reading window titles and browser URLs.
-///
-/// Best-effort enrichment: detection stays correct when every function here
-/// returns nil.
-///
-/// Three constraints:
-///  * AX calls are synchronous IPC into the target app, so a hung app blocks the
-///    caller. Every element gets a messaging timeout.
-///  * Chromium and Electron build no tree until `AXEnhancedUserInterface` is set.
-///  * Trees run to thousands of elements, so traversal is bounded by depth and
-///    node count.
+/// Optional titles and URLs from accessibility. Bound IPC calls and tree traversal.
 enum Accessibility {
     /// Seconds before an AX request to another process gives up.
     private static let messagingTimeout: Float = 0.25
@@ -93,11 +83,7 @@ enum Accessibility {
 
     // MARK: - Browser URLs
 
-    /// URL of the browser's active tab.
-    ///
-    /// Safari and Chrome expose `AXURL` on the window or a descendant. Other
-    /// Chromium variants only expose the omnibox text field's value, which is what
-    /// the user typed rather than the canonical URL.
+    /// Read the active tab URL from AXURL or the address field.
     static func browserURL(pid: pid_t) -> String? {
         guard isTrusted() else { return nil }
         let app = application(pid)

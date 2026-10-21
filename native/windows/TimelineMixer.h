@@ -15,21 +15,13 @@ constexpr uint32_t kSampleRate = 48000;
 constexpr uint32_t kFramesPerBlock = 480; /* 10 ms at 48 kHz. */
 constexpr uint64_t kBlockDurationNs = 10000000;
 constexpr uint64_t kMixerWaitBlocks = 3; /* Allow 30 ms for sibling streams. */
-/* Timestamp movement still treated as jitter: 20 ms, as in the bindings' mixers. */
+/* Tolerate 20 ms of timestamp jitter. */
 constexpr uint64_t kMaxJitterFrames = kSampleRate / 50;
 /* A longer silence from every source is an interruption: skipped, not filled. */
 constexpr uint64_t kMaxStallFrames = kSampleRate;
 
-/*
- * WASAPI exposes one process-loopback client per target pid. Their callbacks are
- * independent even though they share a QPC clock, so forwarding them directly
- * would make the public "system" track contain overlapping, out-of-order chunks.
- *
- * Accumulate every source on that shared timeline and emit one ordered 10 ms
- * stream. A short watermark allows sibling process clients to arrive before a
- * block is committed; missing sources are silence. This mirrors the framing and
- * alignment used by production transcription pipelines.
- */
+/* Align process streams on their shared clock into ordered 10 ms blocks.
+ * Wait briefly for late sources; missing sources contribute silence. */
 class TimelineMixer {
 public:
   void Reset(size_t source_count, uint32_t channels, mrec_audio_callback callback,

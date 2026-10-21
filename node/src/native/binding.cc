@@ -1,15 +1,4 @@
-/*
- * N-API binding for meeting-record.
- *
- * mrec_start() delivers PCM on a realtime audio thread, where calling into V8,
- * allocating, or locking is not allowed:
- *
- *   audio thread : memcpy into a preallocated ring buffer, then wake JS
- *   JS thread    : drain the ring into a Buffer and push it downstream
- *
- * When the consumer falls behind, the ring drops incoming samples and reports
- * the count to JS.
- */
+/* Audio callbacks write to bounded rings; the JS thread drains them into packets. */
 #include <napi.h>
 
 #include <algorithm>
@@ -311,7 +300,7 @@ Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
 void OnTrackEvent(const mrec_track_event *event, void *user_data) {
   auto *capture = static_cast<CaptureContext *>(user_data);
   if (!capture || !event) return;
-  /* Skip event types newer than this binding, as the Rust binding does. */
+  /* Ignore unknown event types. */
   if (event->type < MREC_TRACK_INTERRUPTED || event->type > MREC_TRACK_DEGRADED) return;
   auto *copy = new mrec_track_event(*event);
   const uint64_t capture_id = capture->id;
@@ -404,9 +393,7 @@ public:
     }
     deferred_.Resolve(result);
 
-    /* Audio can begin before this worker returns to JS. Keep it in the bounded
-     * native ring until the start promise has been resolved, then schedule one
-     * coalesced drain per track. */
+    /* Hold early audio in the rings until the start promise resolves. */
     if (g_capture) {
       g_capture->system_audio.delivery_enabled.store(true, std::memory_order_release);
       ScheduleTrackWake(&g_capture->system_audio);

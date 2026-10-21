@@ -1,7 +1,6 @@
 # Live-audio E2E for the Windows backend through the Rust and Node.js bindings.
 #
-# System and Process (the default "All") play their own tones. Meeting needs a call
-# already running, such as a Google Meet tab receiving remote audio.
+# System and Process play test tones. Meeting needs a call receiving audio.
 #
 # -MicrophoneDevice plays a third tone into an output device that loops back to the
 # default microphone, such as a virtual cable's "CABLE Input", and requires that tone

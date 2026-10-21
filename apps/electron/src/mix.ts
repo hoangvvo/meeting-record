@@ -1,10 +1,4 @@
-/**
- * Offline mixdown of the two capture stems into one mono file.
- *
- * Streams the stems rather than loading them: an hour of 48 kHz audio is ~700 MB
- * as float32, and meetings run that long. Costs a second read of each stem,
- * because the peak has to be known before any sample can be scaled.
- */
+/** Stream both stems twice: measure the peak, then write a normalized mono mix. */
 import { open, type FileHandle } from "node:fs/promises";
 import { WavWriter } from "./wav";
 
@@ -58,10 +52,7 @@ async function readFormat(handle: FileHandle): Promise<Format> {
   throw new Error("no data chunk");
 }
 
-/**
- * One stem, read forward only. Holds just the frames the current block needs,
- * which is what keeps this a stream instead of a buffer.
- */
+/** Forward-only stem reader with a bounded frame buffer. */
 class Stem {
   readonly sampleRate: number;
   readonly frameCount: number;
@@ -189,14 +180,7 @@ async function eachBlock(
   }
 }
 
-/**
- * Sums the stems into `outPath` at the system stem's rate, resampling the mic to
- * match. Returns the peak of the mix before any scaling.
- *
- * The two tracks run off independent clocks, so they are aligned at the start
- * and drift apart by whatever those clocks disagree on. Fine to listen back to,
- * not sample-accurate.
- */
+/** Mix at the system stem rate. Stems align at the start, without clock-drift correction. */
 export async function mix(
   systemPath: string,
   micPath: string | null,
@@ -222,8 +206,7 @@ export async function mix(
     }
   });
 
-  // summing two loud tracks clips, so scale the mix back by exactly what it
-  // overshot instead of clamping every sample
+  // Normalize the mix to avoid clipping.
   const gain = peak > 1 ? 1 / peak : 1;
   const writer = await WavWriter.create(outPath, rate, 1);
   const scaled = new Float32Array(BLOCK_FRAMES);

@@ -1,17 +1,8 @@
 # meeting-record for Rust
 
-[API documentation](https://docs.rs/meeting-record) · [Project documentation](https://github.com/hoangvvo/meeting-record#readme)
-
 System-audio and microphone capture with meeting detection for macOS and Windows.
-
-## Platform support
-
-| Platform | Minimum version | Architectures |
-| -------- | --------------- | ------------- |
-| macOS    | 14.2            | arm64, x86-64 |
-| Windows  | 10 build 19041  | arm64, x86-64 |
-
-## Install
+See the [API docs](https://docs.rs/meeting-record) and
+[platform requirements](https://github.com/hoangvvo/meeting-record#requirements).
 
 ```sh
 cargo add meeting-record
@@ -20,150 +11,84 @@ cargo add meeting-record
 ## Usage
 
 ```rust
-use std::thread;
-use std::time::Duration;
-
-use meeting_record::{
-    capture, meetings, permissions, CaptureOptions, CaptureTarget, Error, MicrophoneSource,
-    Permission, PermissionStatus, TrackEvent,
-};
+use std::{thread, time::Duration};
+use meeting_record::{capture, permissions, CaptureOptions, CaptureTarget, Error, Permission};
 
 fn main() -> Result<(), Error> {
-    // Audio permission requests return immediately; rerun after granting them.
-    for (permission, name) in [
-        (Permission::SystemAudio, "system audio"),
-        (Permission::Microphone, "microphone"),
-    ] {
-        if permissions::status(permission) != PermissionStatus::Granted {
-            permissions::request(permission)?;
-            eprintln!("grant {name} access, then rerun");
-            return Ok(());
-        }
-    }
+    permissions::request_and_wait(Permission::SystemAudio, Duration::from_secs(60), None)?;
+    let recording = capture::start(CaptureTarget::System, CaptureOptions::default())?;
 
-    // Request accessibility permission to read meeting titles and URLs for detection.
-    if permissions::status(Permission::Accessibility) != PermissionStatus::Granted {
-        permissions::request(Permission::Accessibility)?;
-    }
-
-    // Watch for meetings starting, changing, and ending.
-    let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"))?;
-
-    // Or scan for active meetings at any time.
-
-    let Some(meeting) = meetings::scan()?
-        .into_iter()
-        .find(|meeting| meeting.should_record)
-    else {
-        return Ok(());
-    };
-
-    let recording = capture::start(
-        CaptureTarget::Process { pid: meeting.pid },
-        CaptureOptions {
-            microphone: Some(MicrophoneSource::Auto),
-            ..CaptureOptions::default()
-        },
-    )?;
     thread::scope(|scope| {
+        // Read audio while the main thread controls the recording.
         scope.spawn(|| {
             while let Some(chunk) = recording.system_audio().recv() {
-                println!(
-                    "{} samples at {} ns ({} Hz, {} channels, {} dropped)",
-                    chunk.frames.len(),
-                    chunk.host_time_ns,
-                    chunk.sample_rate,
-                    chunk.channels,
-                    chunk.dropped_samples,
-                );
+                println!("{} samples at {} ns", chunk.frames.len(), chunk.host_time_ns);
             }
         });
-
-        // Lost devices recover without ending the session; exited apps need a new target.
-        scope.spawn(|| {
-            while let Some(event) = recording.recv_event() {
-                match event {
-                    TrackEvent::Interrupted { track, reason, .. } => {
-                        eprintln!("{track:?} interrupted: {reason:?}")
-                    }
-                    TrackEvent::Resumed { track, .. } => println!("{track:?} resumed"),
-                    TrackEvent::DeviceChanged { device_name, .. } => {
-                        println!("microphone: {device_name}")
-                    }
-                    TrackEvent::Degraded { track, reason, .. } => {
-                        eprintln!("{track:?} partially unavailable: {reason:?}")
-                    }
-                    _ => {}
-                }
-            }
-        });
-
         thread::sleep(Duration::from_secs(10));
+        // The reader drains queued audio before leaving the scope.
         recording.stop();
     });
-
-    // Stop watching for meetings when done.
-    drop(watcher);
     Ok(())
 }
 ```
 
-## Audio apps
-
-- `meetings::audio_apps()`: applications doing audio IO, for a source picker.
-- Use an entry's `pid` with `CaptureTarget::Process`; no meeting scan or Accessibility grant needed.
-- Windows follows future child processes; macOS refreshes audio helpers about once a second.
-- A relaunched app requires a new capture session.
-
-## Mixed output
+- **App picker:** `meetings::audio_apps()` lists available apps.
+- **Process capture:** `CaptureTarget::Process { pid }` captures the app and its audio helpers.
+- **Microphone:** optional; request `Permission::Microphone` before including it.
 
 ```rust
-use std::io::Write;
-use meeting_record::{capture, CaptureOptions, CaptureTarget, MicrophoneSource, MixedAudioOptions};
+use meeting_record::MicrophoneSource;
 
-let recording = capture::start(CaptureTarget::System, CaptureOptions {
-    microphone: Some(MicrophoneSource::Auto),
-    mix: Some(MixedAudioOptions { sample_rate: 24_000 }),
+let options = CaptureOptions {
+    mono: false, // Stereo system audio; defaults to mono. The mic stays mono.
+    microphone: Some(MicrophoneSource::Default), // Follow the OS input device.
     ..CaptureOptions::default()
-})?;
-let mixed = recording.mixed_audio().unwrap();
-mixed.set_microphone_muted(true);
-while let Some(chunk) = mixed.recv() {
-    destination.write_all(&chunk.pcm)?;
-    println!("{}", chunk.level);
-}
+};
 ```
 
-- `mixed_audio()`: mono s16le; raw tracks stay float32.
-- Paused time is excluded.
-- After stopping, drain it to consume the final tail.
-- No echo cancellation.
-- `CaptureOptions::cancellation`: a cloned `CancellationToken` stops capture.
-- A lost source pauses only its own track in the mix.
-- `permissions::request_and_wait(permission, timeout, Some(&token))`: cancellable permission wait.
+Use `MicrophoneSource::Auto` to prefer the captured app's mic on Windows, then the
+communications default. On macOS, both modes use the default input.
+
+## Meetings
+
+```rust
+use meeting_record::meetings;
+
+let active: Vec<_> = meetings::scan()?
+    .into_iter()
+    .filter(|meeting| meeting.should_record)
+    .collect();
+let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"))?;
+
+// Drop the watcher to stop watching.
+```
+
+- The watcher reports started, updated, and ended meetings.
+- Request `Permission::Accessibility` on macOS to include titles and URLs.
+- Enumeration functions return `Result`.
+
+## Audio output
+
+Raw tracks yield float32 samples with capture timestamps, sample rate, and channel
+count. Optional mixed output is available through `recording.mixed_audio()`.
+
+```rust
+use meeting_record::MixedAudioOptions;
+
+let options = CaptureOptions {
+    mix: Some(MixedAudioOptions { sample_rate: 24_000 }), // Combined mono s16le at 24 kHz.
+    ..CaptureOptions::default()
+};
+```
+
+- **Pause/resume:** `pause()` and `resume()` control capture.
+- **Stop:** `stop()` preserves queued audio. Drain outputs until `None`; dropping the session also stops capture.
+- **Cancellation:** `CaptureOptions::cancellation` accepts a `CancellationToken`.
+- **Source loss:** the session stays alive; `recv_event()` reports partial loss, interruption, recovery, and mic device changes.
+- **Events:** match `TrackEvent` with a fallback arm for future events.
+- **App exit:** a relaunched app requires a new capture session.
 
 ## License
 
 [MIT](./LICENSE.md) © Hoang Vo
-
-## Availability and compatibility
-
-`AudioTrack::availability()` distinguishes `Live`, `Degraded` (some sources missing),
-and `Interrupted` (none available). `is_interrupted()` is true only for the latter.
-Availability is independent of pause/stop; after stop it is the last observed state.
-Stopping preserves captured packets, including the native backend's final flush.
-Drain outputs until `None` to consume the tail.
-
-`MicrophoneSource::Default` follows the OS default input. `Auto` prefers the captured
-app's microphone on Windows, then the communications default; macOS follows its
-system default input. Explicitly requested sources must be available at startup;
-later device loss recovers independently while the session remains alive.
-
-Mixed output omits intervals over one second in which every input was absent;
-a missing input contributes silence while another track continues. Raw packets
-retain their original host timestamps for wall-clock alignment.
-
-Changes from 0.1.1: `meetings::scan()`, `audio_apps()`, and `audio_processes()` return
-`Result` so enumeration errors stay distinguishable from an empty list. Use `?` to
-propagate failures. Use `MicrophoneSource::Auto` for the previous Windows selection
-policy. Match public track events with a fallback arm for future event types.

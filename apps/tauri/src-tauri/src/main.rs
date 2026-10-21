@@ -1,4 +1,4 @@
-// Prevents an extra console window on Windows in release, DO NOT REMOVE!!
+// Hide the console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod mix;
@@ -101,9 +101,7 @@ struct Summary {
     dropped: u64,
 }
 
-/// Loudest sample since the meter last read it, shared by both writer threads.
-/// f32 bits compare like the floats do for non-negative values, so `fetch_max`
-/// on the bit pattern is a max on magnitudes.
+/// Non-negative f32 bits sort by magnitude, so fetch_max can track the peak.
 #[derive(Default)]
 struct WindowPeak(AtomicU32);
 
@@ -207,8 +205,7 @@ fn scan(session: State<'_, Session>) -> Result<Vec<MeetingView>, String> {
 fn watch(app: &AppHandle) {
     let handle = app.clone();
 
-    // the library runs this on its own serial queue, not a realtime thread, so
-    // emitting straight to the webview is fine here
+    // Watcher callbacks can emit directly to the webview.
     let watcher = meetings::watch(move |event, meeting| {
         let kind = match event {
             MeetingEvent::Started => "started",
@@ -273,9 +270,7 @@ async fn start_recording(
         .map_err(|error| error.to_string())?
 }
 
-/// The system mix is silent whenever the default output device is muted or
-/// isn't the one actually playing, so aim at a process that is definitely
-/// producing audio. The library resolves helper pids from this one itself.
+/// Prefer a process target when an audio app is available.
 fn playing_pid() -> Result<u32, String> {
     meetings::audio_processes()
         .map_err(|error| error.to_string())?
@@ -285,8 +280,7 @@ fn playing_pid() -> Result<u32, String> {
         .ok_or_else(|| "nothing is playing audio".to_string())
 }
 
-/// Picks one track out of the session. A plain fn pointer so the writer thread
-/// can re-borrow the track from the `Arc` it owns.
+/// Select a track from the session owned by the writer thread.
 type TrackOf = fn(&CaptureSession) -> Option<&AudioTrack>;
 
 /// Drains one track to its own WAV until the capture stops.
@@ -318,8 +312,7 @@ fn spawn_writer(
                     peak = magnitude;
                 }
                 window.offer(magnitude);
-                // clamp before scaling: a tap mixing several processes
-                // can exceed 1.0 and the wrap sounds like loud clicks
+                // Clamp before scaling to avoid integer overflow.
                 let scaled = sample.clamp(-1.0, 1.0) * 32767.0;
                 let _ = wav.write_sample(scaled.round() as i16);
             }
@@ -460,8 +453,7 @@ fn finish(recording: Recording) -> RecordingStopped {
     } = recording;
 
     capture.stop();
-    // the stems are only complete once their writers have joined, and the mix
-    // reads them straight back off disk
+    // Finish both stems before mixing them.
     let system_summary = system.join().unwrap_or_default();
     let mic_summary = microphone.map(|handle| handle.join().unwrap_or_default());
     let _ = meter.join();
@@ -513,8 +505,7 @@ fn reveal(path: String) -> Result<(), String> {
     command.spawn().map(drop).map_err(|error| error.to_string())
 }
 
-/// Both guards have to be released before the process goes away: leaking a
-/// running capture wedges OS audio state, sometimes coreaudiod machine-wide.
+/// Release capture and watcher resources before exiting.
 fn stop_all(app: &AppHandle) {
     let (watcher, recording) = {
         let session = app.state::<Session>();

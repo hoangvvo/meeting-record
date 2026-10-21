@@ -50,8 +50,7 @@ impl PcmMixer {
         let elapsed = i128::from(chunk.host_time_ns) - i128::from(origin);
         let mut position = self.origin_frame
             + (elapsed as f64 * f64::from(self.sample_rate) / 1e9 + 0.5).floor() as i64;
-        // Omit long intervals in which every source was absent. Preserve
-        // single-source gaps while another track continues on the same clock.
+        // Skip gaps over a second when every source was absent.
         if position > self.end + i64::from(self.sample_rate) {
             self.finish_segment();
             self.restart();

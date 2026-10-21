@@ -1,8 +1,4 @@
-//! Offline mixdown of the two capture stems into one mono file.
-//!
-//! Streams the stems rather than loading them: an hour of 48 kHz audio is ~700
-//! MB as f32, and meetings run that long. Costs a second read of each stem,
-//! because the peak has to be known before any sample can be scaled.
+//! Stream both stems twice: measure the peak, then write a normalized mono mix.
 
 use std::path::Path;
 
@@ -125,12 +121,7 @@ fn each_frame(
     Ok(())
 }
 
-/// Sums the stems into `out` at the system stem's rate, resampling the mic to
-/// match. Returns the peak of the mix before any scaling.
-///
-/// The two tracks run off independent clocks, so they are aligned at the start
-/// and drift apart by whatever those clocks disagree on. Fine to listen back
-/// to, not sample-accurate.
+/// Mix at the system stem rate. Stems align at the start, without clock-drift correction.
 pub fn mix(system_path: &Path, mic_path: Option<&Path>, out: &Path) -> Result<f32, String> {
     let (_, system_rate, system_frames) = MonoReader::open(system_path)?;
     let rate = system_rate.max(1.0);
@@ -150,8 +141,7 @@ pub fn mix(system_path: &Path, mic_path: Option<&Path>, out: &Path) -> Result<f3
         Ok(())
     })?;
 
-    // summing two loud tracks clips, so scale the mix back by exactly what it
-    // overshot instead of clamping every sample
+    // Normalize the mix to avoid clipping.
     let gain = if peak > 1.0 { 1.0 / peak } else { 1.0 };
 
     let spec = WavSpec {

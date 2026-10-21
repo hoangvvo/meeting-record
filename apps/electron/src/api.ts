@@ -2,8 +2,7 @@ export type PermissionName = "system-audio" | "microphone" | "accessibility";
 export type PermissionStatus = "granted" | "denied" | "unknown";
 export type MeetingEventKind = "started" | "updated" | "ended";
 
-/** `id` is opaque: the backend holds the real meeting object and looks it up
- *  again, so the window never sees a pid. */
+/** Opaque meeting ID resolved by the backend. */
 export interface MeetingView {
   readonly id: string;
   /** Stable identifier (`"zoom"`, `"meet"`, …), not a label. */
@@ -24,8 +23,7 @@ export interface MeetingEvent {
   readonly meeting: MeetingView;
 }
 
-/** `path` is the system-audio stem, the only file that exists while recording.
- *  The mix is written on stop. */
+/** `path` is the system stem; the mix is written on stop. */
 export interface RecordingStarted {
   readonly path: string;
   readonly sampleRate: number;

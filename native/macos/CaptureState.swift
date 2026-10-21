@@ -6,10 +6,7 @@ public typealias MrecAudioCallback = @convention(c) (
     UnsafePointer<Float>?, UInt32, UInt32, Double, UInt64, UnsafeMutableRawPointer?
 ) -> Void
 
-/// Holds the host's callback so the realtime IOProc can reach it through a raw
-/// pointer. A class because it is passed as IOProc `clientData`.
-///
-/// `emit` reads only fields that are immutable after start, so it takes no lock.
+/// Callback state passed through IOProc clientData. Immutable while recording.
 final class CaptureStateBox {
     private var callback: MrecAudioCallback?
     private var userData: UnsafeMutableRawPointer?

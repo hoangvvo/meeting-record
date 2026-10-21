@@ -1,8 +1,4 @@
-/*
- * Guards the hand-written struct offsets in native/macos/MeetingExports.swift,
- * which writes fields at literal byte offsets because Swift cannot import the
- * header. A header change fails here at compile time.
- */
+/* Check the C struct offsets used by MeetingExports.swift at compile time. */
 #include "meeting-record-detect.h"
 
 #include <stddef.h>

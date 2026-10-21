@@ -7,25 +7,7 @@ public typealias MrecMeetingCallback = @convention(c) (
     UnsafeRawPointer?, Int32, UnsafeMutableRawPointer?
 ) -> Void
 
-// MARK: - C struct layout
-//
-// Mirrors `mrec_meeting`. Swift cannot import the header, so these offsets are
-// hand-written and must track meeting-record-detect.h. `layout_check.c` and
-// `rust/tests/layout.rs` assert them.
-//
-//   platform          Int32     @ 0
-//   pid               UInt32    @ 4
-//   audio_pids[16]    UInt32    @ 8
-//   audio_pid_count   size_t    @ 72   (8-aligned)
-//   app_name[128]     char      @ 80
-//   title[512]        char      @ 208
-//   url[1024]         char      @ 720
-//   is_using_mic      Int32     @ 1744
-//   is_playing_audio  Int32     @ 1748
-//   confidence        Int32     @ 1752
-//   should_record     Int32     @ 1756
-//   detected_at_ns    UInt64    @ 1760
-//   total size                    1768
+// C struct offsets must match meeting-record-detect.h; layout tests check them.
 
 private enum Layout {
     static let platform = 0
@@ -208,7 +190,7 @@ public func mrec_start_meeting(_ meeting: UnsafeRawPointer?,
     let pid = meeting.advanced(by: Layout.pid)
         .assumingMemoryBound(to: UInt32.self).pointee
 
-    // Two browsers can both host Meet, so the pid identifies the meeting first.
+    // Match the owner PID to avoid selecting another meeting.
     let current = MeetingDetector.scan()
     var pids: [UInt32] = []
     if let fresh = current.first(where: { UInt32(bitPattern: $0.pid) == pid }) {

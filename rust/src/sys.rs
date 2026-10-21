@@ -1,7 +1,4 @@
-//! Raw FFI declarations for the C ABI in `native/include/`.
-//!
-//! Hand-written to avoid a build-time dependency on libclang. Field order and
-//! padding must match the headers; `tests/layout.rs` asserts it.
+//! C ABI declarations. Layout tests below check them against the headers.
 
 use std::os::raw::{c_char, c_double, c_int, c_void};
 

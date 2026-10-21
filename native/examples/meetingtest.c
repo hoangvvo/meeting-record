@@ -56,11 +56,7 @@ int main(void) {
   fprintf(g_log, "accessibility: %d (1=granted 2=denied) -- titles/URLs %s\n\n",
           ax, ax == MREC_PERM_GRANTED ? "available" : "will be empty");
 
-  /*
-   * Dump the raw input the detector classifies. When a user reports "it missed my
-   * call", this is the first thing to look at: the bundle ids are what the
-   * catalog prefix-matches against, and the output flags are the liveness signal.
-   */
+  /* Print the identity and audio activity used by detection. */
   static mrec_process procs[192];
   size_t proc_count = 0;
   if (mrec_list_audio_processes(procs, 192, &proc_count) == MREC_OK) {

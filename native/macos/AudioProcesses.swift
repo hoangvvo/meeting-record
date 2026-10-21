@@ -6,8 +6,7 @@ protocol HALScalar {}
 extension Int32: HALScalar {}
 extension UInt32: HALScalar {}
 
-/// Wrappers over the CoreAudio HAL property API, plus enumeration of the system's
-/// audio process objects.
+/// CoreAudio properties and audio process enumeration.
 enum HAL {
     static let system = AudioObjectID(kAudioObjectSystemObject)
 
@@ -120,11 +119,7 @@ struct AudioProcess {
 }
 
 enum AudioProcessRegistry {
-    /// Every live process the HAL knows is doing audio IO.
-    ///
-    /// The HAL keeps process objects after a process exits, still reporting
-    /// `isRunningOutput == true`. A tap over those captures silence without error,
-    /// so they are excluded here.
+    /// Exclude stale HAL objects whose processes have exited.
     static func all() -> [AudioProcess] {
         HAL.array(HAL.system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self)
             .compactMap { obj in

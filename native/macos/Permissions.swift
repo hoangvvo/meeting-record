@@ -2,23 +2,9 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-/// Audio-capture permission handling for CoreAudio process taps.
-///
-/// Taps are gated by `kTCCServiceAudioCapture` — a separate TCC service from
-/// microphone and from screen recording, surfaced in System Settings under
-/// "Screen & System Audio Recording".
-///
-/// There is no preflight or request API, so status is probed by building a
-/// throwaway tap and aggregate and checking whether IO starts.
-///
-/// The prompt requires a running `NSApplication`. Without one TCC has nowhere to
-/// draw it and the CoreAudio call blocks instead of failing; calling from the main
-/// thread deadlocks, since the prompt needs that run loop.
+/// Probe audio-capture permission with a temporary tap; no preflight API exists.
 enum Permissions {
-    /// A grant cannot be revoked without an app restart, so terminal states are
-    /// cached. Most importantly, only one probe may exist: an undetermined TCC
-    /// request can block indefinitely, and polling must not leak one thread and
-    /// tap per status check.
+    /// Cache terminal states and allow only one probe; unanswered requests can block indefinitely.
     private static let cacheLock = NSLock()
     private static var cachedStatus: Int32 = 0
     private static var probeInFlight = false
@@ -92,11 +78,7 @@ enum Permissions {
         return 1 // GRANTED
     }
 
-    /// Trigger the one-time prompt by probing off the main thread.
-    ///
-    /// Requires `NSAudioCaptureUsageDescription` in the host bundle's Info.plist;
-    /// without it the system does not prompt. Returns immediately — poll
-    /// `audioCaptureStatus()` for the answer.
+    /// Request off the main thread. Requires NSAudioCaptureUsageDescription; poll for the result.
     static func requestAudioCapture() -> Int32 {
         guard #available(macOS 14.2, *) else { return -1 /* UNSUPPORTED_OS */ }
         _ = beginProbeIfNeeded()

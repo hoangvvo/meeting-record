@@ -21,13 +21,13 @@ typedef enum {
   /* No source is available. The session remains alive. */
   MREC_TRACK_INTERRUPTED = 0,
   MREC_TRACK_RESUMED = 1,
-  /* The microphone moved to `device_name`, like an AVAudioSession route change. */
+  /* The microphone moved to `device_name`. */
   MREC_TRACK_DEVICE_CHANGED = 2,
   /* Some sources are unavailable; the remaining sources still deliver audio. */
   MREC_TRACK_DEGRADED = 3,
 } mrec_track_event_type;
 
-/* Why a track was interrupted, after WASAPI's session disconnect reasons. */
+/* Reason for source loss. */
 typedef enum {
   MREC_TRACK_REASON_UNKNOWN = 0,
   MREC_TRACK_REASON_DEVICE_REMOVED = 1, /* unplugged, disabled, or none left */
