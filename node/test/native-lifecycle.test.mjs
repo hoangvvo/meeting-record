@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { before, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,10 +10,12 @@ import { promisify } from "node:util";
 
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../../", import.meta.url));
-let directory;
+// Loaded addons stay locked until process exit on Windows. Keep the fixture
+// alongside other build output so ordinary build cleanup can remove it later.
+const directory = join(root, "node/build/test-native");
 let api;
 before(async () => {
-  directory = await mkdtemp(join(tmpdir(), "meeting-record-binding-test-"));
+  await mkdir(directory, { recursive: true });
   await copyFile(join(root, "node/src/native/binding.cc"), join(directory, "binding.cc"));
   await copyFile(
     join(root, "node/test/fixtures/native-backend.cc"),
@@ -61,9 +62,8 @@ before(async () => {
   );
   api = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 });
-after(async () => {
+after(() => {
   delete globalThis.meetingRecordTestNative;
-  if (directory) await rm(directory, { recursive: true, force: true });
 });
 
 test("standard async iteration retains packet metadata and the native stop tail", async () => {
