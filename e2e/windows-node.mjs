@@ -18,6 +18,8 @@ const MIN_DROPOUT_SECONDS = 0.001;
 const MAX_MICROPHONE_DROPOUTS = 2;
 /** Allow startup silence while sources attach and fill their buffers. */
 const STARTUP_SECONDS = 0.1;
+/** System audio already in flight when the exited app is reported. */
+const MAX_SECONDS_AFTER_EXIT = 0.05;
 
 class TrackMetrics {
   frames = 0;
@@ -107,6 +109,18 @@ class TrackMetrics {
       throw new Error(`${name}: ${this.droppedSamples} samples were dropped`);
     }
     verifyGaps(name, this.gapsNs, expectations.pauseSeconds);
+  }
+
+  /** A removed device leaves one timestamp gap: audio is neither backfilled nor overlapped. */
+  verifyRecovered(name) {
+    if (this.malformedChunks !== 0 || this.timestampRegressions !== 0) {
+      throw new Error(`${name}: malformed chunks or timestamp regressions around recovery`);
+    }
+    if (this.gapsNs.length !== 1) {
+      throw new Error(
+        `${name}: timestamp gaps ${formatGaps(this.gapsNs)} do not match one removal`,
+      );
+    }
   }
 
   report(name) {
@@ -277,6 +291,23 @@ function frequencies(name) {
     });
 }
 
+/** Track events must be exactly those the scenario causes. */
+function verifyTrackEvents(events, expectDeviceChange, expectRecovery) {
+  const removed = "microphone interrupted (device-removed)";
+  const expected = (event) =>
+    (expectDeviceChange && event === "microphone devicechange") ||
+    (expectRecovery && (event === removed || event === "microphone resumed"));
+  const unexpected = events.filter((event) => !expected(event));
+  if (unexpected.length > 0) throw new Error(`unexpected track events: ${unexpected.join(", ")}`);
+  if (expectDeviceChange && !events.includes("microphone devicechange")) {
+    throw new Error("expected a microphone device change");
+  }
+  const lost = events.indexOf(removed);
+  if (expectRecovery && (lost < 0 || !events.includes("microphone resumed", lost))) {
+    throw new Error("expected the microphone to be interrupted and resume");
+  }
+}
+
 /** Resolves once every listed stream has ended. */
 const ended = (streams) =>
   Promise.all(streams.filter(Boolean).map((stream) => once(stream, "end")));
@@ -339,6 +370,73 @@ async function restartCycles(target, options, cycles) {
   if (cycles > 0) console.log(`restart cycles: ${cycles} passed`);
 }
 
+/** Ending the captured app stops only its system audio; the session and microphone go on. */
+async function appExit(target, options) {
+  console.log(`starting ${JSON.stringify(target)} capture, then ending the app`);
+  const recording = await MeetingRecord.capture.start(target, options);
+  const seconds = { system: 0, microphone: 0, mixed: 0 };
+  recording.systemAudio.on(
+    "data",
+    (chunk) => (seconds.system += chunk.frameCount / chunk.sampleRate),
+  );
+  recording.microphone?.on(
+    "data",
+    (chunk) => (seconds.microphone += chunk.frameCount / chunk.sampleRate),
+  );
+  recording.mixedAudio?.on(
+    "data",
+    (chunk) => (seconds.mixed += chunk.length / 2 / options.mix.sampleRate),
+  );
+  const finished = ended([recording.systemAudio, recording.microphone, recording.mixedAudio]);
+  try {
+    await delay(1000);
+    if (seconds.system === 0) throw new Error("exit: no system audio before the app ended");
+    const exited = once(recording.systemAudio, "interrupted", {
+      signal: AbortSignal.timeout(5000),
+    });
+    process.kill(target.pid);
+    let reason;
+    try {
+      [reason] = await exited;
+    } catch {
+      throw new Error("exit: system audio was not interrupted after the app ended");
+    }
+    console.log(`system interrupted (${reason})`);
+    if (reason !== "app-exited") throw new Error(`exit: interrupted for ${reason}`);
+
+    const before = { ...seconds };
+    await delay(1500);
+    const after = Object.fromEntries(
+      Object.entries(seconds).map(([name, value]) => [name, value - before[name]]),
+    );
+    console.log(
+      `after exit: system +${after.system.toFixed(2)}s, microphone +${after.microphone.toFixed(2)}s, mixed +${after.mixed.toFixed(2)}s`,
+    );
+    if (after.system > MAX_SECONDS_AFTER_EXIT) {
+      throw new Error("exit: system audio continued after the app ended");
+    }
+    if (recording.microphone && after.microphone < 1) {
+      throw new Error("exit: the microphone stopped with the app");
+    }
+    if (recording.microphone && recording.mixedAudio && after.mixed < 1) {
+      throw new Error("exit: mixed audio stopped with the app");
+    }
+    if (
+      recording.state !== "recording" ||
+      recording.systemAudio.availability !== "interrupted" ||
+      recording.microphone?.interrupted
+    ) {
+      throw new Error("exit: the session did not keep recording without the app");
+    }
+  } finally {
+    await recording.stopRecording();
+  }
+  await finished;
+  if (recording.state !== "stopped" || MeetingRecord.capture.running) {
+    throw new Error("exit: capture still running after stop");
+  }
+}
+
 async function main() {
   const durationSeconds = number("MREC_DURATION_SECONDS", 6);
   const mixSampleRate =
@@ -353,6 +451,7 @@ async function main() {
       : { type: "process", pid: targetPid };
   const includeMicrophone = enabled("MREC_MICROPHONE");
   const expectDeviceChange = enabled("MREC_EXPECT_DEVICE_CHANGE");
+  const expectRecovery = enabled("MREC_EXPECT_MICROPHONE_RECOVERY");
   const expectations = {
     minimumPeak: number("MREC_MIN_PEAK", 0.0001),
     allowDrops: enabled("MREC_ALLOW_DROPS"),
@@ -366,6 +465,12 @@ async function main() {
     ...(includeMicrophone ? { microphone: "auto" } : {}),
     ...(mixSampleRate === undefined ? {} : { mix: { sampleRate: mixSampleRate } }),
   };
+
+  if (enabled("MREC_EXPECT_APP_EXIT")) {
+    await appExit(target, options);
+    console.log("PASS: live audio capture met all E2E assertions");
+    return;
+  }
 
   await restartCycles(target, options, number("MREC_RESTART_CYCLES", 0));
 
@@ -392,18 +497,25 @@ async function main() {
       (level) => (mixed.peakLevel = Math.max(mixed.peakLevel, level)),
     );
   }
-  let sawDeviceChange = false;
+  /** @type {string[]} */
+  const trackEvents = [];
   for (const [name, track] of [
     ["system", recording.systemAudio],
     ["microphone", recording.microphone],
   ]) {
-    track?.on("interrupted", (reason, message) =>
-      console.log(`${name} interrupted (${reason}): ${message}`),
-    );
-    track?.on("resumed", () => console.log(`${name} resumed`));
+    for (const type of ["interrupted", "degraded"]) {
+      track?.on(type, (reason, message) => {
+        console.log(`${name} ${type} (${reason}): ${message}`);
+        trackEvents.push(`${name} ${type} (${reason})`);
+      });
+    }
+    track?.on("resumed", () => {
+      console.log(`${name} resumed`);
+      trackEvents.push(`${name} resumed`);
+    });
     track?.on("devicechange", (deviceName) => {
       console.log(`${name} device: ${deviceName}`);
-      sawDeviceChange = true;
+      trackEvents.push(`${name} devicechange`);
     });
   }
   const finished = ended([recording.systemAudio, recording.microphone, recording.mixedAudio]);
@@ -437,9 +549,7 @@ async function main() {
   await finished;
 
   if (interrupted.length > 0) throw new Error("a track was still interrupted at the end");
-  if (expectDeviceChange && !sawDeviceChange) {
-    throw new Error("expected a microphone device change");
-  }
+  verifyTrackEvents(trackEvents, expectDeviceChange, expectRecovery);
 
   const expectedSeconds = durationSeconds - (pauseSeconds ?? 0);
   system.report("system");
@@ -456,7 +566,11 @@ async function main() {
   }
   if (microphone) {
     microphone.report("microphone");
-    microphone.verify("microphone", expectedSeconds, expectations);
+    if (expectRecovery) {
+      microphone.verifyRecovered("microphone");
+    } else {
+      microphone.verify("microphone", expectedSeconds, expectations);
+    }
     verifyTones(
       "microphone",
       microphone.mono,

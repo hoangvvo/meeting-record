@@ -1,6 +1,7 @@
 # Live-audio E2E for the Windows backend through the Rust and Node.js bindings.
 #
-# System and Process play test tones. Meeting needs a call receiving audio.
+# System and Process play test tones. Meeting needs a call receiving audio. Exit
+# ends the captured app mid-capture: only its system audio may stop, with app-exited.
 #
 # -MicrophoneDevice plays a third tone into an output device that loops back to the
 # default microphone, such as a virtual cable's "CABLE Input", and requires that tone
@@ -8,9 +9,18 @@
 #
 # -SwitchMicrophone makes another recording device the default mid-capture, then
 # restores the original, and requires a microphone device change.
+#
+# -RemoveMicrophone disables that recording device mid-capture, then restores it,
+# and requires the microphone track to be interrupted and resume while system audio
+# and the mix continue.
+#
+# -SwitchOutput makes another playback device the default mid-capture, then restores
+# the original; capture must continue without gaps.
+#
+# Unless a scenario expects them, any track event fails the run.
 [CmdletBinding()]
 param(
-    [ValidateSet("System", "Process", "Meeting", "All")]
+    [ValidateSet("System", "Process", "Exit", "Meeting", "All")]
     [string]$Mode = "All",
     [string]$MeetingPlatform = "meet",
     [ValidateRange(0, [int]::MaxValue)]
@@ -29,7 +39,9 @@ param(
     [int]$RestartCycles = 2,
     [switch]$Microphone,
     [string]$MicrophoneDevice,
-    [string]$SwitchMicrophone
+    [string]$SwitchMicrophone,
+    [string]$RemoveMicrophone,
+    [string]$SwitchOutput
 )
 
 Set-StrictMode -Version Latest
@@ -39,7 +51,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $rustHarness = Join-Path $root "target\debug\meeting-record-windows-e2e.exe"
 $nodeHarness = Join-Path $PSScriptRoot "windows-node.mjs"
 $toneScript = Join-Path $PSScriptRoot "windows-tone.ps1"
-$microphoneScript = Join-Path $PSScriptRoot "windows-microphone.ps1"
+$deviceScript = Join-Path $PSScriptRoot "windows-audio-device.ps1"
 # The captured process plays the first tone; the second must never reach it.
 $targetFrequency = 997
 $otherFrequency = 440
@@ -51,13 +63,15 @@ $variableNames = @(
     "MREC_MONO",
     "MREC_MICROPHONE",
     "MREC_EXPECT_DEVICE_CHANGE",
+    "MREC_EXPECT_MICROPHONE_RECOVERY",
     "MREC_EXPECT_FREQUENCIES",
     "MREC_REJECT_FREQUENCIES",
     "MREC_MIX_SAMPLE_RATE",
     "MREC_PAUSE_SECONDS",
     "MREC_RESTART_CYCLES",
     "MREC_EXPECT_MEETING",
-    "MREC_MICROPHONE_FREQUENCIES"
+    "MREC_MICROPHONE_FREQUENCIES",
+    "MREC_EXPECT_APP_EXIT"
 )
 $originalEnvironment = @{}
 foreach ($name in $variableNames) {
@@ -114,24 +128,32 @@ function Stop-Tone($Tone) {
     Remove-Item -LiteralPath $Tone.ReadyFile -Force -ErrorAction SilentlyContinue
 }
 
-function Start-MicrophoneSwitch([string]$Device, [double]$DelaySeconds) {
-    Start-Process -PassThru -WindowStyle Hidden -FilePath (Get-Process -Id $PID).Path -ArgumentList @(
+# Changes a device after a delay, from another process so capture keeps running.
+function Start-DeviceChange([string]$Device, [double]$DelaySeconds, [string[]]$Options = @()) {
+    Start-Process -PassThru -WindowStyle Hidden -FilePath (Get-Process -Id $PID).Path -ArgumentList (@(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-File", ('"' + $microphoneScript + '"'),
+        "-File", ('"' + $deviceScript + '"'),
         "-Device", ('"' + $Device + '"'),
         "-DelaySeconds", $DelaySeconds.ToString([Globalization.CultureInfo]::InvariantCulture)
-    )
+    ) + $Options)
 }
 
 Push-Location $root
 $tones = @()
 $originalMicrophone = $null
+$originalOutput = $null
 try {
     if ($SwitchMicrophone) {
-        $originalMicrophone = & $microphoneScript
+        $originalMicrophone = & $deviceScript
         if (-not $originalMicrophone) {
             throw "-SwitchMicrophone needs a default microphone to restore"
+        }
+    }
+    if ($SwitchOutput) {
+        $originalOutput = & $deviceScript -Output
+        if (-not $originalOutput) {
+            throw "-SwitchOutput needs a default playback device to restore"
         }
     }
 
@@ -143,9 +165,9 @@ try {
         Invoke-Native "building the Node.js package" { npm run build --workspace meeting-record }
     }
 
-    $modes = @(if ($Mode -eq "All") { "System", "Process" } else { $Mode })
+    $modes = @(if ($Mode -eq "All") { "System", "Process", "Exit" } else { $Mode })
     $runSeconds = ($DurationSeconds + 2) * $modes.Count * $bindings.Count + 30
-    if ($Mode -ne "Meeting") {
+    if ($Mode -notin "Meeting", "Exit") {
         $target = Start-Tone $targetFrequency $runSeconds
         $tones += $target
         $tones += Start-Tone $otherFrequency $runSeconds
@@ -156,17 +178,21 @@ try {
 
     Set-HarnessVariable "MREC_DURATION_SECONDS" $DurationSeconds
     Set-HarnessVariable "MREC_MIN_PEAK" $MinimumPeak.ToString([Globalization.CultureInfo]::InvariantCulture)
-    Set-HarnessVariable "MREC_MICROPHONE" $(if ($Microphone -or $MicrophoneDevice -or $SwitchMicrophone) { "1" })
-    # A switched microphone carries another device's audio for a while.
-    Set-HarnessVariable "MREC_MICROPHONE_FREQUENCIES" $(if ($MicrophoneDevice -and -not $SwitchMicrophone) { $microphoneFrequency })
+    Set-HarnessVariable "MREC_MICROPHONE" $(if ($Microphone -or $MicrophoneDevice -or $SwitchMicrophone -or $RemoveMicrophone) { "1" })
+    # A switched microphone carries another device's audio for a while, and a removed
+    # one carries none.
+    $microphoneChanges = $SwitchMicrophone -or $RemoveMicrophone
+    Set-HarnessVariable "MREC_MICROPHONE_FREQUENCIES" $(if ($MicrophoneDevice -and -not $microphoneChanges) { $microphoneFrequency })
     Set-HarnessVariable "MREC_EXPECT_DEVICE_CHANGE" $(if ($SwitchMicrophone) { "1" })
+    Set-HarnessVariable "MREC_EXPECT_MICROPHONE_RECOVERY" $(if ($RemoveMicrophone) { "1" })
     Set-HarnessVariable "MREC_MIX_SAMPLE_RATE" $(if ($MixSampleRate -gt 0) { $MixSampleRate })
-    # Pause cuts tracks up to a block apart; a switched microphone can be silent there.
-    Set-HarnessVariable "MREC_PAUSE_SECONDS" $(if ($PauseSeconds -gt 0 -and -not $SwitchMicrophone) { $PauseSeconds.ToString([Globalization.CultureInfo]::InvariantCulture) })
+    # Pause cuts tracks up to a block apart; a changed microphone can be silent there.
+    Set-HarnessVariable "MREC_PAUSE_SECONDS" $(if ($PauseSeconds -gt 0 -and -not $microphoneChanges) { $PauseSeconds.ToString([Globalization.CultureInfo]::InvariantCulture) })
     Set-HarnessVariable "MREC_RESTART_CYCLES" $RestartCycles
 
     foreach ($harness in $bindings) {
         foreach ($run in $modes) {
+            Set-HarnessVariable "MREC_EXPECT_APP_EXIT" $null
             if ($run -eq "Meeting") {
                 # The detected meeting's app, with whatever audio the call carries.
                 Write-Host "`n==> Windows $MeetingPlatform meeting E2E ($harness)"
@@ -183,6 +209,17 @@ try {
                 Set-HarnessVariable "MREC_MONO" $null
                 Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" "$targetFrequency,$otherFrequency"
                 Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $null
+            } elseif ($run -eq "Exit") {
+                # The harness ends this app, so it gets its own tone.
+                $exitTone = Start-Tone $targetFrequency 30
+                $tones += $exitTone
+                Write-Host "`n==> Windows app-exit E2E ($harness, pid $($exitTone.Process.Id))"
+                Set-HarnessVariable "MREC_EXPECT_MEETING" $null
+                Set-HarnessVariable "MREC_TARGET_PID" $exitTone.Process.Id
+                Set-HarnessVariable "MREC_MONO" "1"
+                Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" $null
+                Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $null
+                Set-HarnessVariable "MREC_EXPECT_APP_EXIT" "1"
             } else {
                 # Mono process tree: only the target's tone is present.
                 Write-Host "`n==> Windows process-audio E2E ($harness, pid $($target.Process.Id))"
@@ -192,12 +229,23 @@ try {
                 Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" $targetFrequency
                 Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $(if ($MicrophoneDevice) { "$otherFrequency,$microphoneFrequency" } else { $otherFrequency })
             }
-            $switches = @()
-            if ($SwitchMicrophone) {
-                # Switch a quarter of the way into capture, and back a quarter later.
-                $switchAt = $RestartCycles * 0.4 + $DurationSeconds / 4
-                $switches += Start-MicrophoneSwitch $SwitchMicrophone $switchAt
-                $switches += Start-MicrophoneSwitch $originalMicrophone ($switchAt + $DurationSeconds / 4)
+            $changes = @()
+            if ($run -ne "Exit") {
+                # Change a quarter of the way into capture, and back a quarter later.
+                $changeAt = $RestartCycles * 0.4 + $DurationSeconds / 4
+                $restoreAt = $changeAt + $DurationSeconds / 4
+                if ($SwitchMicrophone) {
+                    $changes += Start-DeviceChange $SwitchMicrophone $changeAt
+                    $changes += Start-DeviceChange $originalMicrophone $restoreAt
+                }
+                if ($RemoveMicrophone) {
+                    $changes += Start-DeviceChange $RemoveMicrophone $changeAt @("-Action", "Disable")
+                    $changes += Start-DeviceChange $RemoveMicrophone $restoreAt @("-Action", "Enable")
+                }
+                if ($SwitchOutput) {
+                    $changes += Start-DeviceChange $SwitchOutput $changeAt @("-Output")
+                    $changes += Start-DeviceChange $originalOutput $restoreAt @("-Output")
+                }
             }
             try {
                 if ($harness -eq "Rust") {
@@ -207,15 +255,21 @@ try {
                 }
             }
             finally {
-                foreach ($switch in $switches) { $switch.WaitForExit() }
+                foreach ($change in $changes) { $change.WaitForExit() }
             }
         }
     }
 }
 finally {
     foreach ($tone in $tones) { Stop-Tone $tone }
+    if ($RemoveMicrophone) {
+        & $deviceScript -Device $RemoveMicrophone -Action Enable | Out-Null
+    }
     if ($originalMicrophone) {
-        & $microphoneScript -Device $originalMicrophone | Out-Null
+        & $deviceScript -Device $originalMicrophone | Out-Null
+    }
+    if ($originalOutput) {
+        & $deviceScript -Output -Device $originalOutput | Out-Null
     }
     foreach ($name in $variableNames) {
         [Environment]::SetEnvironmentVariable(

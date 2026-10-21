@@ -1,8 +1,13 @@
 [CmdletBinding()]
 param(
-    # Make the active recording device whose name contains this text the default
-    # for every role. Without it, print the current default's name.
+    # Act on the recording device whose name contains this text, or with -Output, the
+    # playback device. Without it, print the current default's name.
     [string]$Device,
+    [switch]$Output,
+    # Default makes the device the default for every role. Disable removes it, as
+    # unplugging would; Enable restores it and makes it the default again.
+    [ValidateSet("Default", "Disable", "Enable")]
+    [string]$Action = "Default",
     [ValidateRange(0, 600)]
     [double]$DelaySeconds = 0
 )
@@ -10,11 +15,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (-not ("MeetingRecord.Microphones" -as [type])) {
+if (-not ("MeetingRecord.AudioDevices" -as [type])) {
     # IPolicyConfig is undocumented; it is how Windows' own settings switch devices.
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 namespace MeetingRecord {
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDeviceEnumerator {
@@ -54,12 +60,15 @@ namespace MeetingRecord {
         [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string device, int store, IntPtr key, IntPtr value);
         [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string device, int store, IntPtr key, IntPtr value);
         [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string device, int role);
+        [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string device, int visible);
     }
     [ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")] class PolicyConfigClient {}
 
-    public static class Microphones {
-        const int Capture = 1;
+    public static class AudioDevices {
+        public const int Playback = 0;
+        public const int Recording = 1;
         const int Active = 1;
+        const int Disabled = 2;
 
         static string Name(IMMDevice device) {
             IPropertyStore store;
@@ -70,43 +79,83 @@ namespace MeetingRecord {
             return Marshal.PtrToStringUni(value.Pointer);
         }
 
-        public static string Default() {
+        public static string Default(int flow) {
             IMMDevice device;
-            int result = ((IMMDeviceEnumerator)new MMDeviceEnumerator()).GetDefaultAudioEndpoint(Capture, 0, out device);
+            int result = ((IMMDeviceEnumerator)new MMDeviceEnumerator()).GetDefaultAudioEndpoint(flow, 0, out device);
             return result == 0 ? Name(device) : "";
         }
 
-        // Returns the full name of the device made default.
-        public static string SetDefault(string text) {
+        // The id and full name of the first device in `states` whose name contains `text`.
+        static string Find(int flow, int states, string text, out string name) {
             IMMDeviceCollection devices;
-            ((IMMDeviceEnumerator)new MMDeviceEnumerator()).EnumAudioEndpoints(Capture, Active, out devices);
+            ((IMMDeviceEnumerator)new MMDeviceEnumerator()).EnumAudioEndpoints(flow, states, out devices);
             int count;
             devices.GetCount(out count);
             for (int index = 0; index < count; index++) {
                 IMMDevice device;
                 devices.Item(index, out device);
-                string name = Name(device);
+                name = Name(device);
                 if (name.IndexOf(text, StringComparison.OrdinalIgnoreCase) < 0) continue;
                 string id;
                 device.GetId(out id);
-                IPolicyConfig policy = (IPolicyConfig)new PolicyConfigClient();
-                for (int role = 0; role < 3; role++) {
-                    int result = policy.SetDefaultEndpoint(id, role);
-                    if (result != 0) throw new InvalidOperationException("SetDefaultEndpoint failed with " + result);
-                }
-                return name;
+                return id;
             }
-            throw new ArgumentException("no active recording device name contains " + text);
+            throw new ArgumentException("no matching " + (flow == Playback ? "playback" : "recording") +
+                                        " device name contains " + text);
+        }
+
+        static void MakeDefault(string id) {
+            IPolicyConfig policy = (IPolicyConfig)new PolicyConfigClient();
+            for (int role = 0; role < 3; role++) {
+                int result = policy.SetDefaultEndpoint(id, role);
+                if (result != 0) throw new InvalidOperationException("SetDefaultEndpoint failed with " + result);
+            }
+        }
+
+        // Each returns the full name of the device changed.
+        public static string SetDefault(int flow, string text) {
+            string name;
+            MakeDefault(Find(flow, Active, text, out name));
+            return name;
+        }
+
+        public static string Disable(int flow, string text) {
+            string name;
+            int result = ((IPolicyConfig)new PolicyConfigClient()).SetEndpointVisibility(Find(flow, Active, text, out name), 0);
+            if (result != 0) throw new InvalidOperationException("SetEndpointVisibility failed with " + result);
+            return name;
+        }
+
+        public static string Enable(int flow, string text) {
+            string name;
+            string id = Find(flow, Active | Disabled, text, out name);
+            int result = ((IPolicyConfig)new PolicyConfigClient()).SetEndpointVisibility(id, 1);
+            if (result != 0) throw new InvalidOperationException("SetEndpointVisibility failed with " + result);
+            // A re-enabled device takes a moment to become available as a default.
+            for (int attempt = 0; ; attempt++) {
+                try {
+                    MakeDefault(id);
+                    return name;
+                } catch (InvalidOperationException) {
+                    if (attempt == 20) throw;
+                    Thread.Sleep(100);
+                }
+            }
         }
     }
 }
 "@
 }
 
+$flow = if ($Output) { [MeetingRecord.AudioDevices]::Playback } else { [MeetingRecord.AudioDevices]::Recording }
 if (-not $Device) {
-    [MeetingRecord.Microphones]::Default()
+    [MeetingRecord.AudioDevices]::Default($flow)
     return
 }
 Start-Sleep -Milliseconds ([int]($DelaySeconds * 1000))
-$name = [MeetingRecord.Microphones]::SetDefault($Device)
-Write-Host "default microphone: $name"
+$name = switch ($Action) {
+    "Default" { [MeetingRecord.AudioDevices]::SetDefault($flow, $Device) }
+    "Disable" { [MeetingRecord.AudioDevices]::Disable($flow, $Device) }
+    "Enable" { [MeetingRecord.AudioDevices]::Enable($flow, $Device) }
+}
+Write-Host "$($Action.ToLower()) $(if ($Output) { 'output' } else { 'microphone' }): $name"

@@ -128,11 +128,13 @@ MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Developer ID A
 Live audio tests on Windows:
 
 ```powershell
-./e2e/windows.ps1                                    # system + process, both bindings
-./e2e/windows.ps1 -Binding Rust                      # one binding
-./e2e/windows.ps1 -MicrophoneDevice "CABLE Input"    # loopback microphone
-./e2e/windows.ps1 -SwitchMicrophone "Stereo Mix"     # default-input switching
-./e2e/windows.ps1 -Mode Meeting -MeetingPid 1234     # a live meeting
+./e2e/windows.ps1                                         # system, process, app exit; both bindings
+./e2e/windows.ps1 -Binding Rust                           # one binding
+./e2e/windows.ps1 -MicrophoneDevice "CABLE Input"         # loopback microphone
+./e2e/windows.ps1 -SwitchMicrophone "Stereo Mix"          # default-input switching
+./e2e/windows.ps1 -RemoveMicrophone "CABLE Output"        # microphone loss and recovery
+./e2e/windows.ps1 -SwitchOutput "Realtek Digital Output"  # default-output switching
+./e2e/windows.ps1 -Mode Meeting -MeetingPid 1234          # a live meeting
 ```
 
 See [internals](./docs/INTERNALS.md) for backend details.

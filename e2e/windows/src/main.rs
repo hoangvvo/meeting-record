@@ -3,14 +3,18 @@
 use std::{
     env,
     error::Error as StdError,
-    sync::{mpsc, Arc},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use meeting_record::{
-    capture, meetings, AudioChunk, CaptureOptions, CaptureState, CaptureTarget, MeetingEvent,
-    MicrophoneSource, MixedAudioOptions, TrackEvent,
+    capture, meetings, AudioChunk, CaptureOptions, CaptureState, CaptureTarget, InterruptionReason,
+    MeetingEvent, MicrophoneSource, MixedAudioOptions, Track, TrackAvailability, TrackEvent,
 };
 
 /// A timestamp further than this from the previous chunk's end is a gap.
@@ -27,6 +31,8 @@ const MIN_DROPOUT: Duration = Duration::from_millis(1);
 const MAX_MICROPHONE_DROPOUTS: usize = 2;
 /// Allow startup silence while sources attach and fill their buffers.
 const STARTUP: Duration = Duration::from_millis(100);
+/// System audio already in flight when the exited app is reported.
+const MAX_AFTER_EXIT: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 struct TrackMetrics {
@@ -124,6 +130,26 @@ impl TrackMetrics {
             ));
         }
         verify_gaps(name, &self.gaps_ns, expectations.pause)
+    }
+
+    /// A removed device leaves one timestamp gap: audio is neither backfilled
+    /// nor overlapped.
+    fn verify_recovered(&self, name: &str) -> Result<(), String> {
+        if self.malformed_chunks != 0 || self.timestamp_regressions != 0 {
+            return Err(format!(
+                "{name}: malformed chunks or timestamp regressions around recovery"
+            ));
+        }
+        if self.gaps_ns.len() != 1 {
+            return Err(format!(
+                "{name}: timestamp gaps {:?} do not match one removal",
+                self.gaps_ns
+                    .iter()
+                    .map(|gap| Duration::from_nanos(*gap))
+                    .collect::<Vec<_>>()
+            ));
+        }
+        Ok(())
     }
 
     fn verify_tones(&self, name: &str, expected: &[f64], rejected: &[f64]) -> Result<(), String> {
@@ -329,6 +355,62 @@ impl MixMetrics {
     }
 }
 
+fn microphone_removed(event: &TrackEvent) -> bool {
+    matches!(
+        event,
+        TrackEvent::Interrupted {
+            track: Track::Microphone,
+            reason: InterruptionReason::DeviceRemoved,
+            ..
+        }
+    )
+}
+
+fn microphone_resumed(event: &TrackEvent) -> bool {
+    matches!(
+        event,
+        TrackEvent::Resumed {
+            track: Track::Microphone
+        }
+    )
+}
+
+fn microphone_changed(event: &TrackEvent) -> bool {
+    matches!(
+        event,
+        TrackEvent::DeviceChanged {
+            track: Track::Microphone,
+            ..
+        }
+    )
+}
+
+/// Track events must be exactly those the scenario causes.
+fn verify_track_events(
+    events: &[TrackEvent],
+    expect_device_change: bool,
+    expect_recovery: bool,
+) -> Result<(), String> {
+    let unexpected: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            !(expect_device_change && microphone_changed(event))
+                && !(expect_recovery && (microphone_removed(event) || microphone_resumed(event)))
+        })
+        .collect();
+    if !unexpected.is_empty() {
+        return Err(format!("unexpected track events: {unexpected:?}"));
+    }
+    if expect_device_change && !events.iter().any(microphone_changed) {
+        return Err("expected a microphone device change".into());
+    }
+    let lost = events.iter().position(microphone_removed);
+    if expect_recovery && !lost.is_some_and(|lost| events[lost..].iter().any(microphone_resumed)) {
+        return Err("expected the microphone to be interrupted and resume".into());
+    }
+    Ok(())
+}
+
 fn enabled(name: &str) -> bool {
     env::var(name).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
@@ -421,6 +503,148 @@ fn restart_cycles(
     Ok(())
 }
 
+/// Microseconds of audio read from each output, counted by reader threads.
+#[derive(Default)]
+struct Progress {
+    system: AtomicU64,
+    microphone: AtomicU64,
+    mixed: AtomicU64,
+}
+
+impl Progress {
+    fn snapshot(&self) -> [Duration; 3] {
+        [&self.system, &self.microphone, &self.mixed]
+            .map(|micros| Duration::from_micros(micros.load(Ordering::Relaxed)))
+    }
+}
+
+/// Ending the captured app stops only its system audio; the session and
+/// microphone go on.
+fn app_exit(target: CaptureTarget, options: CaptureOptions) -> Result<(), Box<dyn StdError>> {
+    let CaptureTarget::Process { pid } = target else {
+        return Err("exit: needs a process target".into());
+    };
+    let mix_sample_rate = options.mix.map(|mix| mix.sample_rate);
+    println!("starting {target:?} capture, then ending the app");
+    let recording = Arc::new(capture::start(target, options)?);
+    let progress = Arc::new(Progress::default());
+    let readers = [
+        {
+            let (recording, progress) = (Arc::clone(&recording), Arc::clone(&progress));
+            thread::spawn(move || {
+                while let Some(chunk) = recording.system_audio().recv() {
+                    let micros = f64::from(chunk.frame_count) * 1e6 / chunk.sample_rate;
+                    progress.system.fetch_add(micros as u64, Ordering::Relaxed);
+                }
+            })
+        },
+        {
+            let (recording, progress) = (Arc::clone(&recording), Arc::clone(&progress));
+            thread::spawn(move || {
+                let Some(track) = recording.microphone() else {
+                    return;
+                };
+                while let Some(chunk) = track.recv() {
+                    let micros = f64::from(chunk.frame_count) * 1e6 / chunk.sample_rate;
+                    progress
+                        .microphone
+                        .fetch_add(micros as u64, Ordering::Relaxed);
+                }
+            })
+        },
+        {
+            let (recording, progress) = (Arc::clone(&recording), Arc::clone(&progress));
+            thread::spawn(move || {
+                let (Some(mixed), Some(sample_rate)) = (recording.mixed_audio(), mix_sample_rate)
+                else {
+                    return;
+                };
+                while let Some(chunk) = mixed.recv() {
+                    let micros = chunk.pcm.len() as u64 / 2 * 1_000_000 / u64::from(sample_rate);
+                    progress.mixed.fetch_add(micros, Ordering::Relaxed);
+                }
+            })
+        },
+    ];
+
+    let checked = (|| -> Result<(), Box<dyn StdError>> {
+        thread::sleep(Duration::from_secs(1));
+        if progress.snapshot()[0].is_zero() {
+            return Err("exit: no system audio before the app ended".into());
+        }
+        let killed = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .status()?;
+        if !killed.success() {
+            return Err(format!("exit: could not end pid {pid}").into());
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let reason = loop {
+            match recording.try_recv_event() {
+                Some(TrackEvent::Interrupted {
+                    track: Track::SystemAudio,
+                    reason,
+                    ..
+                }) => break reason,
+                Some(event) => println!("track event: {event:?}"),
+                None if Instant::now() >= deadline => {
+                    return Err("exit: system audio was not interrupted after the app ended".into())
+                }
+                None => thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        println!("system interrupted ({reason:?})");
+        if reason != InterruptionReason::AppExited {
+            return Err(format!("exit: interrupted for {reason:?}").into());
+        }
+
+        let before = progress.snapshot();
+        thread::sleep(Duration::from_millis(1500));
+        let [system, microphone, mixed] = progress.snapshot();
+        let (system, microphone, mixed) = (
+            system - before[0],
+            microphone - before[1],
+            mixed - before[2],
+        );
+        println!(
+            "after exit: system +{:.2}s, microphone +{:.2}s, mixed +{:.2}s",
+            system.as_secs_f64(),
+            microphone.as_secs_f64(),
+            mixed.as_secs_f64()
+        );
+        if system > MAX_AFTER_EXIT {
+            return Err("exit: system audio continued after the app ended".into());
+        }
+        let microphone_track = recording.microphone();
+        if microphone_track.is_some() && microphone < Duration::from_secs(1) {
+            return Err("exit: the microphone stopped with the app".into());
+        }
+        if microphone_track.is_some()
+            && recording.mixed_audio().is_some()
+            && mixed < Duration::from_secs(1)
+        {
+            return Err("exit: mixed audio stopped with the app".into());
+        }
+        if recording.state() != CaptureState::Recording
+            || recording.system_audio().availability() != TrackAvailability::Interrupted
+            || microphone_track.is_some_and(|track| track.is_interrupted())
+        {
+            return Err("exit: the session did not keep recording without the app".into());
+        }
+        Ok(())
+    })();
+    recording.stop();
+    for reader in readers {
+        reader.join().map_err(|_| "exit: a reader panicked")?;
+    }
+    checked?;
+    if recording.state() != CaptureState::Stopped || capture::running() {
+        return Err("exit: capture still running after stop".into());
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn StdError>> {
     let duration = Duration::from_secs(
         env::var("MREC_DURATION_SECONDS")
@@ -452,6 +676,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .map_or(Ok(0), |value| value.parse())?;
     let include_microphone = enabled("MREC_MICROPHONE");
     let expect_device_change = enabled("MREC_EXPECT_DEVICE_CHANGE");
+    let expect_recovery = enabled("MREC_EXPECT_MICROPHONE_RECOVERY");
     let expectations = Expectations {
         minimum_peak,
         allow_drops: enabled("MREC_ALLOW_DROPS"),
@@ -466,6 +691,12 @@ fn main() -> Result<(), Box<dyn StdError>> {
         mix: mix_sample_rate.map(|sample_rate| MixedAudioOptions { sample_rate }),
         ..CaptureOptions::default()
     };
+
+    if enabled("MREC_EXPECT_APP_EXIT") {
+        app_exit(target, options)?;
+        println!("PASS: live audio capture met all E2E assertions");
+        return Ok(());
+    }
 
     restart_cycles(target, &options, restart_count)?;
 
@@ -523,7 +754,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         let start = started + duration.saturating_sub(pause) / 2;
         (start, start + pause)
     });
-    let mut saw_device_change = false;
+    let mut events = Vec::new();
     while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
         if let Some((start, end)) = pause_window {
@@ -537,7 +768,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         }
         while let Some(event) = recording.try_recv_event() {
             println!("track event: {event:?}");
-            saw_device_change |= matches!(event, TrackEvent::DeviceChanged { .. });
+            events.push(event);
         }
     }
     let interrupted = recording.system_audio().is_interrupted()
@@ -545,6 +776,10 @@ fn main() -> Result<(), Box<dyn StdError>> {
             .microphone()
             .is_some_and(|track| track.is_interrupted());
     recording.stop();
+    while let Some(event) = recording.try_recv_event() {
+        println!("track event: {event:?}");
+        events.push(event);
+    }
 
     let system = system_worker.join().map_err(|_| "system reader panicked")?;
     let microphone = microphone_worker
@@ -557,9 +792,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
     if interrupted {
         return Err("a track was still interrupted at the end".into());
     }
-    if expect_device_change && !saw_device_change {
-        return Err("expected a microphone device change".into());
-    }
+    verify_track_events(&events, expect_device_change, expect_recovery)?;
 
     let expected_duration = duration.saturating_sub(pause.unwrap_or_default());
     system.report("system");
@@ -574,7 +807,11 @@ fn main() -> Result<(), Box<dyn StdError>> {
     }
     if let Some(microphone) = microphone {
         microphone.report("microphone");
-        microphone.verify("microphone", expected_duration, &expectations)?;
+        if expect_recovery {
+            microphone.verify_recovered("microphone")?;
+        } else {
+            microphone.verify("microphone", expected_duration, &expectations)?;
+        }
         microphone.verify_tones("microphone", &expectations.microphone_frequencies, &[])?;
         if !expectations.microphone_frequencies.is_empty() {
             microphone.verify_continuous("microphone", MAX_MICROPHONE_DROPOUTS)?;
