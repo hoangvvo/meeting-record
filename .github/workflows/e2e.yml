@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       windows:
-        description: Run Windows system and process capture
+        description: Run every Windows scenario
         type: boolean
         default: true
       windows_binding:
@@ -79,8 +79,8 @@ jobs:
           E2E_MICROPHONE_DEVICE: ${{ inputs.windows_microphone_device }}
           E2E_SWITCH_MICROPHONE: ${{ inputs.windows_switch_microphone }}
         run: |
+          # Without Mode, every scenario runs; named devices replace detected ones.
           $options = @{
-            Mode = "All"
             Binding = $env:E2E_BINDING
             DurationSeconds = [int]$env:E2E_DURATION
           }
