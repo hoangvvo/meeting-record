@@ -113,15 +113,15 @@ typedef struct {
   size_t pid_count;
 
   /*
-   * Capture all application output instead.
+   * Capture all application output except the recorder's process tree.
    * Ignored when pid_count > 0.
    */
   int32_t global_mixdown;
 
-  /* 1 = mono mixdown, 0 = stereo. */
+  /* System audio only: 1 = mono mixdown, 0 = stereo. */
   int32_t mono;
 
-  /* 1 = also mute the captured processes' output to the speakers. */
+  /* Mute captured output on macOS. Ignored on Windows. */
   int32_t mute_captured_output;
 } mrec_config;
 

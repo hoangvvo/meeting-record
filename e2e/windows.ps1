@@ -44,6 +44,7 @@ $microphoneScript = Join-Path $PSScriptRoot "windows-microphone.ps1"
 $targetFrequency = 997
 $otherFrequency = 440
 $microphoneFrequency = 660
+$excludedFrequency = 880
 $variableNames = @(
     "MREC_TARGET_PID",
     "MREC_DURATION_SECONDS",
@@ -57,7 +58,9 @@ $variableNames = @(
     "MREC_PAUSE_SECONDS",
     "MREC_RESTART_CYCLES",
     "MREC_EXPECT_MEETING",
-    "MREC_MICROPHONE_FREQUENCIES"
+    "MREC_MICROPHONE_FREQUENCIES",
+    "MREC_EXCLUDED_TONE_FREQUENCY",
+    "MREC_TONE_POWERSHELL"
 )
 $originalEnvironment = @{}
 foreach ($name in $variableNames) {
@@ -145,6 +148,7 @@ try {
 
     $modes = @(if ($Mode -eq "All") { "System", "Process" } else { $Mode })
     $runSeconds = ($DurationSeconds + 2) * $modes.Count * $bindings.Count + 30
+    if ($modes -contains "System") { $runSeconds += 20 * $bindings.Count }
     if ($Mode -ne "Meeting") {
         $target = Start-Tone $targetFrequency $runSeconds
         $tones += $target
@@ -164,9 +168,11 @@ try {
     # Pause cuts tracks up to a block apart; a switched microphone can be silent there.
     Set-HarnessVariable "MREC_PAUSE_SECONDS" $(if ($PauseSeconds -gt 0 -and -not $SwitchMicrophone) { $PauseSeconds.ToString([Globalization.CultureInfo]::InvariantCulture) })
     Set-HarnessVariable "MREC_RESTART_CYCLES" $RestartCycles
+    Set-HarnessVariable "MREC_TONE_POWERSHELL" (Get-Process -Id $PID).Path
 
     foreach ($harness in $bindings) {
         foreach ($run in $modes) {
+            Set-HarnessVariable "MREC_EXCLUDED_TONE_FREQUENCY" $null
             if ($run -eq "Meeting") {
                 # The detected meeting's app, with whatever audio the call carries.
                 Write-Host "`n==> Windows $MeetingPlatform meeting E2E ($harness)"
@@ -176,13 +182,14 @@ try {
                 Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" $null
                 Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $null
             } elseif ($run -eq "System") {
-                # Stereo system mix: both tones are present.
+                # Sibling tones remain; a recorder child launched after start is excluded.
                 Write-Host "`n==> Windows system-audio E2E ($harness)"
                 Set-HarnessVariable "MREC_EXPECT_MEETING" $null
                 Set-HarnessVariable "MREC_TARGET_PID" $null
                 Set-HarnessVariable "MREC_MONO" $null
                 Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" "$targetFrequency,$otherFrequency"
-                Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $null
+                Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $(if (-not $SwitchMicrophone) { $excludedFrequency })
+                Set-HarnessVariable "MREC_EXCLUDED_TONE_FREQUENCY" $(if (-not $SwitchMicrophone) { $excludedFrequency })
             } else {
                 # Mono process tree: only the target's tone is present.
                 Write-Host "`n==> Windows process-audio E2E ($harness, pid $($target.Process.Id))"

@@ -6,26 +6,42 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import { MixedAudioImpl, type MixedAudio, type MixedAudioOptions } from "./mixed-audio.js";
-export type { MixedAudio, MixedAudioOptions } from "./mixed-audio.js";
+import type { EmitterEvents, ReadableEvents, TypedReadable } from "./typed-readable.js";
+export type { MixedAudio, MixedAudioEvents, MixedAudioOptions } from "./mixed-audio.js";
 
-export type Permission = "system-audio" | "microphone" | "accessibility";
+export const Permission = {
+  SystemAudio: "system-audio",
+  Microphone: "microphone",
+  Accessibility: "accessibility",
+} as const;
+export type Permission = (typeof Permission)[keyof typeof Permission];
+
 /**
  * Windows has no prompts: system audio and accessibility are always granted, and
  * the microphone follows its privacy settings.
  */
-export type PermissionStatus = "granted" | "denied" | "unknown";
+export const PermissionStatus = {
+  Granted: "granted",
+  Denied: "denied",
+  Unknown: "unknown",
+} as const;
+export type PermissionStatus = (typeof PermissionStatus)[keyof typeof PermissionStatus];
 
 /** Stable platform identifier. */
-export type Platform =
-  | "zoom"
-  | "teams"
-  | "meet"
-  | "webex"
-  | "slack"
-  | "discord"
+export const Platform = {
+  Zoom: "zoom",
+  Teams: "teams",
+  Meet: "meet",
+  Webex: "webex",
+  Slack: "slack",
+  Discord: "discord",
   /** A browser tab on a recognised call URL. */
-  | "browser"
-  | "unknown";
+  Browser: "browser",
+  Unknown: "unknown",
+} as const;
+export type Platform = (typeof Platform)[keyof typeof Platform];
+
+export type MeetingEvent = "started" | "updated" | "ended";
 
 export interface Meeting {
   readonly platform: Platform;
@@ -61,15 +77,20 @@ export type CaptureTarget =
       pid: number;
     }
   | {
-      /** All application output. */
+      /** All application output except the recorder's process tree. */
       type: "system";
     };
 
-/** default: OS input; auto: prefer the captured app's mic on Windows. */
-export type MicrophoneSource = "default" | "auto";
+export const MicrophoneSource = {
+  /** Follow the OS default input device. */
+  Default: "default",
+  /** Prefer the captured app's mic on Windows, then its communications default. Use the OS default on macOS. */
+  Auto: "auto",
+} as const;
+export type MicrophoneSource = (typeof MicrophoneSource)[keyof typeof MicrophoneSource];
 
 export interface CaptureOptions {
-  /** Mono mixdown for system audio. Default true. */
+  /** Mono mixdown for system audio only; the microphone keeps its format. Default true. */
   mono?: boolean;
   /** Capture a microphone as a separate track. Default off. */
   microphone?: MicrophoneSource;
@@ -110,7 +131,7 @@ interface NativeBinding {
   scan(): Promise<Meeting[]>;
   listAudioProcesses(): AudioProcess[];
   listAudioApps(): AudioProcess[];
-  watchStart(callback: (event: keyof MeetingEvents, meeting: Meeting) => void): number;
+  watchStart(callback: (event: MeetingEvent, meeting: Meeting) => void): number;
   watchStop(): number;
   isWatching(): boolean;
   isRunning(): boolean;
@@ -177,15 +198,15 @@ function asLibraryError(error: unknown): Error {
 export const permissions = {
   status(permission: Permission): PermissionStatus {
     if (
-      permission !== "system-audio" &&
-      permission !== "microphone" &&
-      permission !== "accessibility"
+      permission !== Permission.SystemAudio &&
+      permission !== Permission.Microphone &&
+      permission !== Permission.Accessibility
     ) {
       throw new TypeError(`unknown permission: ${String(permission)}`);
     }
     const native = getNative();
-    if (permission === "accessibility") return native.accessibilityPermissionStatus();
-    if (permission === "microphone") return native.microphonePermissionStatus();
+    if (permission === Permission.Accessibility) return native.accessibilityPermissionStatus();
+    if (permission === Permission.Microphone) return native.microphonePermissionStatus();
     return native.audioPermissionStatus();
   },
 
@@ -201,17 +222,17 @@ export const permissions = {
   ): Promise<PermissionStatus> {
     signal?.throwIfAborted();
     const current = permissions.status(permission);
-    if (current === "granted") return current;
+    if (current === PermissionStatus.Granted) return current;
 
     const native = getNative();
-    if (permission === "accessibility") {
+    if (permission === Permission.Accessibility) {
       const status = native.requestAccessibilityPermission();
       if (status !== 0) throw errorFromStatus("failed to request accessibility permission", status);
       return permissions.status(permission);
     }
 
     const requestStatus =
-      permission === "microphone"
+      permission === Permission.Microphone
         ? native.requestMicrophonePermission()
         : native.requestAudioPermission();
     if (requestStatus !== 0) {
@@ -223,19 +244,21 @@ export const permissions = {
     while (Date.now() < deadline) {
       await delay(500, undefined, { signal });
       const status = permissions.status(permission);
-      if (status === "granted" || status === "denied") return status;
+      if (status === PermissionStatus.Granted || status === PermissionStatus.Denied) return status;
     }
     return permissions.status(permission);
   },
 };
 
-export interface MeetingEvents {
+export interface MeetingEvents extends EmitterEvents {
   started: (meeting: Meeting) => void;
   updated: (meeting: Meeting) => void;
   ended: (meeting: Meeting) => void;
 }
 
-class Meetings extends EventEmitter {
+class Meetings extends EventEmitter<{
+  [Event in keyof MeetingEvents]: Parameters<MeetingEvents[Event]>;
+}> {
   /** Point-in-time scan, highest confidence first. */
   async scan(): Promise<Meeting[]> {
     try {
@@ -286,23 +309,26 @@ class Meetings extends EventEmitter {
   }
 }
 
-export const meetings = new Meetings() as Meetings & {
-  on<E extends keyof MeetingEvents>(event: E, listener: MeetingEvents[E]): Meetings;
-  once<E extends keyof MeetingEvents>(event: E, listener: MeetingEvents[E]): Meetings;
-  off<E extends keyof MeetingEvents>(event: E, listener: MeetingEvents[E]): Meetings;
-};
+export const meetings = new Meetings();
 
-/** Interleaved float32 PCM. Slow consumers lose samples, reported by `drop`. */
-export type CaptureState = "recording" | "paused" | "stopped";
+export const CaptureState = {
+  Recording: "recording",
+  Paused: "paused",
+  Stopped: "stopped",
+} as const;
+export type CaptureState = (typeof CaptureState)[keyof typeof CaptureState];
 
 /** Reason for source loss. */
+export const TrackInterruptionReason = {
+  DeviceRemoved: "device-removed",
+  DeviceChanged: "device-changed",
+  FormatChanged: "format-changed",
+  AppExited: "app-exited",
+  ServiceReset: "service-reset",
+  Unknown: "unknown",
+} as const;
 export type TrackInterruptionReason =
-  | "device-removed"
-  | "device-changed"
-  | "format-changed"
-  | "app-exited"
-  | "service-reset"
-  | "unknown";
+  (typeof TrackInterruptionReason)[keyof typeof TrackInterruptionReason];
 
 export interface AudioFormat {
   readonly sampleRate: number;
@@ -320,9 +346,28 @@ export interface AudioChunk {
   readonly droppedSamples: number;
 }
 
-export type TrackAvailability = "live" | "degraded" | "interrupted";
+export const TrackAvailability = {
+  Live: "live",
+  Degraded: "degraded",
+  Interrupted: "interrupted",
+} as const;
+export type TrackAvailability = (typeof TrackAvailability)[keyof typeof TrackAvailability];
 
-export interface AudioTrack extends Readable {
+export interface AudioTrackEvents extends ReadableEvents<AudioChunk> {
+  drop: (droppedSamples: number) => void;
+  /** Emitted before the first chunk in a newly negotiated device format. */
+  format: (format: AudioFormat) => void;
+  /** No source is available. Lost devices are retried; exited apps require a new target. */
+  interrupted: (reason: TrackInterruptionReason, message: string) => void;
+  resumed: () => void;
+  /** Some sources are lost; remaining sources continue delivering audio. */
+  degraded: (reason: TrackInterruptionReason, message: string) => void;
+  /** The microphone moved to another device. */
+  devicechange: (deviceName: string) => void;
+}
+
+/** Interleaved float32 PCM. Slow consumers lose samples, reported by `drop`. */
+export interface AudioTrack extends TypedReadable<AudioTrackEvents> {
   readonly availability: TrackAvailability;
   [Symbol.asyncIterator](): NodeJS.AsyncIterator<AudioChunk>;
   /** Current negotiated format; a `format` event announces changes. */
@@ -334,21 +379,6 @@ export interface AudioTrack extends Readable {
   readonly interrupted: boolean;
   /** The microphone in use; undefined for system audio. */
   readonly deviceName?: string;
-  on(event: "data", listener: (chunk: AudioChunk) => void): this;
-  on(event: "drop", listener: (droppedSamples: number) => void): this;
-  /** Emitted before the first chunk in a newly negotiated device format. */
-  on(event: "format", listener: (format: AudioFormat) => void): this;
-  /** No source is available. Lost devices are retried; exited apps require a new target. */
-  on(
-    event: "interrupted",
-    listener: (reason: TrackInterruptionReason, message: string) => void,
-  ): this;
-  on(event: "resumed", listener: () => void): this;
-  /** Some sources are lost; remaining sources continue delivering audio. */
-  on(event: "degraded", listener: (reason: TrackInterruptionReason, message: string) => void): this;
-  /** The microphone moved to another device. */
-  on(event: "devicechange", listener: (deviceName: string) => void): this;
-  on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
 /** A lost source interrupts its track; the session records until stopped. */
@@ -375,7 +405,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   #mixReady = true;
   #mixConsumer: ((chunk: AudioChunk) => void) | undefined;
   #finished = false;
-  #availability: TrackAvailability = "live";
+  #availability: TrackAvailability = TrackAvailability.Live;
   #deviceName?: string;
 
   constructor(sampleRate: number, channels: number, microphone: boolean, deviceName?: string) {
@@ -425,7 +455,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   }
 
   get interrupted(): boolean {
-    return this.#availability === "interrupted";
+    return this.#availability === TrackAvailability.Interrupted;
   }
 
   get deviceName(): string | undefined {
@@ -460,13 +490,13 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   pushEvent(event: NativeTrackEvent): void {
     if (this.#finished) return;
     if (event.type === "interrupted") {
-      this.#availability = "interrupted";
+      this.#availability = TrackAvailability.Interrupted;
       this.emit("interrupted", event.reason, event.message);
     } else if (event.type === "resumed") {
-      this.#availability = "live";
+      this.#availability = TrackAvailability.Live;
       this.emit("resumed");
     } else if (event.type === "degraded") {
-      this.#availability = "degraded";
+      this.#availability = TrackAvailability.Degraded;
       this.emit("degraded", event.reason, event.message);
     } else {
       this.#deviceName = event.deviceName;
@@ -482,7 +512,7 @@ class AudioTrackImpl extends Readable implements AudioTrack {
 }
 
 class CaptureSessionImpl implements CaptureSession {
-  #state: CaptureState = "recording";
+  #state: CaptureState = CaptureState.Recording;
   #stopping?: Promise<void>;
   readonly #systemAudio: AudioTrackImpl;
   readonly #microphone?: AudioTrackImpl;
@@ -518,26 +548,26 @@ class CaptureSessionImpl implements CaptureSession {
   }
 
   pauseRecording(): void {
-    if (this.#state === "stopped" || this.#stopping) return;
-    if (this.#state !== "paused") {
+    if (this.#state === CaptureState.Stopped || this.#stopping) return;
+    if (this.#state !== CaptureState.Paused) {
       getNative().capturePause();
-      this.#state = "paused";
+      this.#state = CaptureState.Paused;
       this.mixedAudio?.pauseCapture();
     }
   }
 
   resumeRecording(): void {
-    if (this.#state === "stopped" || this.#stopping) return;
-    if (this.#state !== "recording") {
+    if (this.#state === CaptureState.Stopped || this.#stopping) return;
+    if (this.#state !== CaptureState.Recording) {
       this.mixedAudio?.resumeCapture();
       getNative().captureResume();
-      this.#state = "recording";
+      this.#state = CaptureState.Recording;
     }
   }
 
   stopRecording(): Promise<void> {
     if (this.#stopping) return this.#stopping;
-    if (this.#state === "stopped") return Promise.resolve();
+    if (this.#state === CaptureState.Stopped) return Promise.resolve();
     this.#stopping = this.#stop();
     return this.#stopping;
   }
@@ -546,7 +576,7 @@ class CaptureSessionImpl implements CaptureSession {
     try {
       await getNative().captureStop();
     } finally {
-      this.#state = "stopped";
+      this.#state = CaptureState.Stopped;
       this.#signal?.removeEventListener("abort", this.#onAbort);
       this.#systemAudio.finish();
       this.#microphone?.finish();
@@ -599,8 +629,8 @@ async function startCapture(
   }
   if (
     options.microphone !== undefined &&
-    options.microphone !== "default" &&
-    options.microphone !== "auto"
+    options.microphone !== MicrophoneSource.Default &&
+    options.microphone !== MicrophoneSource.Auto
   ) {
     throw new TypeError('microphone must be "default" or "auto"');
   }
@@ -630,7 +660,7 @@ async function startCapture(
       pending.push({ chunk, info });
       return;
     }
-    if (session.state !== "recording") return;
+    if (session.state !== CaptureState.Recording) return;
     session[track]?.pushAudio(chunk, info);
   };
 
@@ -654,7 +684,12 @@ async function startCapture(
       {
         ...nativeTarget,
         mono: options.mono ?? true,
-        microphone: options.microphone === "auto" ? 2 : options.microphone === "default" ? 1 : 0,
+        microphone:
+          options.microphone === MicrophoneSource.Auto
+            ? 2
+            : options.microphone === MicrophoneSource.Default
+              ? 1
+              : 0,
       },
       onSystemAudio,
       onMicrophone,

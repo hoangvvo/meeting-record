@@ -71,10 +71,27 @@ private func setLastError(_ message: String) {
     session.errorLock.unlock()
 }
 
+private func endSystemTarget() {
+    let session = Session.shared
+    session.exitTimer?.cancel()
+    session.exitTimer = nil
+    session.systemTargetExited = true
+    session.capture?.stop()
+    session.capture = nil
+    mrec_track_interrupted(session.trackSession, MREC_TRACK_SYSTEM_AUDIO,
+                           MREC_TRACK_WHOLE, MREC_TRACK_REASON_APP_EXITED,
+                           "the captured apps exited; start a new capture for a relaunched app")
+}
+
 private func makeTapCapture(_ configuration: SystemCaptureConfiguration) throws -> TapCapture {
+    let targets = configuration.pids.filter(AudioProcessRegistry.isAlive)
+    let pids = AudioAppRegistry.includingHelpers(targets).filter(AudioProcessRegistry.isAlive)
+    guard configuration.globalMixdown || !pids.isEmpty else {
+        endSystemTarget()
+        throw CaptureError.noProcesses
+    }
     let capture = TapCapture(stateBox: Session.shared.systemStateBox,
                              onConfigurationChange: scheduleCaptureRestart)
-    let pids = AudioAppRegistry.includingHelpers(configuration.pids).filter(AudioProcessRegistry.isAlive)
     try capture.start(pids: pids,
                       globalMixdown: configuration.globalMixdown,
                       mono: configuration.mono,
@@ -216,14 +233,7 @@ private func watchSources(generation: Int) -> DispatchSourceTimer {
               let configuration = session.captureConfiguration else { return }
         let targets = configuration.pids.filter(AudioProcessRegistry.isAlive)
         if targets.isEmpty {
-            session.exitTimer?.cancel()
-            session.exitTimer = nil
-            session.systemTargetExited = true
-            session.capture?.stop()
-            session.capture = nil
-            mrec_track_interrupted(session.trackSession, MREC_TRACK_SYSTEM_AUDIO,
-                                   MREC_TRACK_WHOLE, MREC_TRACK_REASON_APP_EXITED,
-                                   "the captured apps exited; start a new capture for a relaunched app")
+            endSystemTarget()
             return
         }
         let pids = AudioAppRegistry.includingHelpers(targets).filter(AudioProcessRegistry.isAlive)
@@ -367,6 +377,10 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
         return -3
     }
 
+    guard pidCount >= 0, pidCount == 0 || pidsPtr != nil else {
+        setLastError("a nonempty process list requires pids")
+        return -9
+    }
     guard (0...2).contains(microphoneSource) else {
         setLastError("unknown microphone source")
         return -9

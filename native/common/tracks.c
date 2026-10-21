@@ -140,8 +140,10 @@ void mrec_track_interrupted(uint64_t session, mrec_track track, uint32_t source,
   if (!IsTrack(track)) return;
   Lock();
   Track *state = &g_tracks[track];
-  if (IsSession(session) && state->source_count) {
+  if (IsSession(session) && state->source_count &&
+      (source == MREC_TRACK_WHOLE || source < state->source_count)) {
     const int previous = Availability(state);
+    const int whole_stopped = state->whole_stopped;
     if (source == MREC_TRACK_WHOLE) {
       state->whole_stopped = 1;
     } else if (source < state->source_count && !state->stopped[source]) {
@@ -149,7 +151,7 @@ void mrec_track_interrupted(uint64_t session, mrec_track track, uint32_t source,
       state->stopped_count++;
     }
     const int current = Availability(state);
-    if (current != previous) {
+    if (current != previous || state->whole_stopped != whole_stopped) {
       Publish(track, current == 2 ? MREC_TRACK_INTERRUPTED : MREC_TRACK_DEGRADED,
               reason, message);
     }
@@ -162,8 +164,10 @@ void mrec_track_resumed(uint64_t session, mrec_track track, uint32_t source,
   if (!IsTrack(track)) return;
   Lock();
   Track *state = &g_tracks[track];
-  if (IsSession(session) && state->source_count) {
-    if (device_name && *device_name && strcmp(device_name, state->device_name) != 0) {
+  if (IsSession(session) && state->source_count &&
+      (source == MREC_TRACK_WHOLE || (source < state->source_count && !state->whole_stopped))) {
+    if (device_name && *device_name &&
+        strncmp(device_name, state->device_name, sizeof state->device_name - 1) != 0) {
       snprintf(state->device_name, sizeof state->device_name, "%s", device_name);
       Publish(track, MREC_TRACK_DEVICE_CHANGED, MREC_TRACK_REASON_UNKNOWN, NULL);
     }
@@ -190,28 +194,34 @@ uint32_t mrec_track_retry_delay_ms(uint32_t failures) {
   return delay < limit ? delay : limit;
 }
 
+static int CanRecover(uint64_t session, mrec_track track, uint32_t source) {
+  if (!IsTrack(track)) return 0;
+  Lock();
+  const Track *state = &g_tracks[track];
+  const int active = IsSession(session) && source < state->source_count && !state->whole_stopped;
+  Unlock();
+  return active;
+}
+
 int32_t mrec_track_recover(uint64_t session, mrec_track track, uint32_t source,
                            mrec_track_reason reason,
                            const char *message, mrec_track_attempt attempt,
                            mrec_track_wait wait, void *context) {
-  Lock();
-  const int active = IsSession(session);
-  Unlock();
-  if (!active) return 0;
-  char device_name[256] = "";
-  if (attempt(context, device_name, sizeof device_name)) {
-    mrec_track_resumed(session, track, source, device_name);
-    return 1;
-  }
-  mrec_track_interrupted(session, track, source, reason, message);
-  for (uint32_t failures = 0;; failures++) {
-    if (!wait(context, mrec_track_retry_delay_ms(failures))) return 0;
-    device_name[0] = '\0';
-    if (attempt(context, device_name, sizeof device_name)) {
+  if (!attempt || !wait) return 0;
+  for (uint32_t failures = 0; CanRecover(session, track, source);) {
+    char device_name[256] = "";
+    const int reopened = attempt(context, device_name, sizeof device_name);
+    device_name[sizeof device_name - 1] = '\0';
+    if (!CanRecover(session, track, source)) return 0;
+    if (reopened) {
       mrec_track_resumed(session, track, source, device_name);
       return 1;
     }
+    if (failures == 0) mrec_track_interrupted(session, track, source, reason, message);
+    if (!wait(context, mrec_track_retry_delay_ms(failures))) return 0;
+    if (failures < 5) failures++;
   }
+  return 0;
 }
 
 mrec_status mrec_current_microphone_name(char *name, size_t capacity) {

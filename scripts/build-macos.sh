@@ -44,6 +44,22 @@ clang -std=c11 -Wall -Wextra -Werror -I"$ROOT/native/include" -I"$ROOT/native/co
   -o "$BUILD/tracks_test" "$ROOT/native/tests/tracks_test.c" "$ROOT/native/common/tracks.c"
 "$BUILD/tracks_test"
 
+echo "==> track concurrency tests"
+clang -std=c11 -Wall -Wextra -Werror -I"$ROOT/native/include" -I"$ROOT/native/common" \
+  -c -o "$BUILD/tracks-test.o" "$ROOT/native/common/tracks.c"
+clang++ -std=c++17 -Wall -Wextra -Werror -pthread \
+  -I"$ROOT/native/include" -I"$ROOT/native/common" \
+  -o "$BUILD/tracks_concurrency_test" "$ROOT/native/tests/tracks_concurrency_test.cpp" \
+  "$BUILD/tracks-test.o"
+"$BUILD/tracks_concurrency_test"
+
+echo "==> Windows capture pump tests"
+clang++ -std=c++17 -Wall -Wextra -Werror -pthread \
+  -I"$ROOT/native/include" -I"$ROOT/native/common" \
+  -o "$BUILD/capture_pump_test" "$ROOT/native/tests/capture_pump_test.cpp" \
+  "$BUILD/tracks-test.o"
+"$BUILD/capture_pump_test"
+
 # The Windows stream mixer is portable C++.
 echo "==> Windows timeline mixer tests"
 clang++ -std=c++17 -Wall -Wextra -Werror -I"$ROOT/native/include" \
@@ -74,16 +90,30 @@ echo "==> classification tests"
 swiftc -O -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
   -o "$BUILD/catalog_test" \
   "$ROOT/native/tests/catalog_test.swift" \
-  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses}.swift \
+  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
   "$BUILD/meeting-catalog.o"
 "$BUILD/catalog_test" | tail -2
+
+echo "==> browser detection tests"
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
+  -o "$BUILD/browser_detection_test" \
+  "$ROOT/native/tests/browser_detection_test.swift" \
+  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
+  "$BUILD/meeting-catalog.o"
+"$BUILD/browser_detection_test"
 
 echo "==> tap description tests"
 swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
   -o "$BUILD/tap_description_test" \
   "$ROOT/native/tests/tap_description_test.swift" \
-  "$ROOT/native/macos/"{TapCapture,CaptureState,AudioProcesses}.swift
+  "$ROOT/native/macos/"{TapCapture,CaptureState,AudioProcesses,ProcessTree}.swift
 "$BUILD/tap_description_test" | tail -2
+
+echo "==> capture buffer tests"
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" \
+  -o "$BUILD/capture_state_test" \
+  "$ROOT/native/tests/capture_state_test.swift" "$ROOT/native/macos/CaptureState.swift"
+"$BUILD/capture_state_test"
 
 echo "==> capture lifecycle tests"
 swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
@@ -116,6 +146,7 @@ clang -O2 \
   -I"$ROOT/native/include" \
   -o "$APP/Contents/MacOS/MrecSelfTest" \
   "$ROOT/native/examples/selftest.c" \
+  "$ROOT/native/examples/exclusiontest.m" \
   "$ROOT/native/examples/selftest_main.m" \
   "$BUILD/libmeetingrecord_macos.a" \
   -framework CoreAudio -framework AVFoundation -framework AudioToolbox \

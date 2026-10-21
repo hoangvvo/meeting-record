@@ -10,9 +10,9 @@ npm install meeting-record
 ## Usage
 
 ```ts
-import { capture, permissions } from "meeting-record";
+import { capture, permissions, Permission } from "meeting-record";
 
-await permissions.request("system-audio");
+await permissions.request(Permission.SystemAudio);
 const recording = await capture.start({ type: "system" });
 
 // Raw float32 PCM with timing and format metadata.
@@ -30,33 +30,58 @@ await recording.stopRecording();
 - **Microphone:** optional; request permission before including it.
 
 ```ts
-await permissions.request("microphone");
+import { MicrophoneSource } from "meeting-record";
+
+await permissions.request(Permission.Microphone);
 const recording = await capture.start(
   { type: "process", pid }, // PID from the app picker or a detected meeting.
   {
     mono: false, // Stereo system audio; defaults to mono. The mic stays mono.
-    microphone: "default", // Follow the OS input device.
+    microphone: MicrophoneSource.Default, // Follow the OS input device.
   },
 );
 ```
 
-Use `microphone: "auto"` to prefer the captured app's mic on Windows, then the
+Use `MicrophoneSource.Auto` to prefer the captured app's mic on Windows, then the
 communications default. On macOS, both modes use the default input.
+
+## Types and constants
+
+Domain values have named constants and matching union types: `Platform`,
+`Permission`, `PermissionStatus`, `MicrophoneSource`, `CaptureState`,
+`TrackAvailability`, and `TrackInterruptionReason`.
+
+```ts
+import { Platform, PermissionStatus } from "meeting-record";
+
+const platform: Platform = Platform.Zoom;
+if (permissions.status(Permission.SystemAudio) === PermissionStatus.Granted) {
+  // Ready to capture system audio.
+}
+```
+
+Event names use string literals, such as `meetings.on("started", handler)` and
+`recording.systemAudio.once("interrupted", handler)`. Event names and callback
+arguments are checked across `on`, `once`, `off`, and the other listener methods,
+including chained calls. Capture targets use a discriminated union:
+`{ type: "system" }` or `{ type: "process", pid }`.
 
 ## Meetings
 
 ```ts
-import { meetings } from "meeting-record";
+import { meetings, Platform } from "meeting-record";
 
 const active = (await meetings.scan()).filter((meeting) => meeting.shouldRecord);
-meetings.on("started", (meeting) => console.log(meeting));
+meetings.on("started", (meeting) => {
+  if (meeting.platform === Platform.Zoom) console.log(meeting);
+});
 meetings.watch();
 
 // Later: meetings.unwatch();
 ```
 
 - The watcher also emits `updated` and `ended`.
-- Request `"accessibility"` permission on macOS to include titles and URLs.
+- Request `Permission.Accessibility` on macOS to include titles and URLs.
 - Enumeration failures throw library errors.
 
 ## Audio output
@@ -67,9 +92,9 @@ and use each packet's timestamp, sample rate, and channel count.
 ```ts
 const recording = await capture.start(
   { type: "system" },
-  { microphone: "default", mix: { sampleRate: 24_000 } }, // Combined mono s16le at 24 kHz.
+  { microphone: MicrophoneSource.Default, mix: { sampleRate: 24_000 } }, // Combined mono s16le at 24 kHz.
 );
-const mixed = recording.mixedAudio!;
+const mixed = recording.mixedAudio;
 mixed.pipe(destination);
 // Mute the mic in the mix without changing the raw microphone track.
 mixed.setMicrophoneMuted(true);

@@ -70,7 +70,8 @@ final class CaptureStateBox {
     @inline(__always)
     func emit(_ frames: UnsafePointer<Float>, frameCount: UInt32, channels: UInt32,
               hostTime: UInt64? = nil) {
-        guard let callback else { return }
+        guard let callback, frameCount > 0, channels > 0, channels == self.channels,
+              sampleRate.isFinite, sampleRate > 0 else { return }
         let hostTimeNs = nanoseconds(hostTime ?? mach_absolute_time())
         callback(frames, frameCount, channels, sampleRate, hostTimeNs, userData)
     }
@@ -80,30 +81,34 @@ final class CaptureStateBox {
     @inline(__always)
     func emit(_ buffers: UnsafeMutableAudioBufferListPointer, hostTime: UInt64?) {
         guard !buffers.isEmpty else { return }
-        if buffers.count == 1, let data = buffers[0].mData,
-           buffers[0].mDataByteSize > 0 {
-            let bufferChannels = max(buffers[0].mNumberChannels, 1)
-            let frameCount = buffers[0].mDataByteSize / 4 / bufferChannels
+        if buffers.count == 1 {
+            let buffer = buffers[0]
+            let bufferChannels = buffer.mNumberChannels
+            guard let data = buffer.mData, buffer.mDataByteSize > 0,
+                  bufferChannels > 0, bufferChannels == channels,
+                  buffer.mDataByteSize % 4 == 0,
+                  (buffer.mDataByteSize / 4) % bufferChannels == 0 else { return }
+            let frameCount = buffer.mDataByteSize / 4 / bufferChannels
             emit(data.assumingMemoryBound(to: Float.self), frameCount: frameCount,
                  channels: bufferChannels, hostTime: hostTime)
             return
         }
 
-        let totalChannels = buffers.reduce(UInt32(0)) {
-            $0 + max($1.mNumberChannels, 1)
-        }
-        guard totalChannels > 0, totalChannels == channels,
-              let scratch = interleaveBuffer, interleaveCapacity >= Int(totalChannels) else {
-            return
-        }
-
-        var frameCount = UInt32.max
+        var totalChannels: UInt32 = 0
+        var frameCount: UInt32 = 0
         for buffer in buffers {
-            guard buffer.mData != nil, buffer.mDataByteSize > 0 else { return }
-            frameCount = min(frameCount,
-                             buffer.mDataByteSize / 4 / max(buffer.mNumberChannels, 1))
+            let count = buffer.mNumberChannels
+            guard buffer.mData != nil, buffer.mDataByteSize > 0,
+                  count > 0, count <= channels - totalChannels,
+                  buffer.mDataByteSize % 4 == 0,
+                  (buffer.mDataByteSize / 4) % count == 0 else { return }
+            let frames = buffer.mDataByteSize / 4 / count
+            guard frameCount == 0 || frameCount == frames else { return }
+            frameCount = frames
+            totalChannels += count
         }
-        guard frameCount > 0, frameCount != UInt32.max else { return }
+        guard frameCount > 0, totalChannels == channels,
+              let scratch = interleaveBuffer, interleaveCapacity >= Int(totalChannels) else { return }
 
         let framesPerPass = max(1, interleaveCapacity / Int(totalChannels))
         var frameOffset = 0
@@ -113,7 +118,7 @@ final class CaptureStateBox {
             for buffer in buffers {
                 guard let raw = buffer.mData else { return }
                 let source = raw.assumingMemoryBound(to: Float.self)
-                let sourceChannels = Int(max(buffer.mNumberChannels, 1))
+                let sourceChannels = Int(buffer.mNumberChannels)
                 for frame in 0..<passFrames {
                     for channel in 0..<sourceChannels {
                         scratch[frame * Int(totalChannels) + destinationChannel + channel] =

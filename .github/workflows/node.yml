@@ -10,6 +10,7 @@ on:
       - "node/**"
       - "scripts/build-macos.sh"
       - "scripts/build-native.mjs"
+      - "scripts/test-windows.ps1"
       - "package.json"
       - "package-lock.json"
   pull_request:
@@ -20,6 +21,7 @@ on:
       - "node/**"
       - "scripts/build-macos.sh"
       - "scripts/build-native.mjs"
+      - "scripts/test-windows.ps1"
       - "package.json"
       - "package-lock.json"
 
@@ -95,6 +97,11 @@ jobs:
 
       - name: Build Node-API prebuild
         run: npm run build:prebuild --workspace meeting-record
+
+      - name: Test native core
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows.ps1
 
       - name: Build TypeScript package
         run: npm run build:ts --workspace meeting-record

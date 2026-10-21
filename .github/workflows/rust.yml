@@ -8,6 +8,7 @@ on:
       - ".github/workflows/release.yml"
       - "native/**"
       - "rust/**"
+      - "e2e/windows/**"
       - "scripts/stage-rust-package.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -17,6 +18,7 @@ on:
       - ".github/workflows/release.yml"
       - "native/**"
       - "rust/**"
+      - "e2e/windows/**"
       - "scripts/stage-rust-package.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -66,7 +68,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Test Rust package
-        run: cargo test --locked -p meeting-record
+        run: cargo test --locked -p meeting-record -p meeting-record-windows-e2e
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.2"
 

@@ -39,6 +39,20 @@ enum MeetingCatalog {
         return (matched, String(decoding: title.utf8.prefix(length), as: UTF8.self))
     }
 
+    static func browserWindow(_ window: BrowserWindowContent)
+        -> (platform: MeetingPlatform?, title: String, url: String) {
+        let titles = window.tabTitles.map { strdup($0) }
+        defer { titles.forEach { free($0) } }
+        let pointers = titles.map { $0.map { UnsafePointer($0) } }
+        let match = pointers.withUnsafeBufferPointer {
+            mrec_catalog_browser_match(window.url, window.title, $0.baseAddress, $0.count)
+        }
+        let title = match.tab_index < 0 ? window.title : window.tabTitles[Int(match.tab_index)]
+        return (known(match.platform),
+                String(decoding: title.utf8.prefix(match.title_length), as: UTF8.self),
+                match.tab_index < 0 ? window.url : "")
+    }
+
     /// How likely audio activity is a meeting; 0 when it is not one.
     static func confidence(isBrowser: Bool, playingAudio: Bool, usingMic: Bool,
                            recognised: MeetingPlatform?) -> Int32 {

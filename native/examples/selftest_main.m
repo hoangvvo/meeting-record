@@ -16,6 +16,7 @@
 
 /* Defined in selftest.c */
 int mrec_selftest_run(void);
+int mrec_exclusion_test_run(void);
 
 static int env_enabled(const char *name) {
   const char *value = getenv(name);
@@ -43,7 +44,7 @@ static void *run_test(void *unused) {
     }
   }
 
-  int rc = mrec_selftest_run();
+  int rc = getenv("MREC_EXCLUSION_FIXTURES") ? mrec_exclusion_test_run() : mrec_selftest_run();
   exit(rc);
 }
 

@@ -33,19 +33,6 @@ bool IsBrowser(const std::string &executable) {
   return mrec_catalog_executable_browser(executable.c_str()) != nullptr;
 }
 
-mrec_platform UrlPlatform(const std::string &url) {
-  return static_cast<mrec_platform>(mrec_catalog_url_platform(url.c_str()));
-}
-
-/* The meeting `title` names; narrows it to the page title. */
-mrec_platform TitlePlatform(std::string &title) {
-  size_t length = title.size();
-  const auto platform =
-      static_cast<mrec_platform>(mrec_catalog_title_platform(title.c_str(), &length));
-  title.resize(length);
-  return platform;
-}
-
 /* Bound synchronous UI Automation calls. */
 constexpr DWORD kAccessibilityTimeoutMs = 250;
 constexpr uint64_t kAccessibilityTraversalNs = 500000000;
@@ -359,21 +346,18 @@ BrowserMeeting FindBrowserMeeting(const std::vector<VisibleWindow> &windows,
     BrowserWindowContent content = accessibility.Read(window.handle, deadline_ns);
     if (!front.window) front = {&window, MREC_PLATFORM_UNKNOWN, window.title, content.url};
 
-    std::string title = window.title;
-    const auto title_platform = TitlePlatform(title);
-    if (const auto platform = UrlPlatform(content.url);
-        platform != MREC_PLATFORM_UNKNOWN) {
-      return {&window, platform, std::move(title), std::move(content.url)};
-    }
-    if (title_platform != MREC_PLATFORM_UNKNOWN) {
-      return {&window, title_platform, std::move(title), std::move(content.url)};
-    }
-    /* A background tab's URL is not exposed, only its title. */
-    for (auto &tab : content.tab_titles) {
-      if (const auto platform = TitlePlatform(tab); platform != MREC_PLATFORM_UNKNOWN) {
-        return {&window, platform, std::move(tab), {}};
-      }
-    }
+    std::vector<const char *> tabs;
+    tabs.reserve(content.tab_titles.size());
+    for (const auto &tab : content.tab_titles) tabs.push_back(tab.c_str());
+    const auto match = mrec_catalog_browser_match(
+        content.url.c_str(), window.title.c_str(), tabs.data(), tabs.size());
+    if (match.platform == MREC_PLATFORM_UNKNOWN) continue;
+    const std::string &title = match.tab_index >= 0
+                                   ? content.tab_titles[static_cast<size_t>(match.tab_index)]
+                                   : window.title;
+    return {&window, static_cast<mrec_platform>(match.platform),
+            title.substr(0, match.title_length),
+            match.tab_index >= 0 ? std::string{} : std::move(content.url)};
   }
   return front;
 }

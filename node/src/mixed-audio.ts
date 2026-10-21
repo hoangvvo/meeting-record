@@ -1,20 +1,22 @@
 import { Readable } from "node:stream";
 import type { AudioChunk } from "./index.js";
 import { getLevel, PcmMixer } from "./pcm-mixer.js";
+import type { ReadableEvents, TypedReadable } from "./typed-readable.js";
+
+export interface MixedAudioEvents extends ReadableEvents<Buffer> {
+  level: (level: number) => void;
+}
 
 export interface MixedAudioOptions {
   sampleRate: number;
 }
 
 /** Mono signed 16-bit little-endian PCM. Await `end` to consume the final tail. */
-export interface MixedAudio extends Readable {
+export interface MixedAudio extends TypedReadable<MixedAudioEvents> {
   readonly sampleRate: number;
   readonly channels: 1;
   /** Affects the mixed output only; the raw microphone track stays available. */
   setMicrophoneMuted(muted: boolean): void;
-  on(event: "level", listener: (level: number) => void): this;
-  on(event: "data", listener: (chunk: Buffer) => void): this;
-  on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
 export interface MixSource {

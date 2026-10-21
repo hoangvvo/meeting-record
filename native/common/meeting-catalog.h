@@ -38,6 +38,21 @@ int32_t mrec_catalog_url_platform(const char *url);
  */
 int32_t mrec_catalog_title_platform(const char *title, size_t *page_length);
 
+typedef struct {
+  int32_t platform;
+  size_t title_length;
+  int32_t tab_index;
+} mrec_browser_match;
+
+/*
+ * Prefer the active URL, then the window title, then a recognized tab title.
+ * `tab_index` is -1 for the window, or a tab index whose URL must be omitted.
+ * `title_length` is the selected page title's UTF-8 byte length.
+ */
+mrec_browser_match mrec_catalog_browser_match(const char *url, const char *title,
+                                             const char *const *tab_titles,
+                                             size_t tab_count);
+
 /*
  * How likely audio activity is a meeting; 0 when it is not one. A browser needs
  * `recognised`, the platform its URL or title names, or a live microphone.

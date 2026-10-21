@@ -61,7 +61,116 @@ static int32_t StopWaiting(void *context, uint32_t milliseconds) {
   return 0;
 }
 
+static int32_t UnterminatedName(void *context, char *device_name, size_t capacity) {
+  (void)context;
+  memset(device_name, 'b', capacity);
+  return 1;
+}
+
+static void InvalidSourcesDoNotReopen(void) {
+  Reset();
+  Source source = {0, 1, 0, 0, {0}, "Wrong device"};
+  assert(!mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 1,
+                             MREC_TRACK_REASON_UNKNOWN, NULL, Attempt, Wait, &source));
+  assert(source.attempts == 0 && source.waits == 0 && g_count == 0);
+  assert(!mrec_track_recover(g_session, (mrec_track)99, 0,
+                             MREC_TRACK_REASON_UNKNOWN, NULL, Attempt, Wait, &source));
+  assert(!mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0,
+                             MREC_TRACK_REASON_UNKNOWN, NULL, NULL, Wait, &source));
+  assert(!mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0,
+                             MREC_TRACK_REASON_UNKNOWN, NULL, Attempt, NULL, &source));
+  mrec_track_resumed(g_session, MREC_TRACK_MICROPHONE, 1, "Wrong device");
+  assert(g_count == 0);
+  char name[16] = "untouched";
+  assert(mrec_current_microphone_name(name, sizeof name) == MREC_ERR_NOT_RUNNING);
+  assert(name[0] == '\0');
+  mrec_tracks_close();
+}
+
+static void DuplicateTransitionsAndNamesAreQuiet(void) {
+  Reset();
+  char long_name[512];
+  memset(long_name, 'a', sizeof long_name - 1);
+  long_name[sizeof long_name - 1] = '\0';
+  mrec_track_started(g_session, MREC_TRACK_MICROPHONE, 1, long_name);
+  mrec_track_resumed(g_session, MREC_TRACK_MICROPHONE, 0, long_name);
+  assert(g_count == 0);
+  mrec_track_interrupted(g_session, MREC_TRACK_MICROPHONE, 0,
+                         MREC_TRACK_REASON_DEVICE_REMOVED, long_name);
+  mrec_track_interrupted(g_session, MREC_TRACK_MICROPHONE, 0,
+                         MREC_TRACK_REASON_DEVICE_REMOVED, "duplicate");
+  assert(g_count == 1 && Is(0, MREC_TRACK_MICROPHONE, MREC_TRACK_INTERRUPTED));
+  assert(g_events[0].host_time_ns > 0);
+  assert(strlen(g_events[0].device_name) == 255);
+  assert(strlen(g_events[0].message) == 511);
+  mrec_track_resumed(g_session, MREC_TRACK_MICROPHONE, 0, long_name);
+  mrec_track_resumed(g_session, MREC_TRACK_MICROPHONE, 0, long_name);
+  assert(g_count == 2 && Is(1, MREC_TRACK_MICROPHONE, MREC_TRACK_RESUMED));
+  char name[2] = {'x', 'x'};
+  assert(mrec_current_microphone_name(name, sizeof name) == MREC_OK);
+  assert(name[0] == 'a' && name[1] == '\0');
+  assert(mrec_current_microphone_name(NULL, 2) == MREC_ERR_INTERNAL);
+  assert(mrec_current_microphone_name(name, 0) == MREC_ERR_INTERNAL);
+  assert(mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0,
+                            MREC_TRACK_REASON_DEVICE_CHANGED, NULL,
+                            UnterminatedName, StopWaiting, NULL));
+  assert(g_count == 3 && Is(2, MREC_TRACK_MICROPHONE, MREC_TRACK_DEVICE_CHANGED));
+  assert(strlen(g_events[2].device_name) == 255);
+  mrec_tracks_close();
+}
+
+static int32_t ReplaceWhileWaiting(void *context, uint32_t milliseconds) {
+  (void)context;
+  (void)milliseconds;
+  Reset();
+  return 1;
+}
+
+static void ReplacementSessionCancelsOldRecovery(void) {
+  Reset();
+  Source source = {0, 2, 0, 0, {0}, "Old device"};
+  assert(!mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0,
+                             MREC_TRACK_REASON_DEVICE_REMOVED, NULL,
+                             Attempt, ReplaceWhileWaiting, &source));
+  assert(source.attempts == 1 && g_count == 0);
+  for (int result = 0; result <= 1; result++) {
+    assert(!mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0,
+                               MREC_TRACK_REASON_UNKNOWN, NULL,
+                               ReplaceSession, StopWaiting, &result));
+    assert(g_count == 0);
+  }
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+                         MREC_TRACK_REASON_APP_EXITED, "exited");
+  mrec_track_resumed(g_session, MREC_TRACK_SYSTEM_AUDIO, 0, "Late source");
+  source.attempts = 0;
+  assert(!mrec_track_recover(g_session, MREC_TRACK_SYSTEM_AUDIO, 0,
+                             MREC_TRACK_REASON_DEVICE_REMOVED, NULL, Attempt, Wait, &source));
+  assert(source.attempts == 0 && g_count == 1);
+  mrec_tracks_close();
+}
+
+static void AppExitSupersedesDeviceInterruption(void) {
+  Reset();
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, 0,
+                         MREC_TRACK_REASON_SERVICE_RESET, "lost first source");
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, 1,
+                         MREC_TRACK_REASON_SERVICE_RESET, "lost last source");
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+                         MREC_TRACK_REASON_APP_EXITED, "exited");
+  assert(g_count == 3 && Is(2, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_INTERRUPTED));
+  assert(g_events[2].reason == MREC_TRACK_REASON_APP_EXITED);
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+                         MREC_TRACK_REASON_APP_EXITED, "duplicate exit");
+  mrec_track_resumed(g_session, MREC_TRACK_SYSTEM_AUDIO, 0, "Late device");
+  assert(g_count == 3);
+  mrec_tracks_close();
+}
+
 int main(void) {
+  InvalidSourcesDoNotReopen();
+  DuplicateTransitionsAndNamesAreQuiet();
+  ReplacementSessionCancelsOldRecovery();
+  AppExitSupersedesDeviceInterruption();
   /* The Rust binding hardcodes this layout. */
   assert(sizeof(mrec_track_event) == 792);
   assert(offsetof(mrec_track_event, host_time_ns) == 16);

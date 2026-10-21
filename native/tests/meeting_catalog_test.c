@@ -12,7 +12,79 @@ static int PageTitleIs(const char *title, const char *expected) {
   return length == strlen(expected) && strncmp(title, expected, length) == 0;
 }
 
+static void BrowserMatches(void) {
+  const struct {
+    const char *url;
+    mrec_platform platform;
+  } services[] = {
+      {"https://meet.google.com/abc-defg-hij", MREC_PLATFORM_MEET},
+      {"https://teams.microsoft.com/l/meetup-join/123", MREC_PLATFORM_TEAMS},
+      {"https://us02web.zoom.us/wc/123/join", MREC_PLATFORM_ZOOM},
+      {"https://company.webex.com/meet/person", MREC_PLATFORM_WEBEX},
+      {"https://app.slack.com/huddle/T01/C02", MREC_PLATFORM_SLACK},
+      {"https://discord.com/channels/1/2", MREC_PLATFORM_DISCORD},
+      {"https://whereby.com/room", MREC_PLATFORM_GENERIC_BROWSER},
+      {"https://meet.jit.si/room", MREC_PLATFORM_GENERIC_BROWSER},
+      {"https://app.gather.town/app/office", MREC_PLATFORM_GENERIC_BROWSER},
+      {"https://around.co/room", MREC_PLATFORM_GENERIC_BROWSER},
+  };
+  const char *tabs[] = {"Inbox", "Meet - abc-defg-hij - Audio playing",
+                         "https://teams.microsoft.com/l/meetup-join/123"};
+  for (size_t index = 0; index < sizeof services / sizeof services[0]; index++) {
+    mrec_browser_match match = mrec_catalog_browser_match(
+        services[index].url, "Meeting", tabs, 3);
+    assert(match.platform == (int32_t)services[index].platform);
+    assert(match.tab_index == -1);
+    assert(match.title_length == strlen("Meeting"));
+
+    const char *background[] = {"Inbox", services[index].url};
+    match = mrec_catalog_browser_match("https://example.com", "Inbox", background, 2);
+    assert(match.platform == (int32_t)services[index].platform);
+    assert(match.tab_index == 1);
+    assert(match.title_length == strlen(services[index].url));
+  }
+
+  /* A URL wins over titles, including another service's background tab. */
+  mrec_browser_match match = mrec_catalog_browser_match(
+      "https://zoom.us/j/123", "Meet - abc-defg-hij - Browser", tabs, 3);
+  assert(match.platform == MREC_PLATFORM_ZOOM);
+  assert(match.tab_index == -1);
+  assert(match.title_length == strlen("Meet - abc-defg-hij"));
+
+  /* A window-title match keeps its URL; a tab match must omit that URL. */
+  match = mrec_catalog_browser_match("https://example.com", "Meet - xyz-abcd-efg", tabs, 3);
+  assert(match.platform == MREC_PLATFORM_MEET);
+  assert(match.tab_index == -1);
+  assert(match.title_length == strlen("Meet - xyz-abcd-efg"));
+  match = mrec_catalog_browser_match("https://example.com", "Inbox", tabs, 3);
+  assert(match.platform == MREC_PLATFORM_MEET);
+  assert(match.tab_index == 1);
+  assert(match.title_length == strlen("Meet - abc-defg-hij"));
+
+  const char *unicode_tabs[] = {"Meet \xE2\x80\x93 abc-defg-hij - Browser"};
+  match = mrec_catalog_browser_match(NULL, NULL, unicode_tabs, 1);
+  assert(match.platform == MREC_PLATFORM_MEET);
+  assert(match.tab_index == 0);
+  assert(match.title_length == strlen("Meet \xE2\x80\x93 abc-defg-hij"));
+
+  const char *nonmeetings[] = {NULL, "", "https://zoom.us/pricing", "Google Meet",
+                               "https://meet.google.com/", "Music"};
+  match = mrec_catalog_browser_match("https://example.com", "Inbox", nonmeetings, 6);
+  assert(match.platform == MREC_PLATFORM_UNKNOWN);
+  assert(match.tab_index == -1);
+  assert(match.title_length == strlen("Inbox"));
+  match = mrec_catalog_browser_match(NULL, NULL, NULL, 0);
+  assert(match.platform == MREC_PLATFORM_UNKNOWN);
+  assert(match.tab_index == -1);
+  assert(match.title_length == 0);
+  match = mrec_catalog_browser_match("", "", NULL, 1);
+  assert(match.platform == MREC_PLATFORM_UNKNOWN);
+  assert(match.tab_index == -1);
+  assert(match.title_length == 0);
+}
+
 int main(void) {
+  BrowserMatches();
   /* macOS: bundle-id prefixes reach the helpers that carry the audio. */
   assert(mrec_catalog_bundle_platform("us.zoom.xos") == MREC_PLATFORM_ZOOM);
   assert(mrec_catalog_bundle_platform("us.zoom.xos.cpthost") == MREC_PLATFORM_ZOOM);
@@ -59,6 +131,8 @@ int main(void) {
   /* Meet needs a meeting code: its home page and lookups are not calls. */
   assert(mrec_catalog_url_platform("https://meet.google.com/") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_url_platform("https://meet.google.com/landing") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_url_platform("https://meet.google.com/a") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_url_platform("https://meet.google.com/abc-defg-") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_url_platform("https://meet.google.com/abc-defg-hijk") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_url_platform("https://teams.microsoft.com/l/meetup-join/1") ==
          MREC_PLATFORM_TEAMS);

@@ -1,6 +1,12 @@
 // Node.js live-audio harness. Run through e2e/windows.ps1.
 import { on, once } from "node:events";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { access, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import * as MeetingRecord from "meeting-record";
 
@@ -281,6 +287,66 @@ function frequencies(name) {
 const ended = (streams) =>
   Promise.all(streams.filter(Boolean).map((stream) => once(stream, "end")));
 
+async function startExcludedTone(frequency, durationSeconds) {
+  if (frequency === undefined) return undefined;
+  const readyFile = join(tmpdir(), `meeting-record-excluded-${randomUUID()}`);
+  const child = spawn(
+    process.env.MREC_TONE_POWERSHELL ?? "powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      fileURLToPath(new URL("windows-tone.ps1", import.meta.url)),
+      "-Frequency",
+      String(frequency),
+      "-DurationSeconds",
+      String(Math.ceil(durationSeconds) + 30),
+      "-ReadyFile",
+      readyFile,
+    ],
+    { stdio: "inherit", windowsHide: true },
+  );
+  let failure;
+  child.on("error", (error) => {
+    failure = error;
+  });
+  const exited = new Promise((resolve) => child.once("close", resolve));
+  const assertAlive = () => {
+    if (failure) throw failure;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error("the excluded tone exited during capture");
+    }
+  };
+  const stop = async () => {
+    child.kill();
+    await exited;
+    await rm(readyFile, { force: true });
+    if (child.pid !== undefined) {
+      await rm(join(tmpdir(), `meeting-record-tone-${child.pid}.wav`), { force: true });
+    }
+  };
+  try {
+    const deadline = performance.now() + 20_000;
+    while (true) {
+      assertAlive();
+      if (
+        await access(readyFile).then(
+          () => true,
+          () => false,
+        )
+      )
+        break;
+      if (performance.now() >= deadline) throw new Error("timed out starting the excluded tone");
+      await delay(50);
+    }
+    return { assertAlive, stop };
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
+
 /** The app of a meeting that both a scan and the watcher report as recordable. */
 async function findMeeting(platform, pid) {
   const found = await MeetingRecord.meetings.scan();
@@ -353,6 +419,10 @@ async function main() {
       : { type: "process", pid: targetPid };
   const includeMicrophone = enabled("MREC_MICROPHONE");
   const expectDeviceChange = enabled("MREC_EXPECT_DEVICE_CHANGE");
+  const excludedFrequency = number("MREC_EXCLUDED_TONE_FREQUENCY", undefined);
+  if (excludedFrequency !== undefined && target.type !== "system") {
+    throw new Error("the recorder exclusion check needs system capture");
+  }
   const expectations = {
     minimumPeak: number("MREC_MIN_PEAK", 0.0001),
     allowDrops: enabled("MREC_ALLOW_DROPS"),
@@ -374,14 +444,20 @@ async function main() {
   const system = new TrackMetrics();
   const microphone = includeMicrophone ? new TrackMetrics() : undefined;
   const mixed = mixSampleRate === undefined ? undefined : new MixMetrics();
-  recording.systemAudio.on("data", (chunk) => system.add(chunk));
+  let measuring = excludedFrequency === undefined;
+  recording.systemAudio.on("data", (chunk) => {
+    if (measuring) system.add(chunk);
+  });
   if (microphone) {
     if (!recording.microphone) throw new Error("microphone track requested but missing");
-    recording.microphone.on("data", (chunk) => microphone.add(chunk));
+    recording.microphone.on("data", (chunk) => {
+      if (measuring) microphone.add(chunk);
+    });
   }
   if (mixed) {
     if (!recording.mixedAudio) throw new Error("mixed audio requested but missing");
     recording.mixedAudio.on("data", (chunk) => {
+      if (!measuring) return;
       mixed.bytes += chunk.length;
       for (let offset = 0; offset + 1 < chunk.length; offset += 2) {
         mixed.samples.push(chunk.readInt16LE(offset) / 32768);
@@ -408,33 +484,45 @@ async function main() {
   }
   const finished = ended([recording.systemAudio, recording.microphone, recording.mixedAudio]);
 
-  const started = performance.now();
-  const deadline = started + durationSeconds * 1000;
-  // Pause once, in the middle of the recording.
-  let pauseWindow =
-    pauseSeconds === undefined
-      ? undefined
-      : {
-          start: started + ((durationSeconds - pauseSeconds) * 1000) / 2,
-          end: started + ((durationSeconds + pauseSeconds) * 1000) / 2,
-        };
-  while (performance.now() < deadline) {
-    await delay(50);
-    if (pauseWindow) {
-      const now = performance.now();
-      if (now >= pauseWindow.end) {
-        recording.resumeRecording();
-        pauseWindow = undefined;
-      } else if (now >= pauseWindow.start && recording.state === "recording") {
-        recording.pauseRecording();
+  let excludedTone;
+  let interrupted;
+  try {
+    excludedTone = await startExcludedTone(excludedFrequency, durationSeconds);
+    measuring = true;
+    const started = performance.now();
+    const deadline = started + durationSeconds * 1000;
+    // Pause once, in the middle of the recording.
+    let pauseWindow =
+      pauseSeconds === undefined
+        ? undefined
+        : {
+            start: started + ((durationSeconds - pauseSeconds) * 1000) / 2,
+            end: started + ((durationSeconds + pauseSeconds) * 1000) / 2,
+          };
+    while (performance.now() < deadline) {
+      await delay(50);
+      if (pauseWindow) {
+        const now = performance.now();
+        if (now >= pauseWindow.end) {
+          recording.resumeRecording();
+          pauseWindow = undefined;
+        } else if (now >= pauseWindow.start && recording.state === "recording") {
+          recording.pauseRecording();
+        }
       }
     }
+    excludedTone?.assertAlive();
+    interrupted = [recording.systemAudio, recording.microphone].filter(
+      (track) => track?.interrupted,
+    );
+  } finally {
+    try {
+      await recording.stopRecording();
+      await finished;
+    } finally {
+      await excludedTone?.stop();
+    }
   }
-  const interrupted = [recording.systemAudio, recording.microphone].filter(
-    (track) => track?.interrupted,
-  );
-  await recording.stopRecording();
-  await finished;
 
   if (interrupted.length > 0) throw new Error("a track was still interrupted at the end");
   if (expectDeviceChange && !sawDeviceChange) {

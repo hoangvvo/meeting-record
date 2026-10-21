@@ -580,7 +580,7 @@ where
 pub enum CaptureTarget {
     /// A detected meeting's app pid, or any audio-producing process pid.
     Process { pid: u32 },
-    /// All application output.
+    /// All application output except the recorder's process tree.
     System,
 }
 
@@ -595,7 +595,7 @@ pub enum MicrophoneSource {
 
 #[derive(Debug, Clone)]
 pub struct CaptureOptions {
-    /// Mono mixdown for system audio. Defaults to true.
+    /// Mono mixdown for system audio only. The microphone keeps its format. Defaults to true.
     pub mono: bool,
     /// Optional microphone track. Defaults to none.
     pub microphone: Option<MicrophoneSource>,
@@ -759,10 +759,10 @@ unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_
     }
     let context = &*(user_data as *const EventContext);
     let event = &*event;
-    let (track, status) = if event.track == sys::MREC_TRACK_MICROPHONE {
-        (Track::Microphone, &context.microphone)
-    } else {
-        (Track::SystemAudio, &context.system_audio)
+    let (track, status) = match event.track {
+        sys::MREC_TRACK_SYSTEM_AUDIO => (Track::SystemAudio, &context.system_audio),
+        sys::MREC_TRACK_MICROPHONE => (Track::Microphone, &context.microphone),
+        _ => return,
     };
     let event = match event.kind {
         sys::MREC_TRACK_INTERRUPTED => {
@@ -1557,6 +1557,490 @@ mod capture_tests {
         );
     }
 
+    struct CaptureHarness {
+        session: super::CaptureSession,
+        system_audio: super::TrackCallbackContext,
+        microphone: super::TrackCallbackContext,
+        events: super::EventContext,
+    }
+
+    impl CaptureHarness {
+        fn new(system_channels: u32) -> Self {
+            use std::sync::{Arc, Mutex};
+            let state = Arc::new(AtomicUsize::new(STATE_RECORDING));
+            let system_queue = Arc::new(TrackQueue::new());
+            let microphone_queue = Arc::new(TrackQueue::new());
+            let system_status = Arc::new(super::TrackStatus::default());
+            let microphone_status = Arc::new(super::TrackStatus::default());
+            *microphone_status.device_name.lock().unwrap() = Some("Initial microphone".into());
+            let events = Arc::new(super::EventQueue::default());
+            Self {
+                session: super::CaptureSession {
+                    system_audio: super::AudioTrack {
+                        sample_rate: 48_000.0,
+                        channels: system_channels,
+                        queue: Arc::clone(&system_queue),
+                        status: Arc::clone(&system_status),
+                    },
+                    microphone: Some(super::AudioTrack {
+                        sample_rate: 44_100.0,
+                        channels: 2,
+                        queue: Arc::clone(&microphone_queue),
+                        status: Arc::clone(&microphone_status),
+                    }),
+                    mixed_audio: None,
+                    control: Arc::new(super::CaptureControl {
+                        state: Arc::clone(&state),
+                        queues: vec![Arc::clone(&system_queue), Arc::clone(&microphone_queue)],
+                        raw_queues: vec![Arc::clone(&system_queue), Arc::clone(&microphone_queue)],
+                        events: Arc::clone(&events),
+                        lifecycle: Mutex::new(()),
+                    }),
+                },
+                system_audio: super::TrackCallbackContext {
+                    queue: system_queue,
+                    mix_queue: None,
+                    state: Arc::clone(&state),
+                },
+                microphone: super::TrackCallbackContext {
+                    queue: microphone_queue,
+                    mix_queue: None,
+                    state,
+                },
+                events: super::EventContext {
+                    queue: events,
+                    system_audio: system_status,
+                    microphone: microphone_status,
+                },
+            }
+        }
+
+        fn audio(&self, track: super::Track, samples: &[f32], channels: u32, rate: f64, time: u64) {
+            let context = match track {
+                super::Track::SystemAudio => &self.system_audio,
+                super::Track::Microphone => &self.microphone,
+            };
+            unsafe {
+                super::audio_trampoline(
+                    samples.as_ptr(),
+                    (samples.len() / channels as usize) as u32,
+                    channels,
+                    rate,
+                    time,
+                    (context as *const super::TrackCallbackContext)
+                        .cast_mut()
+                        .cast(),
+                );
+            }
+        }
+
+        fn event(&self, track: super::Track, kind: i32, reason: i32, device: &str, message: &str) {
+            let mut event = super::sys::TrackEvent {
+                track: match track {
+                    super::Track::SystemAudio => super::sys::MREC_TRACK_SYSTEM_AUDIO,
+                    super::Track::Microphone => super::sys::MREC_TRACK_MICROPHONE,
+                },
+                kind,
+                reason,
+                host_time_ns: 1_000_000_000,
+                device_name: [0; 256],
+                message: [0; 512],
+            };
+            for (out, byte) in event.device_name.iter_mut().zip(device.bytes()) {
+                *out = byte as _;
+            }
+            for (out, byte) in event.message.iter_mut().zip(message.bytes()) {
+                *out = byte as _;
+            }
+            unsafe {
+                super::track_event_trampoline(
+                    &event,
+                    (&self.events as *const super::EventContext)
+                        .cast_mut()
+                        .cast(),
+                );
+            }
+        }
+
+        fn stop(&self) {
+            self.session.control.stop_with(|| {});
+        }
+    }
+
+    #[test]
+    fn track_events_keep_order_and_update_public_status_before_delivery() {
+        use super::{
+            sys::*, CaptureState, InterruptionReason::*, Track, TrackAvailability, TrackEvent,
+        };
+        let capture = CaptureHarness::new(1);
+        let session = &capture.session;
+        let system = session.system_audio();
+        let microphone = session.microphone().unwrap();
+        capture.event(
+            Track::SystemAudio,
+            MREC_TRACK_DEGRADED,
+            MREC_TRACK_REASON_SERVICE_RESET,
+            "",
+            "one lost",
+        );
+        assert_eq!(system.availability(), TrackAvailability::Degraded);
+        assert!(!system.is_interrupted());
+        capture.event(
+            Track::SystemAudio,
+            MREC_TRACK_INTERRUPTED,
+            MREC_TRACK_REASON_FORMAT_CHANGED,
+            "",
+            "all lost",
+        );
+        assert!(system.is_interrupted());
+        capture.event(
+            Track::Microphone,
+            MREC_TRACK_INTERRUPTED,
+            MREC_TRACK_REASON_DEVICE_CHANGED,
+            "",
+            "input changed",
+        );
+        assert!(microphone.is_interrupted());
+        capture.event(
+            Track::Microphone,
+            MREC_TRACK_DEVICE_CHANGED,
+            0,
+            "Replacement microphone",
+            "",
+        );
+        assert_eq!(
+            microphone.device_name().as_deref(),
+            Some("Replacement microphone")
+        );
+        assert!(microphone.is_interrupted());
+        capture.event(Track::Microphone, MREC_TRACK_RESUMED, 0, "", "");
+        assert_eq!(microphone.availability(), TrackAvailability::Live);
+        capture.event(
+            Track::SystemAudio,
+            MREC_TRACK_DEGRADED,
+            MREC_TRACK_REASON_SERVICE_RESET,
+            "",
+            "one recovered",
+        );
+        capture.event(Track::SystemAudio, MREC_TRACK_RESUMED, 0, "", "");
+        assert_eq!(system.availability(), TrackAvailability::Live);
+        assert_eq!(session.state(), CaptureState::Recording);
+        let expected = [
+            TrackEvent::Degraded {
+                track: Track::SystemAudio,
+                reason: ServiceReset,
+                message: "one lost".into(),
+            },
+            TrackEvent::Interrupted {
+                track: Track::SystemAudio,
+                reason: FormatChanged,
+                message: "all lost".into(),
+            },
+            TrackEvent::Interrupted {
+                track: Track::Microphone,
+                reason: DeviceChanged,
+                message: "input changed".into(),
+            },
+            TrackEvent::DeviceChanged {
+                track: Track::Microphone,
+                device_name: "Replacement microphone".into(),
+            },
+            TrackEvent::Resumed {
+                track: Track::Microphone,
+            },
+            TrackEvent::Degraded {
+                track: Track::SystemAudio,
+                reason: ServiceReset,
+                message: "one recovered".into(),
+            },
+            TrackEvent::Resumed {
+                track: Track::SystemAudio,
+            },
+        ];
+        capture.stop();
+        for event in expected {
+            assert_eq!(session.recv_event(), Some(event));
+        }
+        assert_eq!(session.recv_event(), None);
+    }
+
+    #[test]
+    fn app_exit_keeps_the_microphone_and_session_available() {
+        use super::{
+            sys::*, CaptureState, InterruptionReason, Track, TrackAvailability, TrackEvent,
+        };
+        use std::sync::atomic::Ordering;
+        let capture = CaptureHarness::new(1);
+        capture.event(
+            Track::SystemAudio,
+            MREC_TRACK_INTERRUPTED,
+            MREC_TRACK_REASON_APP_EXITED,
+            "",
+            "target exited",
+        );
+        let session = &capture.session;
+        assert_eq!(session.state(), CaptureState::Recording);
+        assert!(session.system_audio().is_interrupted());
+        assert_eq!(
+            session.microphone().unwrap().availability(),
+            TrackAvailability::Live
+        );
+        assert!(!session.system_audio().queue.closed.load(Ordering::Acquire));
+        capture.audio(
+            Track::Microphone,
+            &[0.25, -0.25, 0.5, -0.5],
+            2,
+            44_100.0,
+            42,
+        );
+        capture.stop();
+        let packet = session.microphone().unwrap().recv().unwrap();
+        assert_eq!(packet.frames, [0.25, -0.25, 0.5, -0.5]);
+        assert_eq!(
+            (packet.frame_count, packet.channels, packet.sample_rate),
+            (2, 2, 44_100.0)
+        );
+        assert_eq!(packet.host_time_ns, 42);
+        assert_eq!(
+            session.recv_event(),
+            Some(TrackEvent::Interrupted {
+                track: Track::SystemAudio,
+                reason: InterruptionReason::AppExited,
+                message: "target exited".into(),
+            })
+        );
+        assert!(session.system_audio().recv().is_none());
+        assert!(session.microphone().unwrap().recv().is_none());
+        assert!(session.system_audio().is_interrupted());
+    }
+
+    #[test]
+    fn independent_tracks_keep_per_packet_formats_and_shared_timestamps() {
+        use super::Track;
+        for channels in [1, 2] {
+            let capture = CaptureHarness::new(channels);
+            let system_samples = vec![0.25; 2 * channels as usize];
+            capture.audio(
+                Track::SystemAudio,
+                &system_samples,
+                channels,
+                48_000.0,
+                1_000_000_000,
+            );
+            capture.audio(
+                Track::Microphone,
+                &[0.5, -0.5, 0.75, -0.75],
+                2,
+                44_100.0,
+                1_000_000_000,
+            );
+            capture.audio(
+                Track::SystemAudio,
+                &[0.125, -0.125],
+                2,
+                32_000.0,
+                2_000_000_000,
+            );
+            capture.stop();
+            let system = capture.session.system_audio();
+            let first = system.recv().unwrap();
+            assert_eq!(first.frames, system_samples);
+            assert_eq!(
+                (first.frame_count, first.channels, first.sample_rate),
+                (2, channels, 48_000.0)
+            );
+            let recovered = system.recv().unwrap();
+            assert_eq!(recovered.frames, [0.125, -0.125]);
+            assert_eq!(
+                (
+                    recovered.frame_count,
+                    recovered.channels,
+                    recovered.sample_rate
+                ),
+                (1, 2, 32_000.0)
+            );
+            assert_eq!(recovered.host_time_ns, 2_000_000_000);
+            assert_eq!(
+                (system.channels(), system.sample_rate()),
+                (channels, 48_000.0)
+            );
+            let microphone = capture.session.microphone().unwrap().recv().unwrap();
+            assert_eq!(
+                (
+                    microphone.frame_count,
+                    microphone.channels,
+                    microphone.sample_rate
+                ),
+                (2, 2, 44_100.0)
+            );
+            assert_eq!(microphone.host_time_ns, first.host_time_ns);
+            assert_eq!(microphone.dropped_samples, 0);
+        }
+    }
+
+    #[test]
+    fn silent_packets_keep_both_tracks_live_and_preserve_metadata() {
+        use super::{CaptureState, Track, TrackAvailability};
+        let capture = CaptureHarness::new(1);
+        for track in [Track::SystemAudio, Track::Microphone] {
+            capture.audio(track, &[0.0, 0.0], 1, 48_000.0, 1_120_000_000);
+        }
+        for track in [
+            capture.session.system_audio(),
+            capture.session.microphone().unwrap(),
+        ] {
+            let packet = track.recv().unwrap();
+            assert_eq!(packet.frames, [0.0, 0.0]);
+            assert_eq!(packet.frame_count, 2);
+            assert_eq!(packet.channels, 1);
+            assert_eq!(packet.sample_rate, 48_000.0);
+            assert_eq!(packet.host_time_ns, 1_120_000_000);
+            assert_eq!(packet.dropped_samples, 0);
+            assert_eq!(track.availability(), TrackAvailability::Live);
+        }
+        assert_eq!(capture.session.state(), CaptureState::Recording);
+        assert!(capture.session.try_recv_event().is_none());
+        capture.stop();
+    }
+
+    #[test]
+    fn pause_excludes_both_raw_tracks_but_keeps_source_events() {
+        use super::{sys::*, CaptureState, Track};
+        let capture = CaptureHarness::new(1);
+        for track in [Track::SystemAudio, Track::Microphone] {
+            capture.audio(track, &[0.25], 1, 48_000.0, 1_000_000_000);
+        }
+        capture.session.pause();
+        capture.session.pause();
+        assert_eq!(capture.session.state(), CaptureState::Paused);
+        for track in [Track::SystemAudio, Track::Microphone] {
+            capture.audio(track, &[1.0], 1, 48_000.0, 2_000_000_000);
+        }
+        capture.event(
+            Track::SystemAudio,
+            MREC_TRACK_INTERRUPTED,
+            MREC_TRACK_REASON_DEVICE_REMOVED,
+            "",
+            "device lost",
+        );
+        assert!(capture.session.system_audio().is_interrupted());
+        assert!(capture.session.try_recv_event().is_some());
+        capture.session.resume();
+        capture.session.resume();
+        for track in [Track::SystemAudio, Track::Microphone] {
+            capture.audio(track, &[0.5], 1, 48_000.0, 60_000_000_000);
+        }
+        capture.stop();
+        for track in [
+            capture.session.system_audio(),
+            capture.session.microphone().unwrap(),
+        ] {
+            let packet = track.recv().unwrap();
+            assert_eq!(packet.frames, [0.5]);
+            assert_eq!(packet.host_time_ns, 60_000_000_000);
+            assert_eq!(packet.dropped_samples, 0);
+            assert!(track.recv().is_none());
+        }
+    }
+
+    #[test]
+    fn stop_drains_both_tracks_and_final_events_exactly_once() {
+        use super::{sys::*, CaptureState, Track};
+        use std::sync::atomic::Ordering;
+        let capture = CaptureHarness::new(1);
+        for track in [Track::SystemAudio, Track::Microphone] {
+            capture.audio(track, &[0.25], 1, 48_000.0, 1_000_000_000);
+        }
+        let native_stops = AtomicUsize::new(0);
+        capture.session.control.stop_with(|| {
+            native_stops.fetch_add(1, Ordering::Relaxed);
+            for track in [Track::SystemAudio, Track::Microphone] {
+                capture.audio(track, &[0.5], 1, 48_000.0, 2_000_000_000);
+            }
+            capture.event(
+                Track::SystemAudio,
+                MREC_TRACK_INTERRUPTED,
+                MREC_TRACK_REASON_APP_EXITED,
+                "",
+                "target exited",
+            );
+        });
+        capture.session.control.stop_with(|| {
+            native_stops.fetch_add(1, Ordering::Relaxed);
+        });
+        capture.session.pause();
+        capture.session.resume();
+        assert_eq!(native_stops.load(Ordering::Relaxed), 1);
+        assert_eq!(capture.session.state(), CaptureState::Stopped);
+        for track in [
+            capture.session.system_audio(),
+            capture.session.microphone().unwrap(),
+        ] {
+            assert_eq!(track.recv().unwrap().frames, [0.25]);
+            assert_eq!(track.recv().unwrap().frames, [0.5]);
+            assert!(track.recv().is_none());
+        }
+        assert!(capture.session.recv_event().is_some());
+        assert!(capture.session.recv_event().is_none());
+    }
+
+    #[test]
+    fn unknown_events_do_not_change_track_status_or_enter_the_queue() {
+        use super::{sys::*, InterruptionReason, Track, TrackAvailability, TrackEvent};
+        let capture = CaptureHarness::new(1);
+        capture.event(Track::Microphone, 99, 0, "unused", "unused");
+        let invalid_track = super::sys::TrackEvent {
+            track: 99,
+            kind: MREC_TRACK_INTERRUPTED,
+            reason: MREC_TRACK_REASON_DEVICE_REMOVED,
+            host_time_ns: 0,
+            device_name: [0; 256],
+            message: [0; 512],
+        };
+        unsafe {
+            super::track_event_trampoline(
+                &invalid_track,
+                (&capture.events as *const super::EventContext)
+                    .cast_mut()
+                    .cast(),
+            );
+        }
+        assert_eq!(
+            capture.session.system_audio().availability(),
+            TrackAvailability::Live
+        );
+        assert_eq!(
+            capture.session.microphone().unwrap().availability(),
+            TrackAvailability::Live
+        );
+        assert_eq!(
+            capture
+                .session
+                .microphone()
+                .unwrap()
+                .device_name()
+                .as_deref(),
+            Some("Initial microphone")
+        );
+        assert!(capture.session.try_recv_event().is_none());
+        capture.event(
+            Track::Microphone,
+            MREC_TRACK_INTERRUPTED,
+            99,
+            "",
+            "unknown reason",
+        );
+        assert_eq!(
+            capture.session.try_recv_event(),
+            Some(TrackEvent::Interrupted {
+                track: Track::Microphone,
+                reason: InterruptionReason::Unknown,
+                message: "unknown reason".into(),
+            })
+        );
+        capture.stop();
+    }
+
     #[test]
     fn track_queue_drains_final_packets_while_producer_closes() {
         use std::{sync::Arc, thread};
@@ -1712,14 +2196,15 @@ mod capture_tests {
         for phase in [STATE_RECORDING, STATE_PAUSED] {
             let state = Arc::new(AtomicUsize::new(phase));
             let queue = Arc::new(TrackQueue::new());
+            let mixed = Arc::new(TrackQueue::new());
             let context = TrackCallbackContext {
                 queue: queue.clone(),
-                mix_queue: None,
+                mix_queue: Some(mixed.clone()),
                 state: state.clone(),
             };
             let control = CaptureControl {
                 state,
-                queues: vec![queue.clone()],
+                queues: vec![queue.clone(), mixed.clone()],
                 raw_queues: vec![queue.clone()],
                 events: Arc::new(EventQueue::default()),
                 lifecycle: Mutex::new(()),
@@ -1734,13 +2219,15 @@ mod capture_tests {
                     (&context as *const TrackCallbackContext).cast_mut().cast(),
                 );
             });
-            let packet = queue.recv();
-            if phase == STATE_RECORDING {
-                assert_eq!(packet.unwrap().frames, [0.25, -0.5]);
-            } else {
-                assert!(packet.is_none());
+            for output in [queue, mixed] {
+                let packet = output.recv();
+                if phase == STATE_RECORDING {
+                    assert_eq!(packet.unwrap().frames, [0.25, -0.5]);
+                } else {
+                    assert!(packet.is_none());
+                }
+                assert!(output.recv().is_none());
             }
-            assert!(queue.recv().is_none());
         }
     }
 
@@ -1808,25 +2295,25 @@ mod capture_tests {
 
     #[test]
     fn cancellation_stops_registered_capture_and_preserves_tail() {
-        use super::{CancellationToken, CaptureControl, STATE_STOPPED};
-        use std::sync::{atomic::Ordering, Arc, Mutex};
-        let queue = Arc::new(TrackQueue::new());
-        let state = Arc::new(AtomicUsize::new(STATE_RECORDING));
-        write(&queue, &[0.25], 1, 1, 48_000.0, 42, &state);
-        let control = Arc::new(CaptureControl {
-            state: Arc::clone(&state),
-            queues: vec![Arc::clone(&queue)],
-            raw_queues: vec![Arc::clone(&queue)],
-            events: Arc::default(),
-            lifecycle: Mutex::new(()),
-        });
+        use super::{CancellationToken, CaptureState, Track};
+        use std::sync::atomic::Ordering;
+        let capture = CaptureHarness::new(1);
+        for track in [Track::SystemAudio, Track::Microphone] {
+            capture.audio(track, &[0.25], 1, 48_000.0, 42);
+        }
         let token = CancellationToken::new();
-        token.register(&control).unwrap();
+        token.register(&capture.session.control).unwrap();
         token.cancel();
-        assert_eq!(state.load(Ordering::Acquire) & 3, STATE_STOPPED);
-        assert!(queue.closed.load(Ordering::Acquire));
-        assert_eq!(queue.recv().unwrap().frames, [0.25]);
-        assert!(queue.recv().is_none());
-        control.stop();
+        token.cancel();
+        assert_eq!(capture.session.state(), CaptureState::Stopped);
+        for track in [
+            capture.session.system_audio(),
+            capture.session.microphone().unwrap(),
+        ] {
+            assert!(track.queue.closed.load(Ordering::Acquire));
+            assert_eq!(track.recv().unwrap().frames, [0.25]);
+            assert!(track.recv().is_none());
+        }
+        capture.stop();
     }
 }

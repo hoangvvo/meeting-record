@@ -46,8 +46,18 @@ enum Accessibility {
     }
 
     private static func elementsAttribute(_ element: AXUIElement,
-                                          _ attribute: String) -> [AXUIElement] {
-        copyAttribute(element, attribute) as? [AXUIElement] ?? []
+                                          _ attribute: String, limit: Int) -> [AXUIElement] {
+        guard limit > 0 else { return [] }
+        var values: CFArray?
+        guard AXUIElementCopyAttributeValues(element, attribute as CFString,
+                                            0, limit, &values) == .success else { return [] }
+        return values as? [AXUIElement] ?? []
+    }
+
+    private static func elementAttribute(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        guard let value = copyAttribute(element, attribute),
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return unsafeBitCast(value, to: AXUIElement.self)
     }
 
     /// Without this, `AXWebArea` does not exist in Chromium or Electron trees.
@@ -63,16 +73,14 @@ enum Accessibility {
         guard isTrusted() else { return nil }
         let app = application(pid)
 
-        if let focused = copyAttribute(app, kAXFocusedWindowAttribute as String) {
-            // The attribute returns an element; a mismatch yields no title.
-            let window = unsafeBitCast(focused, to: AXUIElement.self)
+        if let window = elementAttribute(app, kAXFocusedWindowAttribute as String) {
             AXUIElementSetMessagingTimeout(window, messagingTimeout)
             if let title = stringAttribute(window, kAXTitleAttribute as String) {
                 return title
             }
         }
 
-        for window in elementsAttribute(app, kAXWindowsAttribute as String).prefix(4) {
+        for window in elementsAttribute(app, kAXWindowsAttribute as String, limit: 4) {
             AXUIElementSetMessagingTimeout(window, messagingTimeout)
             if let title = stringAttribute(window, kAXTitleAttribute as String) {
                 return title
@@ -81,74 +89,45 @@ enum Accessibility {
         return nil
     }
 
-    // MARK: - Browser URLs
-
-    /// Read the active tab URL from AXURL or the address field.
-    static func browserURL(pid: pid_t) -> String? {
-        guard isTrusted() else { return nil }
+    static func browserWindows(pid: pid_t) -> [BrowserWindowContent] {
+        guard isTrusted() else { return [] }
         let app = application(pid)
         enableEnhancedInterface(app)
-
-        let windows = elementsAttribute(app, kAXWindowsAttribute as String)
         let deadline = ProcessInfo.processInfo.systemUptime + traversalTimeout
-        for window in windows.prefix(3) {
-            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
-            AXUIElementSetMessagingTimeout(window, messagingTimeout)
-
-            if let url = urlAttribute(window) { return url }
-
-            var budget = 400
-            if let found = findURL(in: window, depth: 0, maxDepth: 8,
-                                   deadline: deadline, budget: &budget) {
-                return found
-            }
+        var windows = elementsAttribute(app, kAXWindowsAttribute as String, limit: 4)
+        if let window = elementAttribute(app, kAXFocusedWindowAttribute as String) {
+            windows.removeAll { CFEqual($0, window) }
+            windows.insert(window, at: 0)
         }
-        return nil
+        return windows.prefix(4).compactMap { window in
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            return BrowserContentReader.read(Element(window), deadline: deadline,
+                                             now: { ProcessInfo.processInfo.systemUptime })
+        }
     }
 
-    /// `AXURL` returns an NSURL, not a string.
-    private static func urlAttribute(_ element: AXUIElement) -> String? {
-        guard let raw = copyAttribute(element, "AXURL") else { return nil }
-        if let url = raw as? URL { return url.absoluteString }
-        if let string = raw as? String, !string.isEmpty { return string }
-        return nil
-    }
+    private struct Element: BrowserAccessibilityElement {
+        let element: AXUIElement
 
-    /// Bounded search for an `AXURL`, a web area's title, or the omnibox value.
-    private static func findURL(in element: AXUIElement,
-                                depth: Int,
-                                maxDepth: Int,
-                                deadline: TimeInterval,
-                                budget: inout Int) -> String? {
-        guard depth <= maxDepth, budget > 0,
-              ProcessInfo.processInfo.systemUptime < deadline else { return nil }
-        budget -= 1
-
-        if let url = urlAttribute(element) { return url }
-
-        let role = stringAttribute(element, kAXRoleAttribute as String) ?? ""
-
-        // The omnibox is a text field whose value looks like a URL or host.
-        if role == kAXTextFieldRole as String,
-           let value = stringAttribute(element, kAXValueAttribute as String),
-           value.contains(".") || value.hasPrefix("http") {
-            return value
+        init(_ element: AXUIElement) {
+            self.element = element
+            AXUIElementSetMessagingTimeout(element, messagingTimeout)
         }
 
-        // A web area's DOM is large and exposes no URL the window does not.
-        if role == "AXWebArea" {
-            return stringAttribute(element, kAXTitleAttribute as String)
+        var role: String { stringAttribute(element, kAXRoleAttribute as String) ?? "" }
+        var title: String? {
+            stringAttribute(element, kAXTitleAttribute as String)
+                ?? stringAttribute(element, kAXDescriptionAttribute as String)
         }
+        var url: String? {
+            let raw = copyAttribute(element, "AXURL")
+            if let url = raw as? URL { return url.absoluteString }
+            return raw as? String
+        }
+        var value: String? { stringAttribute(element, kAXValueAttribute as String) }
 
-        for child in elementsAttribute(element, kAXChildrenAttribute as String) {
-            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
-            AXUIElementSetMessagingTimeout(child, messagingTimeout)
-            if let found = findURL(in: child, depth: depth + 1,
-                                   maxDepth: maxDepth, deadline: deadline,
-                                   budget: &budget) {
-                return found
-            }
+        func children(limit: Int) -> [Element] {
+            elementsAttribute(element, kAXChildrenAttribute as String, limit: limit).map(Element.init)
         }
-        return nil
     }
 }

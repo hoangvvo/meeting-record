@@ -2,6 +2,7 @@
 #include "meeting-record.h"
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
+#include "CapturePump.h"
 #include "TimelineMixer.h"
 #include "meeting-catalog.h"
 #include "tracks.h"
@@ -216,6 +217,35 @@ mrec_track_reason ReasonFor(HRESULT hr) {
     default: return MREC_TRACK_REASON_UNKNOWN;
   }
 }
+
+class WasapiPackets {
+public:
+  explicit WasapiPackets(IAudioCaptureClient *capture) : capture_(capture) {}
+
+  int32_t NextPacketSize(uint32_t &frames) { return capture_->GetNextPacketSize(&frames); }
+
+  int32_t Acquire(meeting_record::CapturePacket &packet) {
+    BYTE *data = nullptr;
+    UINT32 frames = 0;
+    DWORD flags = 0;
+    UINT64 position = 0, time = 0;
+    const HRESULT hr = capture_->GetBuffer(&data, &frames, &flags, &position, &time);
+    if (hr == AUDCLNT_S_BUFFER_EMPTY) return meeting_record::kCaptureEmpty;
+    if (FAILED(hr)) return hr;
+    packet.samples = reinterpret_cast<const float *>(data);
+    packet.frames = frames;
+    packet.time_100ns = time;
+    packet.silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+    packet.discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+    packet.timestamp_error = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
+    return 0;
+  }
+
+  int32_t Release(uint32_t frames) { return capture_->ReleaseBuffer(frames); }
+
+private:
+  IAudioCaptureClient *capture_;
+};
 
 /* Device display name. */
 std::string FriendlyName(IMMDevice *device) {
@@ -481,6 +511,10 @@ public:
     if (running_) {
       SetLastErrorMessage("capture already running");
       return MREC_ERR_ALREADY_RUNNING;
+    }
+    if (!pids && pid_count != 0) {
+      SetLastErrorMessage("a nonempty process list requires pids");
+      return MREC_ERR_INTERNAL;
     }
 
     std::vector<uint32_t> targets;
@@ -770,36 +804,18 @@ private:
 
     while (!stop_requested_.load(std::memory_order_relaxed) &&
            !system_exited_.load(std::memory_order_relaxed)) {
-      UINT32 packet = 0;
-      HRESULT hr = stream.capture->GetNextPacketSize(&packet);
-      if (FAILED(hr)) {
-        RecoverLoopback(index, ReasonFor(hr), HResultMessage("capture", hr));
-        continue;
-      }
-      if (packet == 0) {
-        Sleep(5);
-        continue;
-      }
-      BYTE *data = nullptr;
-      UINT32 frames = 0;
-      DWORD flags = 0;
-      UINT64 position = 0, qpc = 0;
-      hr = stream.capture->GetBuffer(&data, &frames, &flags, &position, &qpc);
-      if (FAILED(hr)) {
-        RecoverLoopback(index, ReasonFor(hr), HResultMessage("capture", hr));
-        continue;
-      }
-      if (frames > 0) {
-        const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-        const bool discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
-        const uint64_t timestamp =
-            (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0 || qpc == 0
-                ? MonotonicTimeNs()
-                : qpc * 100;
-        system_mixer_.Add(index, reinterpret_cast<const float *>(data), frames,
-                          silent, discontinuity, timestamp);
-      }
-      stream.capture->ReleaseBuffer(frames);
+      WasapiPackets packets(stream.capture.Get());
+      meeting_record::PumpCapture(
+          packets,
+          [this, index](const float *data, uint32_t frames, bool silent,
+                        bool discontinuity, uint64_t timestamp) {
+            system_mixer_.Add(index, data, frames, silent, discontinuity, timestamp);
+          },
+          MonotonicTimeNs,
+          [this, index](int32_t hr) {
+            RecoverLoopback(index, ReasonFor(hr), HResultMessage("capture", hr));
+          },
+          [] { Sleep(5); });
     }
     CoUninitialize();
   }
@@ -824,36 +840,18 @@ private:
           continue;
         }
       }
-      UINT32 packet = 0;
-      HRESULT hr = microphone_->capture->GetNextPacketSize(&packet);
-      if (FAILED(hr)) {
-        RecoverMicrophone(ReasonFor(hr), HResultMessage("capture", hr));
-        continue;
-      }
-      if (packet == 0) {
-        Sleep(5);
-        continue;
-      }
-      BYTE *data = nullptr;
-      UINT32 frames = 0;
-      DWORD flags = 0;
-      UINT64 position = 0, qpc = 0;
-      hr = microphone_->capture->GetBuffer(&data, &frames, &flags, &position, &qpc);
-      if (FAILED(hr)) {
-        RecoverMicrophone(ReasonFor(hr), HResultMessage("capture", hr));
-        continue;
-      }
-      if (frames > 0) {
-        const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-        const bool discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
-        const uint64_t timestamp =
-            (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0 || qpc == 0
-                ? MonotonicTimeNs()
-                : qpc * 100;
-        microphone_mixer_.Add(0, reinterpret_cast<const float *>(data), frames,
-                              silent, discontinuity, timestamp);
-      }
-      microphone_->capture->ReleaseBuffer(frames);
+      WasapiPackets packets(microphone_->capture.Get());
+      meeting_record::PumpCapture(
+          packets,
+          [this](const float *data, uint32_t frames, bool silent,
+                 bool discontinuity, uint64_t timestamp) {
+            microphone_mixer_.Add(0, data, frames, silent, discontinuity, timestamp);
+          },
+          MonotonicTimeNs,
+          [this](int32_t hr) {
+            RecoverMicrophone(ReasonFor(hr), HResultMessage("capture", hr));
+          },
+          [] { Sleep(5); });
     }
     CoUninitialize();
   }

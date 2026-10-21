@@ -71,6 +71,7 @@ static const Identifier kUrlPatterns[] = {
     {"zoomgov.com/w/", MREC_PLATFORM_ZOOM},
     {"zoomgov.com/wc/", MREC_PLATFORM_ZOOM},
     {"/webex.com/meet", MREC_PLATFORM_WEBEX},
+    {".webex.com/meet", MREC_PLATFORM_WEBEX},
     {"webex.com/wbxmjs", MREC_PLATFORM_WEBEX},
     {"app.slack.com/huddle", MREC_PLATFORM_SLACK},
     {"discord.com/channels", MREC_PLATFORM_DISCORD},
@@ -123,6 +124,7 @@ static int Contains(const char *text, const char *lowered) {
 /* A whole Meet meeting code: three, four and three lowercase letters. */
 static int IsMeetCode(const char *text) {
   for (size_t index = 0; index < kMeetCodeLength; index++) {
+    if (!text[index]) return 0;
     const int separator = index == 3 || index == 8;
     if (separator ? text[index] != '-' : !IsLowerLetter(text[index])) return 0;
   }
@@ -208,6 +210,28 @@ int32_t mrec_catalog_title_platform(const char *title, size_t *page_length) {
   const size_t meet = MeetTitleLength(title);
   if (page_length) *page_length = meet ? meet : strlen(title);
   return meet ? MREC_PLATFORM_MEET : mrec_catalog_url_platform(title);
+}
+
+mrec_browser_match mrec_catalog_browser_match(const char *url, const char *title,
+                                             const char *const *tab_titles,
+                                             size_t tab_count) {
+  mrec_browser_match match = {MREC_PLATFORM_UNKNOWN, 0, -1};
+  const int32_t title_platform = mrec_catalog_title_platform(title, &match.title_length);
+  match.platform = mrec_catalog_url_platform(url);
+  if (match.platform != MREC_PLATFORM_UNKNOWN) return match;
+  match.platform = title_platform;
+  if (match.platform != MREC_PLATFORM_UNKNOWN) return match;
+  if (!tab_titles) return match;
+  for (size_t index = 0; index < tab_count && index <= INT32_MAX; index++) {
+    size_t length = 0;
+    const int32_t platform = mrec_catalog_title_platform(tab_titles[index], &length);
+    if (platform == MREC_PLATFORM_UNKNOWN) continue;
+    match.platform = platform;
+    match.title_length = length;
+    match.tab_index = (int32_t)index;
+    return match;
+  }
+  return match;
 }
 
 int32_t mrec_catalog_confidence(int32_t is_browser, int32_t playing_audio,

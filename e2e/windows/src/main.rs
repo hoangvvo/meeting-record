@@ -3,9 +3,14 @@
 use std::{
     env,
     error::Error as StdError,
-    sync::{mpsc, Arc},
+    path::PathBuf,
+    process::{Child, Command},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use meeting_record::{
@@ -344,6 +349,78 @@ fn frequencies(name: &str) -> Result<Vec<f64>, Box<dyn StdError>> {
         .collect()
 }
 
+struct ExcludedTone {
+    child: Child,
+    ready_file: PathBuf,
+}
+
+impl ExcludedTone {
+    fn start(
+        frequency: Option<u32>,
+        duration: Duration,
+    ) -> Result<Option<Self>, Box<dyn StdError>> {
+        let Some(frequency) = frequency else {
+            return Ok(None);
+        };
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let ready_file = env::temp_dir().join(format!(
+            "meeting-record-excluded-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut command = Command::new(
+            env::var_os("MREC_TONE_POWERSHELL").unwrap_or_else(|| "powershell.exe".into()),
+        );
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../windows-tone.ps1"))
+            .args([
+                "-Frequency",
+                &frequency.to_string(),
+                "-DurationSeconds",
+                &(duration.as_secs() + 30).to_string(),
+                "-ReadyFile",
+            ])
+            .arg(&ready_file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let mut tone = Self {
+            child: command.spawn()?,
+            ready_file,
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !tone.ready_file.exists() {
+            tone.assert_alive()?;
+            if Instant::now() >= deadline {
+                return Err("timed out starting the excluded tone".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        tone.assert_alive()?;
+        Ok(Some(tone))
+    }
+
+    fn assert_alive(&mut self) -> Result<(), Box<dyn StdError>> {
+        if self.child.try_wait()?.is_some() {
+            return Err("the excluded tone exited during capture".into());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ExcludedTone {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.ready_file);
+        let _ = std::fs::remove_file(
+            env::temp_dir().join(format!("meeting-record-tone-{}.wav", self.child.id())),
+        );
+    }
+}
+
 /// The app of a meeting that both a scan and the watcher report as recordable.
 fn find_meeting(platform: &str, pid: Option<u32>) -> Result<CaptureTarget, Box<dyn StdError>> {
     let found = meetings::scan()?;
@@ -452,6 +529,13 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .map_or(Ok(0), |value| value.parse())?;
     let include_microphone = enabled("MREC_MICROPHONE");
     let expect_device_change = enabled("MREC_EXPECT_DEVICE_CHANGE");
+    let excluded_frequency = env::var("MREC_EXCLUDED_TONE_FREQUENCY")
+        .ok()
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    if excluded_frequency.is_some() && !matches!(target, CaptureTarget::System) {
+        return Err("the recorder exclusion check needs system capture".into());
+    }
     let expectations = Expectations {
         minimum_peak,
         allow_drops: enabled("MREC_ALLOW_DROPS"),
@@ -471,36 +555,47 @@ fn main() -> Result<(), Box<dyn StdError>> {
 
     println!("starting {target:?} capture for {}s", duration.as_secs());
     let recording = Arc::new(capture::start(target, options)?);
+    let measuring = Arc::new(AtomicBool::new(excluded_frequency.is_none()));
 
     let system_reader = Arc::clone(&recording);
+    let system_measuring = Arc::clone(&measuring);
     let system_worker = thread::spawn(move || {
         let mut metrics = TrackMetrics::default();
         while let Some(chunk) = system_reader.system_audio().recv() {
-            metrics.add(chunk);
+            if system_measuring.load(Ordering::Acquire) {
+                metrics.add(chunk);
+            }
         }
         metrics
     });
     let microphone_worker = include_microphone.then(|| {
         let microphone_reader = Arc::clone(&recording);
+        let microphone_measuring = Arc::clone(&measuring);
         thread::spawn(move || {
             let mut metrics = TrackMetrics::default();
             let track = microphone_reader
                 .microphone()
                 .expect("microphone track requested but missing");
             while let Some(chunk) = track.recv() {
-                metrics.add(chunk);
+                if microphone_measuring.load(Ordering::Acquire) {
+                    metrics.add(chunk);
+                }
             }
             metrics
         })
     });
     let mix_worker = mix_sample_rate.is_some().then(|| {
         let mix_reader = Arc::clone(&recording);
+        let mix_measuring = Arc::clone(&measuring);
         thread::spawn(move || {
             let mut metrics = MixMetrics::default();
             let mixed = mix_reader
                 .mixed_audio()
                 .expect("mixed audio requested but missing");
             while let Some(chunk) = mixed.recv() {
+                if !mix_measuring.load(Ordering::Acquire) {
+                    continue;
+                }
                 metrics.bytes += chunk.pcm.len();
                 metrics.peak_level = metrics.peak_level.max(chunk.level);
                 metrics.samples.extend(
@@ -516,6 +611,14 @@ fn main() -> Result<(), Box<dyn StdError>> {
         })
     });
 
+    let mut excluded_tone = match ExcludedTone::start(excluded_frequency, duration) {
+        Ok(tone) => tone,
+        Err(error) => {
+            recording.stop();
+            return Err(error);
+        }
+    };
+    measuring.store(true, Ordering::Release);
     let started = Instant::now();
     let deadline = started + duration;
     // Pause once, in the middle of the recording.
@@ -545,6 +648,10 @@ fn main() -> Result<(), Box<dyn StdError>> {
             .microphone()
             .is_some_and(|track| track.is_interrupted());
     recording.stop();
+    if let Some(tone) = &mut excluded_tone {
+        tone.assert_alive()?;
+    }
+    drop(excluded_tone);
 
     let system = system_worker.join().map_err(|_| "system reader panicked")?;
     let microphone = microphone_worker

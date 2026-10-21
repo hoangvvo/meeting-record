@@ -300,7 +300,7 @@ Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
 void OnTrackEvent(const mrec_track_event *event, void *user_data) {
   auto *capture = static_cast<CaptureContext *>(user_data);
   if (!capture || !event) return;
-  /* Ignore unknown event types. */
+  if (event->track != MREC_TRACK_SYSTEM_AUDIO && event->track != MREC_TRACK_MICROPHONE) return;
   if (event->type < MREC_TRACK_INTERRUPTED || event->type > MREC_TRACK_DEGRADED) return;
   auto *copy = new mrec_track_event(*event);
   const uint64_t capture_id = capture->id;

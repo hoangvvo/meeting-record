@@ -45,7 +45,8 @@ typedef int32_t (*mrec_track_wait)(void *context, uint32_t milliseconds);
 /*
  * Reopens `source` right away, so a quick switch is a device change and not an
  * interruption. Otherwise interrupts the track and retries with backoff, at most
- * 2 s apart, until it reopens (1) or `wait` reports a stop (0).
+ * 2 s apart, until it reopens (1) or stops (0). Invalid sources, ended sessions,
+ * and exited process targets never reopen.
  */
 int32_t mrec_track_recover(uint64_t session, mrec_track track, uint32_t source,
                            mrec_track_reason reason,

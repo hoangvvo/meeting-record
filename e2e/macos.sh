@@ -71,4 +71,16 @@ STATUS=$?
 set -e
 RECORDER_PID=""
 cat /tmp/meeting-record-selftest.log
-exit "$STATUS"
+if (( STATUS != 0 )); then exit "$STATUS"; fi
+
+python3 - "$TEMP_DIR" <<'PYTHON'
+import math, pathlib, struct, sys, wave
+for name, frequency in [("external", 997), ("own", 440), ("child", 880)]:
+    with wave.open(str(pathlib.Path(sys.argv[1]) / (name + ".wav")), "wb") as audio:
+        audio.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"".join(struct.pack("<h", round(12000 * math.sin(
+            2 * math.pi * frequency * frame / 48000))) for frame in range(48000 * 12)))
+PYTHON
+afplay "$TEMP_DIR/external.wav" &
+PLAYER_PID=$!
+MREC_EXCLUSION_FIXTURES="$TEMP_DIR" "$APP/Contents/MacOS/MrecSelfTest"

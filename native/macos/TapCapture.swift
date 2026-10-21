@@ -17,6 +17,8 @@ final class TapCapture {
     private var prepared = false
     private var started = false
     private var maximumFrameCount: UInt32 = 0
+    private var globalDescription: CATapDescription?
+    private let configurationLock = NSLock()
 
     private let stateBox: CaptureStateBox
     let identifier = UUID()
@@ -64,7 +66,10 @@ final class TapCapture {
         let description = try Self.makeTapDescription(pids: pids,
                                                       globalMixdown: globalMixdown,
                                                       mono: mono,
-                                                      muteCapturedOutput: muteCapturedOutput)
+                                                      muteCapturedOutput: muteCapturedOutput,
+                                                      excludedProcesses: globalMixdown
+                                                          ? AudioProcessRegistry.recorderProcessObjects() : [])
+        globalDescription = description.isExclusive ? description : nil
 
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapErr = AudioHardwareCreateProcessTap(description, &tap)
@@ -161,6 +166,9 @@ final class TapCapture {
 
     private func teardown() {
         removeMonitors()
+        configurationLock.lock()
+        defer { configurationLock.unlock() }
+        globalDescription = nil
         if let proc = ioProcID, aggregateID != kAudioObjectUnknown {
             if started { AudioDeviceStop(aggregateID, proc) }
             AudioDeviceDestroyIOProcID(aggregateID, proc)
@@ -181,6 +189,16 @@ final class TapCapture {
     }
 
     private func installMonitors() {
+        if globalDescription != nil {
+            var address = HAL.address(kAudioHardwarePropertyProcessObjectList)
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.refreshSystemExclusions()
+            }
+            if AudioObjectAddPropertyListenerBlock(HAL.system, &address, monitorQueue, block) == noErr {
+                monitors.append(PropertyMonitor(object: HAL.system, address: address, block: block))
+            }
+            refreshSystemExclusions()
+        }
         addMonitor(object: HAL.system,
                    address: HAL.address(kAudioHardwarePropertyDefaultOutputDevice),
                    cause: MREC_TRACK_REASON_DEVICE_CHANGED,
@@ -197,6 +215,23 @@ final class TapCapture {
                    address: HAL.address(kAudioTapPropertyFormat),
                    cause: MREC_TRACK_REASON_FORMAT_CHANGED,
                    reason: "process tap format changed")
+    }
+
+    private func refreshSystemExclusions() {
+        configurationLock.lock()
+        defer { configurationLock.unlock() }
+        guard let description = globalDescription, tapID != kAudioObjectUnknown else { return }
+        let processes = AudioProcessRegistry.recorderProcessObjects()
+        guard processes != description.processes else { return }
+        description.processes = processes
+        var updated = Unmanaged.passUnretained(description).toOpaque()
+        var address = HAL.address(kAudioTapPropertyDescription)
+        let status = AudioObjectSetPropertyData(tapID, &address, 0, nil,
+                                               UInt32(MemoryLayout<UnsafeMutableRawPointer>.size), &updated)
+        if status != noErr {
+            onConfigurationChange(identifier, MREC_TRACK_REASON_UNKNOWN,
+                                  "could not update recorder audio exclusions")
+        }
     }
 
     private func addMonitor(object: AudioObjectID,
@@ -228,15 +263,13 @@ final class TapCapture {
     static func makeTapDescription(pids: [pid_t],
                                    globalMixdown: Bool,
                                    mono: Bool,
-                                   muteCapturedOutput: Bool) throws -> CATapDescription {
+                                   muteCapturedOutput: Bool,
+                                   excludedProcesses: [AudioObjectID]) throws -> CATapDescription {
         let description: CATapDescription
-        let capturesGlobalMix = globalMixdown || pids.isEmpty
-
-        if capturesGlobalMix {
-            // Empty exclusion list taps everything the system plays.
+        if globalMixdown {
             description = mono
-                ? CATapDescription(monoGlobalTapButExcludeProcesses: [])
-                : CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+                ? CATapDescription(monoGlobalTapButExcludeProcesses: excludedProcesses)
+                : CATapDescription(stereoGlobalTapButExcludeProcesses: excludedProcesses)
         } else {
             // The tap API wants HAL process object ids, not Unix pids. Dead pids
             // resolve to objects that yield silence, so drop them first.
@@ -253,7 +286,7 @@ final class TapCapture {
         description.name = "meeting-record-tap"
         description.muteBehavior = muteCapturedOutput ? .muted : .unmuted
         // Exclusive means an exclusion list; an empty one captures all processes.
-        description.isExclusive = capturesGlobalMix
+        description.isExclusive = globalMixdown
         // Publish the tap UID so the private aggregate can resolve it.
         description.isPrivate = false
         return description

@@ -119,6 +119,18 @@ struct AudioProcess {
 }
 
 enum AudioProcessRegistry {
+    static func recorderProcessObjects() -> [AudioObjectID] {
+        let processes = all()
+        return recorderProcessObjects(in: processes, recorderPID: getpid(),
+                                      tree: ProcessTree.read(ancestorsOf: processes.map(\.pid)))
+    }
+
+    static func recorderProcessObjects(in processes: [AudioProcess], recorderPID: pid_t,
+                                       tree: ProcessTree) -> [AudioObjectID] {
+        processes.filter { tree.owner(of: $0.pid, among: [recorderPID]) != nil }
+            .map(\.objectID).sorted()
+    }
+
     /// Exclude stale HAL objects whose processes have exited.
     static func all() -> [AudioProcess] {
         HAL.array(HAL.system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self)

@@ -13,6 +13,7 @@ pub const MREC_ERR_DEVICE_FAILED: i32 = -7;
 pub const MREC_ERR_IOPROC_FAILED: i32 = -8;
 pub const MREC_ERR_BUFFER_TOO_SMALL: i32 = -10;
 
+pub const MREC_TRACK_SYSTEM_AUDIO: i32 = 0;
 pub const MREC_TRACK_MICROPHONE: i32 = 1;
 pub const MREC_TRACK_INTERRUPTED: i32 = 0;
 pub const MREC_TRACK_RESUMED: i32 = 1;
