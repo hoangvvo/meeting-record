@@ -22,7 +22,7 @@ extern "C" {
 
 typedef enum {
   MREC_OK = 0,
-  MREC_ERR_UNSUPPORTED_OS = -1, /* macOS < 14.2 / Windows < 10 19041 */
+  MREC_ERR_UNSUPPORTED_OS = -1, /* macOS < 14.2 / Windows build < 20348 */
   MREC_ERR_PERMISSION = -2,     /* TCC grant missing, or Windows privacy denies it */
   MREC_ERR_ALREADY_RUNNING = -3,
   MREC_ERR_NOT_RUNNING = -4,

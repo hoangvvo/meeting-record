@@ -7,7 +7,7 @@ Tested on macOS 26.5.1 (Apple silicon) and Windows 11 build 26200 (x86-64).
 | Platform | System audio                           | Microphone                                              |
 | -------- | -------------------------------------- | ------------------------------------------------------- |
 | macOS    | CoreAudio process tap (14.2+)          | `AVAudioEngine`, default input                          |
-| Windows  | WASAPI process loopback (build 19041+) | WASAPI shared mode, default input or automatic call mic |
+| Windows  | WASAPI process loopback (build 20348+) | WASAPI shared mode, default input or automatic call mic |
 
 - No virtual audio drivers. No ScreenCaptureKit.
 - macOS TCC state (`auth_value` 2 = allowed, 0 = denied):

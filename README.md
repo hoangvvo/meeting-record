@@ -23,10 +23,10 @@ Need an AI Note-taker? Check out [fireflies.ai](https://fireflies.ai/?utm_source
 
 ## Requirements
 
-| Platform | Minimum version | Architectures |
-| -------- | --------------- | ------------- |
-| macOS    | 14.2            | arm64, x86-64 |
-| Windows  | 10 build 19041  | arm64, x86-64 |
+| Platform | Minimum version  | Architectures |
+| -------- | ---------------- | ------------- |
+| macOS    | 14.2             | arm64, x86-64 |
+| Windows  | 11 / Server 2022 | arm64, x86-64 |
 
 macOS app requirements:
 

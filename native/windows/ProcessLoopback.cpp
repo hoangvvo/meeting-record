@@ -484,7 +484,7 @@ bool SupportsProcessLoopback() {
   version.dwOSVersionInfoSize = sizeof version;
   if (rtl_get_version(&version) != 0) return true;
   return version.dwMajorVersion > 10 ||
-         (version.dwMajorVersion == 10 && version.dwBuildNumber >= 19041);
+         (version.dwMajorVersion == 10 && version.dwBuildNumber >= 20348);
 }
 
 class Session {
@@ -505,7 +505,7 @@ public:
     ScopedComApartment apartment;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!SupportsProcessLoopback()) {
-      SetLastErrorMessage("WASAPI process loopback requires Windows build 19041 or newer");
+      SetLastErrorMessage("WASAPI process loopback requires Windows build 20348 or newer");
       return MREC_ERR_UNSUPPORTED_OS;
     }
     if (running_) {
