@@ -1,6 +1,6 @@
 {
   "name": "meeting-record",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "System-audio and microphone capture with meeting detection for macOS and Windows",
   "bugs": "https://github.com/hoangvvo/meeting-record/issues",
   "license": "MIT",
