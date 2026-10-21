@@ -85,6 +85,14 @@ swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGI
   "$ROOT/native/macos/"{TapCapture,CaptureState,AudioProcesses}.swift
 "$BUILD/tap_description_test" | tail -2
 
+echo "==> capture lifecycle tests"
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
+  -o "$BUILD/capture_lifecycle_test" \
+  "$ROOT/native/tests/capture_test_support.swift" \
+  "$ROOT/native/tests/capture_lifecycle_test.swift" \
+  "$ROOT/native/macos/Exports.swift" "$BUILD/tracks.o"
+"$BUILD/capture_lifecycle_test"
+
 echo "==> meetingtest"
 clang -O2 \
   -I"$ROOT/native/include" \

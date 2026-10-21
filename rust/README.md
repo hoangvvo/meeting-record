@@ -51,7 +51,7 @@ fn main() -> Result<(), Error> {
 
     // Or scan for active meetings at any time.
 
-    let Some(meeting) = meetings::scan()
+    let Some(meeting) = meetings::scan()?
         .into_iter()
         .find(|meeting| meeting.should_record)
     else {
@@ -61,7 +61,7 @@ fn main() -> Result<(), Error> {
     let recording = capture::start(
         CaptureTarget::Process { pid: meeting.pid },
         CaptureOptions {
-            microphone: Some(MicrophoneSource::Default),
+            microphone: Some(MicrophoneSource::Auto),
             ..CaptureOptions::default()
         },
     )?;
@@ -79,17 +79,21 @@ fn main() -> Result<(), Error> {
             }
         });
 
-        // A lost source never stops the recording; its track resumes when it returns.
+        // Lost devices recover without ending the session; exited apps need a new target.
         scope.spawn(|| {
             while let Some(event) = recording.recv_event() {
                 match event {
                     TrackEvent::Interrupted { track, reason, .. } => {
                         eprintln!("{track:?} interrupted: {reason:?}")
                     }
-                    TrackEvent::Resumed { track } => println!("{track:?} resumed"),
+                    TrackEvent::Resumed { track, .. } => println!("{track:?} resumed"),
                     TrackEvent::DeviceChanged { device_name, .. } => {
                         println!("microphone: {device_name}")
                     }
+                    TrackEvent::Degraded { track, reason, .. } => {
+                        eprintln!("{track:?} partially unavailable: {reason:?}")
+                    }
+                    _ => {}
                 }
             }
         });
@@ -108,8 +112,8 @@ fn main() -> Result<(), Error> {
 
 - `meetings::audio_apps()`: applications doing audio IO, for a source picker.
 - Use an entry's `pid` with `CaptureTarget::Process`; no meeting scan or Accessibility grant needed.
-- Windows: the target includes future child processes.
-- macOS: the target includes current audio helpers; restart capture if they change.
+- Windows follows future child processes; macOS refreshes audio helpers about once a second.
+- A relaunched app requires a new capture session.
 
 ## Mixed output
 
@@ -118,7 +122,7 @@ use std::io::Write;
 use meeting_record::{capture, CaptureOptions, CaptureTarget, MicrophoneSource, MixedAudioOptions};
 
 let recording = capture::start(CaptureTarget::System, CaptureOptions {
-    microphone: Some(MicrophoneSource::Default),
+    microphone: Some(MicrophoneSource::Auto),
     mix: Some(MixedAudioOptions { sample_rate: 24_000 }),
     ..CaptureOptions::default()
 })?;
@@ -141,3 +145,25 @@ while let Some(chunk) = mixed.recv() {
 ## License
 
 [MIT](./LICENSE.md) © Hoang Vo
+
+## Availability and compatibility
+
+`AudioTrack::availability()` distinguishes `Live`, `Degraded` (some sources missing),
+and `Interrupted` (none available). `is_interrupted()` is true only for the latter.
+Availability is independent of pause/stop; after stop it is the last observed state.
+Stopping preserves captured packets, including the native backend's final flush.
+Drain outputs until `None` to consume the tail.
+
+`MicrophoneSource::Default` follows the OS default input. `Auto` prefers the captured
+app's microphone on Windows, then the communications default; macOS follows its
+system default input. Explicitly requested sources must be available at startup;
+later device loss recovers independently while the session remains alive.
+
+Mixed output omits intervals over one second in which every input was absent;
+a missing input contributes silence while another track continues. Raw packets
+retain their original host timestamps for wall-clock alignment.
+
+Changes from 0.1.1: `meetings::scan()`, `audio_apps()`, and `audio_processes()` return
+`Result` so enumeration errors stay distinguishable from an empty list. Use `?` to
+propagate failures. Use `MicrophoneSource::Auto` for the previous Windows selection
+policy. Match public track events with a fallback arm for future event types.

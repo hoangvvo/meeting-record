@@ -710,11 +710,6 @@ mrec_status mrec_start_meeting(const mrec_meeting *meeting,
   auto fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
     return item.pid == meeting->pid;
   });
-  if (fresh == current.end()) {
-    fresh = std::find_if(current.begin(), current.end(), [meeting](const Detected &item) {
-      return item.platform == meeting->platform;
-    });
-  }
   std::vector<uint32_t> targets;
   if (fresh != current.end()) {
     targets.push_back(fresh->pid);

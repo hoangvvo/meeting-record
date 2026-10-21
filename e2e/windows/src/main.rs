@@ -372,7 +372,7 @@ fn frequencies(name: &str) -> Result<Vec<f64>, Box<dyn StdError>> {
 
 /// The app of a meeting that both a scan and the watcher report as recordable.
 fn find_meeting(platform: &str, pid: Option<u32>) -> Result<CaptureTarget, Box<dyn StdError>> {
-    let found = meetings::scan();
+    let found = meetings::scan()?;
     for meeting in &found {
         println!("scan: {meeting:?}");
     }
@@ -488,7 +488,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
     };
     let options = CaptureOptions {
         mono: enabled("MREC_MONO"),
-        microphone: include_microphone.then_some(MicrophoneSource::Default),
+        microphone: include_microphone.then_some(MicrophoneSource::Auto),
         mix: mix_sample_rate.map(|sample_rate| MixedAudioOptions { sample_rate }),
         ..CaptureOptions::default()
     };

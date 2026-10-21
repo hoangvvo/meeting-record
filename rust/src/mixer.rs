@@ -46,11 +46,19 @@ impl PcmMixer {
     }
 
     pub(crate) fn write(&mut self, source: usize, chunk: &AudioChunk) {
-        let samples = self.inputs[source].resampler.resample(chunk);
         let origin = *self.origin.get_or_insert(chunk.host_time_ns);
         let elapsed = i128::from(chunk.host_time_ns) - i128::from(origin);
-        let position = self.origin_frame
+        let mut position = self.origin_frame
             + (elapsed as f64 * f64::from(self.sample_rate) / 1e9 + 0.5).floor() as i64;
+        // Omit long intervals in which every source was absent. Preserve
+        // single-source gaps while another track continues on the same clock.
+        if position > self.end + i64::from(self.sample_rate) {
+            self.finish_segment();
+            self.restart();
+            self.origin = Some(chunk.host_time_ns);
+            position = self.origin_frame;
+        }
+        let samples = self.inputs[source].resampler.resample(chunk);
         let input = &mut self.inputs[source];
         // Absorb up to 20 ms of callback-clock jitter at packet joins.
         if input.cursor.is_none_or(|cursor| {
@@ -282,6 +290,30 @@ mod tests {
     }
 
     #[test]
+    fn long_gaps_in_every_source_do_not_backfill_silence() {
+        let mut mixer = PcmMixer::new(100, 1);
+        for timestamp in [0, 60_000_000_000] {
+            mixer.write(
+                0,
+                &AudioChunk {
+                    frames: vec![0.25; 10],
+                    sample_rate: 100.0,
+                    channels: 1,
+                    frame_count: 10,
+                    host_time_ns: timestamp,
+                    dropped_samples: 0,
+                },
+            );
+        }
+        mixer.finish_segment();
+        let mut bytes = 0;
+        while let Some(chunk) = mixer.read() {
+            bytes += chunk.pcm.len();
+        }
+        assert_eq!(bytes, 40);
+    }
+
+    #[test]
     fn aligns_rates_mutes_microphone_and_removes_pause() {
         let mut mixer = PcmMixer::new(24_000, 2);
         mixer.write(1, &chunk(vec![0.5; 240], 1, 24_000.0, 0));
@@ -302,14 +334,26 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_insert_sparse_silence() {
+    fn missing_source_does_not_remove_time_while_another_keeps_recording() {
+        let mut mixer = PcmMixer::new(100, 2);
+        mixer.write(1, &chunk(vec![0.25; 10], 1, 100.0, 0));
+        for index in 0..=60 {
+            mixer.write(0, &chunk(vec![0.25; 10], 1, 100.0, index * 100_000_000));
+        }
+        mixer.write(1, &chunk(vec![0.25; 10], 1, 100.0, 6_000_000_000));
+        mixer.finish_segment();
+        assert_eq!(drain(&mut mixer).len(), 610);
+    }
+
+    #[test]
+    fn short_timestamp_gaps_insert_sparse_silence() {
         let mut mixer = PcmMixer::new(100, 1);
         mixer.write(0, &chunk(vec![0.5; 5], 1, 100.0, 1_000_000_000));
-        mixer.write(0, &chunk(vec![0.5; 5], 1, 100.0, 3_000_000_000));
+        mixer.write(0, &chunk(vec![0.5; 5], 1, 100.0, 1_500_000_000));
         mixer.finish_segment();
         let samples = drain(&mut mixer);
-        assert_eq!(samples.len(), 205);
-        assert!(samples[5..200].iter().all(|sample| *sample == 0));
+        assert_eq!(samples.len(), 55);
+        assert!(samples[5..50].iter().all(|sample| *sample == 0));
     }
 
     #[test]

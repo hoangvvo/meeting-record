@@ -69,11 +69,14 @@ macOS app requirements:
 
 - **Process target:** recommended; the meeting app and its helpers.
 - **System target:** all application audio.
-- **Microphone:** opt-in. Windows: the mic the captured app uses, else the communications default. macOS: the default input.
-- A lost source never stops a recording: its track is interrupted and retried until it returns.
-- Tracks report `interrupted` (with a reason) and `resumed`; the microphone reports `devicechange`.
-- Every captured app exiting interrupts system audio (`app-exited`).
-- **Mixed output:** optional mono s16le from both bindings.
+- **Microphone:** opt-in. `default` follows the OS default input on both platforms. `auto` prefers the captured app's mic on Windows, falling back to the communications default; macOS uses its default input.
+- A lost device never stops a recording: its track is retried until the device returns. Explicitly requested sources must be available at startup.
+- Track availability is `live`, `degraded` (some sources missing), or `interrupted` (none available). Tracks report these transitions; the microphone also reports `devicechange`.
+- Every captured app exiting interrupts system audio (`app-exited`); the microphone and session remain alive. A relaunched app is a new process target and requires a new capture session.
+- Process capture follows replacement audio helpers within the selected app's lifetime. macOS refreshes helpers about once a second; Windows follows child processes.
+- **Mixed output:** optional mono s16le from both bindings. A missing input contributes silence while another input continues. Intervals over one second with no input from any track are omitted, so recovery does not backfill a long silence. Raw packet timestamps retain the original clock.
+- Stop preserves captured audio; drain each output to its end to consume the final tail.
+- Node raw tracks yield `{ pcm, hostTimeNs, frameCount, sampleRate, channels, droppedSamples }` packets. `mixedAudio` yields byte buffers.
 - Source pickers: [`meetings.audioApps()`](./node/README.md#audio-apps) (Node.js), [`meetings::audio_apps()`](./rust/README.md#audio-apps) (Rust).
 
 ## Troubleshooting

@@ -71,7 +71,11 @@ class TrackMetrics {
 
   /** @param {MeetingRecord.AudioChunk} chunk */
   add(chunk) {
-    const frames = new Float32Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 4);
+    const frames = new Float32Array(
+      chunk.pcm.buffer,
+      chunk.pcm.byteOffset,
+      chunk.pcm.byteLength / 4,
+    );
     if (
       frames.length !== chunk.frameCount * chunk.channels ||
       chunk.channels === 0 ||
@@ -389,7 +393,7 @@ async function main() {
   };
   const options = {
     mono: enabled("MREC_MONO"),
-    ...(includeMicrophone ? { microphone: "default" } : {}),
+    ...(includeMicrophone ? { microphone: "auto" } : {}),
     ...(mixSampleRate === undefined ? {} : { mix: { sampleRate: mixSampleRate } }),
   };
 

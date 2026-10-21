@@ -99,7 +99,7 @@ fn check(status: i32) -> Result<(), Error> {
 
 fn error_detail(status: i32) -> String {
     let detail = last_error();
-    if detail.is_empty() {
+    if detail.is_empty() || detail == "no error" {
         default_error_message(status).to_owned()
     } else {
         detail
@@ -342,18 +342,18 @@ impl From<&RawProcess> for AudioProcess {
 }
 
 /// Every live process doing audio IO.
-fn list_audio_processes() -> Vec<AudioProcess> {
+fn list_audio_processes() -> Result<Vec<AudioProcess>, Error> {
     collect_processes(sys::mrec_list_audio_processes)
 }
 
 /// Applications doing audio IO, with helper processes folded into their app.
-fn list_audio_apps() -> Vec<AudioProcess> {
+fn list_audio_apps() -> Result<Vec<AudioProcess>, Error> {
     collect_processes(sys::mrec_list_audio_apps)
 }
 
 fn collect_processes(
     list: unsafe extern "C" fn(*mut RawProcess, usize, *mut usize) -> std::os::raw::c_int,
-) -> Vec<AudioProcess> {
+) -> Result<Vec<AudioProcess>, Error> {
     let mut buffer = vec![
         RawProcess {
             pid: 0,
@@ -365,9 +365,15 @@ fn collect_processes(
         256
     ];
     let mut count = 0usize;
-    unsafe { list(buffer.as_mut_ptr(), buffer.len(), &mut count) };
-
-    buffer.iter().take(count).map(AudioProcess::from).collect()
+    loop {
+        let status = unsafe { list(buffer.as_mut_ptr(), buffer.len(), &mut count) };
+        if status == sys::MREC_ERR_BUFFER_TOO_SMALL {
+            buffer.resize(buffer.len() * 2, unsafe { mem::zeroed::<RawProcess>() });
+            continue;
+        }
+        check(status)?;
+        return Ok(buffer.iter().take(count).map(AudioProcess::from).collect());
+    }
 }
 
 /// Conferencing platform.
@@ -457,11 +463,18 @@ impl From<&RawMeeting> for Meeting {
 }
 
 /// Point-in-time scan, highest confidence first.
-fn scan_meetings() -> Vec<Meeting> {
-    let mut buffer = [unsafe { mem::zeroed::<RawMeeting>() }; 16];
+fn scan_meetings() -> Result<Vec<Meeting>, Error> {
+    let mut buffer = vec![unsafe { mem::zeroed::<RawMeeting>() }; 16];
     let mut count = 0usize;
-    unsafe { sys::mrec_scan(buffer.as_mut_ptr(), buffer.len(), &mut count) };
-    buffer.iter().take(count).map(Meeting::from).collect()
+    loop {
+        let status = unsafe { sys::mrec_scan(buffer.as_mut_ptr(), buffer.len(), &mut count) };
+        if status == sys::MREC_ERR_BUFFER_TOO_SMALL {
+            buffer.resize(buffer.len() * 2, unsafe { mem::zeroed::<RawMeeting>() });
+            continue;
+        }
+        check(status)?;
+        return Ok(buffer.iter().take(count).map(Meeting::from).collect());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -576,7 +589,11 @@ pub enum CaptureTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrophoneSource {
+    /// Follow the OS default input device.
     Default,
+    /// Prefer the captured app's microphone on Windows, then its communications
+    /// default. On macOS, follow the default input device.
+    Auto,
 }
 
 #[derive(Debug, Clone)]
@@ -619,6 +636,7 @@ pub enum Track {
 
 /// Why a track was interrupted, after WASAPI's session disconnect reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InterruptionReason {
     /// Unplugged, disabled, or none left.
     DeviceRemoved,
@@ -645,12 +663,12 @@ impl From<i32> for InterruptionReason {
     }
 }
 
-/// A source change. A lost source never stops the recording: its track is
-/// interrupted and retried until the source returns, like an
-/// `AVCaptureSession` interruption.
+/// Source availability changes independently of recording pause and stop.
+/// Lost devices are retried; exited apps require selecting a new process target.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrackEvent {
-    /// No audio until `Resumed`; the track's timestamps show the gap.
+    /// No source is available; `Degraded` or `Resumed` reports recovery.
     Interrupted {
         track: Track,
         reason: InterruptionReason,
@@ -658,6 +676,12 @@ pub enum TrackEvent {
     },
     Resumed {
         track: Track,
+    },
+    /// Some sources are unavailable; the others continue delivering audio.
+    Degraded {
+        track: Track,
+        reason: InterruptionReason,
+        message: String,
     },
     /// The microphone moved to another device.
     DeviceChanged {
@@ -669,7 +693,7 @@ pub enum TrackEvent {
 /// What a track's events have said so far.
 #[derive(Default)]
 struct TrackStatus {
-    interrupted: AtomicBool,
+    availability: AtomicUsize,
     device_name: Mutex<Option<String>>,
 }
 
@@ -745,7 +769,7 @@ unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_
     };
     let event = match event.kind {
         sys::MREC_TRACK_INTERRUPTED => {
-            status.interrupted.store(true, Ordering::Release);
+            status.availability.store(2, Ordering::Release);
             TrackEvent::Interrupted {
                 track,
                 reason: event.reason.into(),
@@ -753,10 +777,18 @@ unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_
             }
         }
         sys::MREC_TRACK_RESUMED => {
-            status.interrupted.store(false, Ordering::Release);
+            status.availability.store(0, Ordering::Release);
             TrackEvent::Resumed { track }
         }
-        _ => {
+        sys::MREC_TRACK_DEGRADED => {
+            status.availability.store(1, Ordering::Release);
+            TrackEvent::Degraded {
+                track,
+                reason: event.reason.into(),
+                message: c_string(&event.message),
+            }
+        }
+        sys::MREC_TRACK_DEVICE_CHANGED => {
             let device_name = c_string(&event.device_name);
             *status
                 .device_name
@@ -764,6 +796,7 @@ unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_
                 .unwrap_or_else(|error| error.into_inner()) = Some(device_name.clone());
             TrackEvent::DeviceChanged { track, device_name }
         }
+        _ => return,
     };
     context.queue.push(event);
 }
@@ -1029,6 +1062,14 @@ impl TrackQueue {
     }
 }
 
+/// Availability of a track's sources, independent of pause and stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackAvailability {
+    Live,
+    Degraded,
+    Interrupted,
+}
+
 /// One interleaved float32 PCM track.
 pub struct AudioTrack {
     sample_rate: f64,
@@ -1061,9 +1102,17 @@ impl AudioTrack {
         self.queue.recv()
     }
 
-    /// True while the source is lost and being reopened.
+    /// True when none of this track's sources are available.
     pub fn is_interrupted(&self) -> bool {
-        self.status.interrupted.load(Ordering::Acquire)
+        self.availability() == TrackAvailability::Interrupted
+    }
+
+    pub fn availability(&self) -> TrackAvailability {
+        match self.status.availability.load(Ordering::Acquire) {
+            1 => TrackAvailability::Degraded,
+            2 => TrackAvailability::Interrupted,
+            _ => TrackAvailability::Live,
+        }
     }
 
     /// The microphone in use; `None` for system audio.
@@ -1169,6 +1218,12 @@ impl CaptureControl {
     }
 
     fn stop(&self) {
+        self.stop_with(|| {
+            unsafe { sys::mrec_stop() };
+        });
+    }
+
+    fn stop_with(&self, stop_native: impl FnOnce()) {
         let _guard = self
             .lifecycle
             .lock()
@@ -1177,9 +1232,11 @@ impl CaptureControl {
         if state & STATE_MASK == STATE_STOPPED {
             return;
         }
+        // Native stop can deliver the Windows mixer's final partial block.
+        // Keep accepting callbacks until it guarantees production has ended.
+        stop_native();
         self.state
             .store((state & !STATE_MASK) | STATE_STOPPED, Ordering::Release);
-        unsafe { sys::mrec_stop() };
         for queue in &self.queues {
             queue.close();
         }
@@ -1345,6 +1402,7 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
                 0,
                 match options.microphone {
                     Some(MicrophoneSource::Default) => 1,
+                    Some(MicrophoneSource::Auto) => 2,
                     None => 0,
                 },
                 Some(audio_trampoline),
@@ -1427,18 +1485,18 @@ pub mod meetings {
     use super::{AudioProcess, Error, Meeting, MeetingEvent, Watcher};
 
     /// Every live process doing audio IO.
-    pub fn audio_processes() -> Vec<AudioProcess> {
+    pub fn audio_processes() -> Result<Vec<AudioProcess>, Error> {
         super::list_audio_processes()
     }
 
     /// Applications doing audio IO, grouped by owning PID, including helpers.
     /// Pass `pid` to capture the app; no meeting scan or Accessibility grant is needed.
-    pub fn audio_apps() -> Vec<AudioProcess> {
+    pub fn audio_apps() -> Result<Vec<AudioProcess>, Error> {
         super::list_audio_apps()
     }
 
     /// Point-in-time scan, highest confidence first.
-    pub fn scan() -> Vec<Meeting> {
+    pub fn scan() -> Result<Vec<Meeting>, Error> {
         super::scan_meetings()
     }
 
@@ -1649,6 +1707,45 @@ mod capture_tests {
         assert_eq!(mixed.try_recv().unwrap().audio.frames, samples);
         assert!(raw.try_recv().is_none());
         assert!(mixed.try_recv().is_none());
+    }
+
+    #[test]
+    fn stopping_retains_native_flush_callbacks_but_paused_capture_does_not() {
+        use super::{audio_trampoline, CaptureControl, EventQueue, TrackCallbackContext};
+        use std::sync::{Arc, Mutex};
+        for phase in [STATE_RECORDING, STATE_PAUSED] {
+            let state = Arc::new(AtomicUsize::new(phase));
+            let queue = Arc::new(TrackQueue::new());
+            let context = TrackCallbackContext {
+                queue: queue.clone(),
+                mix_queue: None,
+                state: state.clone(),
+            };
+            let control = CaptureControl {
+                state,
+                queues: vec![queue.clone()],
+                raw_queues: vec![queue.clone()],
+                events: Arc::new(EventQueue::default()),
+                lifecycle: Mutex::new(()),
+            };
+            control.stop_with(|| unsafe {
+                audio_trampoline(
+                    [0.25f32, -0.5].as_ptr(),
+                    2,
+                    1,
+                    48000.0,
+                    42,
+                    (&context as *const TrackCallbackContext).cast_mut().cast(),
+                );
+            });
+            let packet = queue.recv();
+            if phase == STATE_RECORDING {
+                assert_eq!(packet.unwrap().frames, [0.25, -0.5]);
+            } else {
+                assert!(packet.is_none());
+            }
+            assert!(queue.recv().is_none());
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 #include "meeting-record.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -18,13 +19,16 @@ enum {
 };
 
 typedef struct {
-  /* One bit per stopped source; the top bit is the whole track. */
-  uint64_t stopped;
+  unsigned char *stopped;
+  size_t source_count;
+  size_t stopped_count;
+  int whole_stopped;
   char device_name[256];
 } Track;
 
 static Track g_tracks[kTrackCount];
 static int g_open;
+static uint64_t g_session;
 static mrec_track_event_callback g_callback;
 static void *g_user_data;
 
@@ -59,9 +63,17 @@ static uint64_t HostTimeNs(void) {
 }
 #endif
 
-static uint64_t SourceBit(uint32_t source) {
-  if (source == MREC_TRACK_WHOLE) return 1ull << 63;
-  return 1ull << (source < 63 ? source : 62);
+static int IsSession(uint64_t session) { return g_open && session == g_session; }
+
+/* 0 = live, 1 = degraded, 2 = interrupted. Caller holds the lock. */
+static int Availability(const Track *track) {
+  if (track->whole_stopped || track->stopped_count == track->source_count) return 2;
+  return track->stopped_count ? 1 : 0;
+}
+
+static void ClearTracks(void) {
+  for (int index = 0; index < kTrackCount; index++) free(g_tracks[index].stopped);
+  memset(g_tracks, 0, sizeof g_tracks);
 }
 
 static int IsTrack(mrec_track track) { return (int)track >= 0 && (int)track < kTrackCount; }
@@ -81,58 +93,91 @@ static void Publish(mrec_track track, mrec_track_event_type type, mrec_track_rea
   g_callback(&event, g_user_data);
 }
 
-void mrec_tracks_open(mrec_track_event_callback callback, void *user_data) {
+uint64_t mrec_tracks_open(mrec_track_event_callback callback, void *user_data) {
   Lock();
-  memset(g_tracks, 0, sizeof g_tracks);
+  ClearTracks();
+  if (++g_session == 0) ++g_session;
   g_open = 1;
   g_callback = callback;
   g_user_data = user_data;
+  const uint64_t session = g_session;
   Unlock();
+  return session;
 }
 
 void mrec_tracks_close(void) {
   Lock();
-  memset(g_tracks, 0, sizeof g_tracks);
+  ClearTracks();
   g_open = 0;
   g_callback = NULL;
   g_user_data = NULL;
   Unlock();
 }
 
-void mrec_track_started(mrec_track track, const char *device_name) {
-  if (!IsTrack(track)) return;
+int32_t mrec_track_started(uint64_t session, mrec_track track, size_t source_count,
+                           const char *device_name) {
+  if (!IsTrack(track) || source_count == 0) return 0;
+  unsigned char *sources = (unsigned char *)calloc(source_count, 1);
+  if (!sources) return 0;
   Lock();
-  g_tracks[track].stopped = 0;
-  snprintf(g_tracks[track].device_name, sizeof g_tracks[track].device_name, "%s",
-           device_name ? device_name : "");
+  if (!IsSession(session)) {
+    Unlock();
+    free(sources);
+    return 0;
+  }
+  Track *state = &g_tracks[track];
+  free(state->stopped);
+  memset(state, 0, sizeof *state);
+  state->stopped = sources;
+  state->source_count = source_count;
+  snprintf(state->device_name, sizeof state->device_name, "%s", device_name ? device_name : "");
   Unlock();
+  return 1;
 }
 
-void mrec_track_interrupted(mrec_track track, uint32_t source, mrec_track_reason reason,
-                            const char *message) {
+void mrec_track_interrupted(uint64_t session, mrec_track track, uint32_t source,
+                            mrec_track_reason reason, const char *message) {
   if (!IsTrack(track)) return;
   Lock();
-  if (g_open) {
-    const uint64_t stopped = g_tracks[track].stopped;
-    g_tracks[track].stopped |= SourceBit(source);
-    if (stopped == 0) Publish(track, MREC_TRACK_INTERRUPTED, reason, message);
+  Track *state = &g_tracks[track];
+  if (IsSession(session) && state->source_count) {
+    const int previous = Availability(state);
+    if (source == MREC_TRACK_WHOLE) {
+      state->whole_stopped = 1;
+    } else if (source < state->source_count && !state->stopped[source]) {
+      state->stopped[source] = 1;
+      state->stopped_count++;
+    }
+    const int current = Availability(state);
+    if (current != previous) {
+      Publish(track, current == 2 ? MREC_TRACK_INTERRUPTED : MREC_TRACK_DEGRADED,
+              reason, message);
+    }
   }
   Unlock();
 }
 
-void mrec_track_resumed(mrec_track track, uint32_t source, const char *device_name) {
+void mrec_track_resumed(uint64_t session, mrec_track track, uint32_t source,
+                        const char *device_name) {
   if (!IsTrack(track)) return;
   Lock();
-  if (g_open) {
-    Track *state = &g_tracks[track];
+  Track *state = &g_tracks[track];
+  if (IsSession(session) && state->source_count) {
     if (device_name && *device_name && strcmp(device_name, state->device_name) != 0) {
       snprintf(state->device_name, sizeof state->device_name, "%s", device_name);
       Publish(track, MREC_TRACK_DEVICE_CHANGED, MREC_TRACK_REASON_UNKNOWN, NULL);
     }
-    const uint64_t stopped = state->stopped;
-    state->stopped &= ~SourceBit(source);
-    if (stopped != 0 && state->stopped == 0) {
-      Publish(track, MREC_TRACK_RESUMED, MREC_TRACK_REASON_UNKNOWN, NULL);
+    const int previous = Availability(state);
+    if (source == MREC_TRACK_WHOLE) {
+      state->whole_stopped = 0;
+    } else if (source < state->source_count && state->stopped[source]) {
+      state->stopped[source] = 0;
+      state->stopped_count--;
+    }
+    const int current = Availability(state);
+    if (current != previous) {
+      Publish(track, current == 0 ? MREC_TRACK_RESUMED : MREC_TRACK_DEGRADED,
+              MREC_TRACK_REASON_UNKNOWN, NULL);
     }
   }
   Unlock();
@@ -145,20 +190,25 @@ uint32_t mrec_track_retry_delay_ms(uint32_t failures) {
   return delay < limit ? delay : limit;
 }
 
-int32_t mrec_track_recover(mrec_track track, uint32_t source, mrec_track_reason reason,
+int32_t mrec_track_recover(uint64_t session, mrec_track track, uint32_t source,
+                           mrec_track_reason reason,
                            const char *message, mrec_track_attempt attempt,
                            mrec_track_wait wait, void *context) {
+  Lock();
+  const int active = IsSession(session);
+  Unlock();
+  if (!active) return 0;
   char device_name[256] = "";
   if (attempt(context, device_name, sizeof device_name)) {
-    mrec_track_resumed(track, source, device_name);
+    mrec_track_resumed(session, track, source, device_name);
     return 1;
   }
-  mrec_track_interrupted(track, source, reason, message);
+  mrec_track_interrupted(session, track, source, reason, message);
   for (uint32_t failures = 0;; failures++) {
     if (!wait(context, mrec_track_retry_delay_ms(failures))) return 0;
     device_name[0] = '\0';
     if (attempt(context, device_name, sizeof device_name)) {
-      mrec_track_resumed(track, source, device_name);
+      mrec_track_resumed(session, track, source, device_name);
       return 1;
     }
   }

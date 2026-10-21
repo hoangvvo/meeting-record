@@ -73,12 +73,13 @@ export type CaptureTarget =
       type: "system";
     };
 
-export type MicrophoneSource = "default";
+/** default: OS input; auto: prefer the captured app's mic on Windows. */
+export type MicrophoneSource = "default" | "auto";
 
 export interface CaptureOptions {
   /** Mono mixdown for system audio. Default true. */
   mono?: boolean;
-  /** Capture the default microphone as a separate track. Default off. */
+  /** Capture a microphone as a separate track. Default off. */
   microphone?: MicrophoneSource;
   /** Additional mono s16le output, aligned and resampled to the requested rate. */
   mix?: MixedAudioOptions;
@@ -102,9 +103,39 @@ export class AlreadyRunningError extends MeetingRecordError {}
 export class CaptureError extends MeetingRecordError {}
 export class InternalError extends MeetingRecordError {}
 
-let cachedNative: any;
+interface NativeFormat {
+  sampleRate: number;
+  channels: number;
+  deviceName?: string;
+}
+interface NativeBinding {
+  audioPermissionStatus(): PermissionStatus;
+  microphonePermissionStatus(): PermissionStatus;
+  accessibilityPermissionStatus(): PermissionStatus;
+  requestAudioPermission(): number;
+  requestMicrophonePermission(): number;
+  requestAccessibilityPermission(): number;
+  scan(): Promise<Meeting[]>;
+  listAudioProcesses(): AudioProcess[];
+  listAudioApps(): AudioProcess[];
+  watchStart(callback: (event: keyof MeetingEvents, meeting: Meeting) => void): number;
+  watchStop(): number;
+  isWatching(): boolean;
+  isRunning(): boolean;
+  captureStart(
+    options: { pid?: number; systemWide?: true; mono: boolean; microphone: number },
+    systemAudio: (pcm: Buffer, info: NativeAudioInfo) => void,
+    microphone: (pcm: Buffer, info: NativeAudioInfo) => void,
+    event: (event: NativeTrackEvent) => void,
+  ): Promise<{ systemAudio: NativeFormat; microphone?: NativeFormat }>;
+  captureStop(): Promise<void>;
+  capturePause(): void;
+  captureResume(): void;
+  captureSetConsumerReady(microphone: boolean, ready: boolean): void;
+}
+let cachedNative: NativeBinding | undefined;
 
-function getNative(): any {
+function getNative(): NativeBinding {
   if (cachedNative) return cachedNative;
   if (
     (process.platform !== "darwin" && process.platform !== "win32") ||
@@ -118,7 +149,9 @@ function getNative(): any {
 
   // Defer loading so other platforms can install and import the JavaScript API.
   // node-gyp-build selects a bundled binary or a local development build.
-  const loadNative = createRequire(import.meta.url)("node-gyp-build") as (root: string) => any;
+  const loadNative = createRequire(import.meta.url)("node-gyp-build") as (
+    root: string,
+  ) => NativeBinding;
   cachedNative = loadNative(fileURLToPath(new URL("..", import.meta.url)));
   return cachedNative;
 }
@@ -204,10 +237,6 @@ export const permissions = {
   },
 };
 
-function toMeeting(raw: any): Meeting {
-  return raw as Meeting;
-}
-
 export interface MeetingEvents {
   started: (meeting: Meeting) => void;
   updated: (meeting: Meeting) => void;
@@ -217,16 +246,19 @@ export interface MeetingEvents {
 class Meetings extends EventEmitter {
   /** Point-in-time scan, highest confidence first. */
   async scan(): Promise<Meeting[]> {
-    const meetings: unknown[] = await getNative().scan();
-    return meetings.map(toMeeting);
+    try {
+      return await getNative().scan();
+    } catch (error) {
+      throw asLibraryError(error);
+    }
   }
 
   /** Begin emitting `started` / `updated` / `ended`. */
   watch(): void {
     const native = getNative();
     if (native.isWatching()) return;
-    const status = native.watchStart((event: keyof MeetingEvents, raw: any) => {
-      this.emit(event, toMeeting(raw));
+    const status = native.watchStart((event, meeting) => {
+      this.emit(event, meeting);
     });
     if (status !== 0) throw errorFromStatus("failed to start watching", status);
   }
@@ -242,7 +274,11 @@ class Meetings extends EventEmitter {
 
   /** Every process doing audio IO. */
   audioProcesses(): AudioProcess[] {
-    return getNative().listAudioProcesses();
+    try {
+      return getNative().listAudioProcesses();
+    } catch (error) {
+      throw asLibraryError(error);
+    }
   }
 
   /**
@@ -250,7 +286,11 @@ class Meetings extends EventEmitter {
    * Pass `pid` as a process target; no meeting scan or Accessibility grant is needed.
    */
   audioApps(): AudioProcess[] {
-    return getNative().listAudioApps();
+    try {
+      return getNative().listAudioApps();
+    } catch (error) {
+      throw asLibraryError(error);
+    }
   }
 }
 
@@ -289,7 +329,9 @@ export interface AudioFormat {
  * system and microphone tracks, so callers can align or echo-cancel them without
  * relying on callback arrival order.
  */
-export interface AudioChunk extends Buffer {
+export interface AudioChunk {
+  /** Interleaved float32 PCM. Packet boundaries and metadata survive iteration. */
+  readonly pcm: Buffer;
   readonly hostTimeNs: bigint;
   readonly frameCount: number;
   readonly sampleRate: number;
@@ -297,13 +339,17 @@ export interface AudioChunk extends Buffer {
   readonly droppedSamples: number;
 }
 
+export type TrackAvailability = "live" | "degraded" | "interrupted";
+
 export interface AudioTrack extends Readable {
+  readonly availability: TrackAvailability;
+  [Symbol.asyncIterator](): NodeJS.AsyncIterator<AudioChunk>;
   /** Current negotiated format; a `format` event announces changes. */
   readonly sampleRate: number;
   readonly channels: number;
   /** Interleaved samples discarded because the bounded queue could not accept them. */
   readonly droppedSamples: number;
-  /** True while the source is lost and being reopened, like `MediaStreamTrack.muted`. */
+  /** True when none of this track's sources are available. */
   readonly interrupted: boolean;
   /** The microphone in use; undefined for system audio. */
   readonly deviceName?: string;
@@ -311,19 +357,21 @@ export interface AudioTrack extends Readable {
   on(event: "drop", listener: (droppedSamples: number) => void): this;
   /** Emitted before the first chunk in a newly negotiated device format. */
   on(event: "format", listener: (format: AudioFormat) => void): this;
-  /** The source stopped. Recording continues; it is retried until it returns. */
+  /** No source is available. Lost devices are retried; exited apps require a new target. */
   on(
     event: "interrupted",
     listener: (reason: TrackInterruptionReason, message: string) => void,
   ): this;
   on(event: "resumed", listener: () => void): this;
+  /** Some sources are lost; remaining sources continue delivering audio. */
+  on(event: "degraded", listener: (reason: TrackInterruptionReason, message: string) => void): this;
   /** The microphone moved to another device. */
   on(event: "devicechange", listener: (deviceName: string) => void): this;
   on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
 /** A lost source interrupts its track; the session records until stopped. */
-export interface CaptureSession extends EventEmitter {
+export interface CaptureSession {
   readonly systemAudio: AudioTrack;
   readonly microphone?: AudioTrack;
   readonly mixedAudio?: MixedAudio;
@@ -346,11 +394,11 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   #mixReady = true;
   #mixConsumer: ((chunk: AudioChunk) => void) | undefined;
   #finished = false;
-  #interrupted = false;
+  #availability: TrackAvailability = "live";
   #deviceName?: string;
 
   constructor(sampleRate: number, channels: number, microphone: boolean, deviceName?: string) {
-    super({ objectMode: false, highWaterMark: 1 << 20 });
+    super({ objectMode: true, highWaterMark: 32 });
     this.#sampleRate = sampleRate;
     this.#channels = channels;
     this.#microphone = microphone;
@@ -387,8 +435,16 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     return this.#droppedSamples;
   }
 
+  get availability(): TrackAvailability {
+    return this.#availability;
+  }
+
+  override [Symbol.asyncIterator](): NodeJS.AsyncIterator<AudioChunk> {
+    return super[Symbol.asyncIterator]();
+  }
+
   get interrupted(): boolean {
-    return this.#interrupted;
+    return this.#availability === "interrupted";
   }
 
   get deviceName(): string | undefined {
@@ -405,15 +461,16 @@ class AudioTrackImpl extends Readable implements AudioTrack {
       this.#channels = info.channels;
       this.emit("format", { sampleRate: info.sampleRate, channels: info.channels });
     }
-    Object.defineProperties(chunk, {
-      hostTimeNs: { value: info.hostTimeNs, enumerable: false },
-      frameCount: { value: info.frameCount, enumerable: false },
-      sampleRate: { value: info.sampleRate, enumerable: false },
-      channels: { value: info.channels, enumerable: false },
-      droppedSamples: { value: info.dropped, enumerable: false },
-    });
-    this.#mixConsumer?.(chunk as AudioChunk);
-    if (!this.push(chunk as AudioChunk) && this.#consumerReady) {
+    const packet: AudioChunk = {
+      pcm: chunk,
+      hostTimeNs: info.hostTimeNs,
+      frameCount: info.frameCount,
+      sampleRate: info.sampleRate,
+      channels: info.channels,
+      droppedSamples: info.dropped,
+    };
+    this.#mixConsumer?.(packet);
+    if (!this.push(packet) && this.#consumerReady) {
       this.#consumerReady = false;
       getNative().captureSetConsumerReady(this.#microphone, false);
     }
@@ -422,11 +479,14 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   pushEvent(event: NativeTrackEvent): void {
     if (this.#finished) return;
     if (event.type === "interrupted") {
-      this.#interrupted = true;
+      this.#availability = "interrupted";
       this.emit("interrupted", event.reason, event.message);
     } else if (event.type === "resumed") {
-      this.#interrupted = false;
+      this.#availability = "live";
       this.emit("resumed");
+    } else if (event.type === "degraded") {
+      this.#availability = "degraded";
+      this.emit("degraded", event.reason, event.message);
     } else {
       this.#deviceName = event.deviceName;
       this.emit("devicechange", event.deviceName);
@@ -440,8 +500,9 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   }
 }
 
-class CaptureSessionImpl extends EventEmitter implements CaptureSession {
+class CaptureSessionImpl implements CaptureSession {
   #state: CaptureState = "recording";
+  #stopping?: Promise<void>;
   readonly #systemAudio: AudioTrackImpl;
   readonly #microphone?: AudioTrackImpl;
   readonly mixedAudio?: MixedAudioImpl;
@@ -456,7 +517,6 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
     mix?: MixedAudioOptions,
     signal?: AbortSignal,
   ) {
-    super();
     this.#systemAudio = systemAudio;
     this.#microphone = microphone;
     this.#signal = signal;
@@ -477,7 +537,7 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   }
 
   pauseRecording(): void {
-    if (this.#state === "stopped") return;
+    if (this.#state === "stopped" || this.#stopping) return;
     if (this.#state !== "paused") {
       getNative().capturePause();
       this.#state = "paused";
@@ -486,7 +546,7 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
   }
 
   resumeRecording(): void {
-    if (this.#state === "stopped") return;
+    if (this.#state === "stopped" || this.#stopping) return;
     if (this.#state !== "recording") {
       this.mixedAudio?.resumeCapture();
       getNative().captureResume();
@@ -494,14 +554,23 @@ class CaptureSessionImpl extends EventEmitter implements CaptureSession {
     }
   }
 
-  async stopRecording(): Promise<void> {
-    if (this.#state === "stopped") return;
-    getNative().captureStop();
-    this.#state = "stopped";
-    this.#signal?.removeEventListener("abort", this.#onAbort);
-    this.#systemAudio.finish();
-    this.#microphone?.finish();
-    this.mixedAudio?.finishCapture();
+  stopRecording(): Promise<void> {
+    if (this.#stopping) return this.#stopping;
+    if (this.#state === "stopped") return Promise.resolve();
+    this.#stopping = this.#stop();
+    return this.#stopping;
+  }
+
+  async #stop(): Promise<void> {
+    try {
+      await getNative().captureStop();
+    } finally {
+      this.#state = "stopped";
+      this.#signal?.removeEventListener("abort", this.#onAbort);
+      this.#systemAudio.finish();
+      this.#microphone?.finish();
+      this.mixedAudio?.finishCapture();
+    }
   }
 }
 
@@ -517,7 +586,7 @@ interface NativeAudioInfo {
 
 interface NativeTrackEvent {
   track: "systemAudio" | "microphone";
-  type: "interrupted" | "resumed" | "devicechange";
+  type: "interrupted" | "resumed" | "devicechange" | "degraded";
   reason: TrackInterruptionReason;
   deviceName: string;
   message: string;
@@ -535,8 +604,8 @@ async function startCapture(
   options.signal?.throwIfAborted();
   let nativeTarget: { pid: number } | { systemWide: true };
   if (target.type === "process") {
-    if (!Number.isInteger(target.pid) || target.pid <= 0) {
-      throw new TypeError("process pid must be a positive integer");
+    if (!Number.isInteger(target.pid) || target.pid <= 0 || target.pid > 0x7fffffff) {
+      throw new TypeError("process pid must be an integer from 1 through 2147483647");
     }
     nativeTarget = { pid: target.pid };
   } else if (target.type === "system") {
@@ -547,8 +616,12 @@ async function startCapture(
   if (options.mono !== undefined && typeof options.mono !== "boolean") {
     throw new TypeError("mono must be a boolean");
   }
-  if (options.microphone !== undefined && options.microphone !== "default") {
-    throw new TypeError('microphone must be "default"');
+  if (
+    options.microphone !== undefined &&
+    options.microphone !== "default" &&
+    options.microphone !== "auto"
+  ) {
+    throw new TypeError('microphone must be "default" or "auto"');
   }
   if (
     options.mix !== undefined &&
@@ -600,14 +673,14 @@ async function startCapture(
       {
         ...nativeTarget,
         mono: options.mono ?? true,
-        microphone: options.microphone === "default",
+        microphone: options.microphone === "auto" ? 2 : options.microphone === "default" ? 1 : 0,
       },
       onSystemAudio,
       onMicrophone,
       onTrackEvent,
     );
     if (options.signal?.aborted) {
-      native.captureStop();
+      await native.captureStop();
       options.signal.throwIfAborted();
     }
     const systemAudio = new AudioTrackImpl(

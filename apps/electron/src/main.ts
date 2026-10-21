@@ -96,8 +96,8 @@ function drain(
 
   // data arrives on the main thread already (the addon marshals it off the
   // realtime thread), so int16 conversion and the write are fine here
-  source.on("data", (chunk: Buffer) => {
-    const peak = writer.write(chunk);
+  source.on("data", (chunk: MeetingRecord.AudioChunk) => {
+    const peak = writer.write(chunk.pcm);
     if (peak > track.peak) track.peak = peak;
     const state = into();
     if (state && peak > state.windowPeak) state.windowPeak = peak;
@@ -120,7 +120,7 @@ async function startRecording(
 
   const session = await MeetingRecord.capture.start(
     { type: "process", pid },
-    microphone ? { microphone: "default" } : {},
+    microphone ? { microphone: "auto" } : {},
   );
 
   const [mixedPath, systemPath, micPath] = wavPaths();

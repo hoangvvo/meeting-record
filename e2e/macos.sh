@@ -13,6 +13,7 @@ fi
 TEMP_DIR="$(mktemp -d /tmp/meeting-record-e2e.XXXXXX)"
 TONE_FILE="$TEMP_DIR/reference.aiff"
 PLAYER_PID=""
+RECORDER_PID=""
 
 cleanup() {
   if [[ -n "$PLAYER_PID" ]] && kill -0 "$PLAYER_PID" 2>/dev/null; then
@@ -35,6 +36,8 @@ afplay "$TONE_FILE" &
 PLAYER_PID=$!
 sleep 1
 
+export MREC_PIDS=""
+unset MREC_TEST_SOURCE_EXIT
 export MREC_GLOBAL=1
 export MREC_DURATION_SECONDS="$DURATION"
 export MREC_MIN_PEAK="$MINIMUM_PEAK"
@@ -48,4 +51,24 @@ set -e
 if [[ -f /tmp/meeting-record-selftest.log ]]; then
   cat /tmp/meeting-record-selftest.log
 fi
+if (( STATUS != 0 )); then exit "$STATUS"; fi
+
+# Keep the recording (and optional microphone) alive when its process source exits.
+# The same app identity retains the existing TCC grant.
+unset MREC_GLOBAL
+export MREC_PIDS="$PLAYER_PID"
+export MREC_TEST_SOURCE_EXIT=1
+export MREC_DURATION_SECONDS=4
+"$APP/Contents/MacOS/MrecSelfTest" &
+RECORDER_PID=$!
+sleep 2
+kill "$PLAYER_PID" 2>/dev/null || true
+wait "$PLAYER_PID" 2>/dev/null || true
+PLAYER_PID=""
+set +e
+wait "$RECORDER_PID"
+STATUS=$?
+set -e
+RECORDER_PID=""
+cat /tmp/meeting-record-selftest.log
 exit "$STATUS"

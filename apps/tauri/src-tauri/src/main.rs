@@ -193,15 +193,15 @@ async fn request_permission(name: String) -> &'static str {
 }
 
 #[tauri::command]
-fn scan(session: State<'_, Session>) -> Vec<MeetingView> {
-    let found = meetings::scan();
+fn scan(session: State<'_, Session>) -> Result<Vec<MeetingView>, String> {
+    let found = meetings::scan().map_err(|error| error.to_string())?;
     let views = found.iter().map(view).collect();
     let mut inner = session.inner.lock().unwrap();
     inner.meetings = found
         .iter()
         .map(|meeting| (id_of(meeting), meeting.pid))
         .collect();
-    views
+    Ok(views)
 }
 
 fn watch(app: &AppHandle) {
@@ -278,6 +278,7 @@ async fn start_recording(
 /// producing audio. The library resolves helper pids from this one itself.
 fn playing_pid() -> Result<u32, String> {
     meetings::audio_processes()
+        .map_err(|error| error.to_string())?
         .into_iter()
         .find(|entry| entry.is_playing_audio)
         .map(|entry| entry.pid)
@@ -379,7 +380,7 @@ fn start_blocking(
     };
 
     let options = CaptureOptions {
-        microphone: microphone.then_some(MicrophoneSource::Default),
+        microphone: microphone.then_some(MicrophoneSource::Auto),
         ..CaptureOptions::default()
     };
     let capture = Arc::new(

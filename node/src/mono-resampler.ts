@@ -100,9 +100,9 @@ export class MonoResampler {
 
 function downmix(chunk: AudioChunk): Float32Array {
   const samples = new Float32Array(
-    chunk.buffer,
-    chunk.byteOffset,
-    chunk.byteLength / Float32Array.BYTES_PER_ELEMENT,
+    chunk.pcm.buffer,
+    chunk.pcm.byteOffset,
+    chunk.pcm.byteLength / Float32Array.BYTES_PER_ELEMENT,
   );
   const { channels } = chunk;
   if (channels === 1) {

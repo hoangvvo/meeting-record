@@ -8,6 +8,7 @@
 
 static mrec_track_event g_events[16];
 static int g_count;
+static uint64_t g_session;
 
 static void Record(const mrec_track_event *event, void *user_data) {
   (void)user_data;
@@ -16,7 +17,9 @@ static void Record(const mrec_track_event *event, void *user_data) {
 
 static void Reset(void) {
   g_count = 0;
-  mrec_tracks_open(Record, NULL);
+  g_session = mrec_tracks_open(Record, NULL);
+  assert(mrec_track_started(g_session, MREC_TRACK_SYSTEM_AUDIO, 2, NULL));
+  assert(mrec_track_started(g_session, MREC_TRACK_MICROPHONE, 1, NULL));
 }
 
 static int Is(int index, mrec_track track, mrec_track_event_type type) {
@@ -46,6 +49,18 @@ static int32_t Wait(void *context, uint32_t milliseconds) {
   return ++source->waits <= source->max_waits;
 }
 
+static int32_t ReplaceSession(void *context, char *device_name, size_t capacity) {
+  Reset();
+  snprintf(device_name, capacity, "%s", "Old microphone");
+  return *(int *)context;
+}
+
+static int32_t StopWaiting(void *context, uint32_t milliseconds) {
+  (void)context;
+  (void)milliseconds;
+  return 0;
+}
+
 int main(void) {
   /* The Rust binding hardcodes this layout. */
   assert(sizeof(mrec_track_event) == 792);
@@ -55,9 +70,9 @@ int main(void) {
 
   /* A microphone switch that reopens at once is a device change, not an interruption. */
   Reset();
-  mrec_track_started(MREC_TRACK_MICROPHONE, "Laptop");
+  mrec_track_started(g_session, MREC_TRACK_MICROPHONE, 1, "Laptop");
   Source quick = {0, 1, 0, 10, {0}, "Headset"};
-  assert(mrec_track_recover(MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_DEVICE_CHANGED,
+  assert(mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_DEVICE_CHANGED,
                             "changed", Attempt, Wait, &quick));
   assert(g_count == 1 && Is(0, MREC_TRACK_MICROPHONE, MREC_TRACK_DEVICE_CHANGED));
   assert(strcmp(g_events[0].device_name, "Headset") == 0);
@@ -67,9 +82,9 @@ int main(void) {
 
   /* A lost source interrupts once, backs off, and resumes; the device is unchanged. */
   Reset();
-  mrec_track_started(MREC_TRACK_MICROPHONE, "Headset");
+  mrec_track_started(g_session, MREC_TRACK_MICROPHONE, 1, "Headset");
   Source slow = {0, 4, 0, 10, {0}, "Headset"};
-  assert(mrec_track_recover(MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_DEVICE_REMOVED,
+  assert(mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_DEVICE_REMOVED,
                             "unplugged", Attempt, Wait, &slow));
   assert(slow.attempts == 4 && slow.waits == 3);
   assert(slow.delays[0] == 100 && slow.delays[1] == 200 && slow.delays[2] == 400);
@@ -82,7 +97,7 @@ int main(void) {
   /* Retries continue until the session stops. */
   Reset();
   Source gone = {0, 1000, 0, 7, {0}, NULL};
-  assert(!mrec_track_recover(MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_DEVICE_REMOVED,
+  assert(!mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_DEVICE_REMOVED,
                              "none", Attempt, Wait, &gone));
   assert(gone.waits == 8 && gone.attempts == 8);
   assert(gone.delays[4] == 1600 && gone.delays[5] == 2000 && gone.delays[7] == 2000);
@@ -90,35 +105,58 @@ int main(void) {
 
   /* System audio resumes only once every stopped source is back. */
   Reset();
-  mrec_track_started(MREC_TRACK_SYSTEM_AUDIO, NULL);
-  mrec_track_interrupted(MREC_TRACK_SYSTEM_AUDIO, 0, MREC_TRACK_REASON_SERVICE_RESET, NULL);
-  mrec_track_interrupted(MREC_TRACK_SYSTEM_AUDIO, 1, MREC_TRACK_REASON_SERVICE_RESET, NULL);
-  mrec_track_resumed(MREC_TRACK_SYSTEM_AUDIO, 0, NULL);
-  assert(g_count == 1);
-  mrec_track_resumed(MREC_TRACK_SYSTEM_AUDIO, 1, NULL);
-  assert(g_count == 2 && Is(1, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_RESUMED));
-  assert(g_events[1].device_name[0] == '\0');
+  mrec_track_started(g_session, MREC_TRACK_SYSTEM_AUDIO, 2, NULL);
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, 0, MREC_TRACK_REASON_SERVICE_RESET, NULL);
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, 1, MREC_TRACK_REASON_SERVICE_RESET, NULL);
+  mrec_track_resumed(g_session, MREC_TRACK_SYSTEM_AUDIO, 0, NULL);
+  assert(g_count == 3);
+  assert(Is(0, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_DEGRADED));
+  assert(Is(1, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_INTERRUPTED));
+  assert(Is(2, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_DEGRADED));
+  mrec_track_resumed(g_session, MREC_TRACK_SYSTEM_AUDIO, 1, NULL);
+  assert(g_count == 4 && Is(3, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_RESUMED));
+  assert(g_events[3].device_name[0] == '\0');
 
   /* Exited apps interrupt the whole track, whatever its sources do. */
-  mrec_track_interrupted(MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+  mrec_track_interrupted(g_session, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
                          MREC_TRACK_REASON_APP_EXITED, "exited");
-  mrec_track_resumed(MREC_TRACK_SYSTEM_AUDIO, 0, NULL);
-  assert(g_count == 3 && Is(2, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_INTERRUPTED));
-  assert(g_events[2].reason == MREC_TRACK_REASON_APP_EXITED);
+  mrec_track_resumed(g_session, MREC_TRACK_SYSTEM_AUDIO, 0, NULL);
+  assert(g_count == 5 && Is(4, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_INTERRUPTED));
+  assert(g_events[4].reason == MREC_TRACK_REASON_APP_EXITED);
 
   /* Tracks are independent, and nothing is published after close. */
-  mrec_track_interrupted(MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_UNKNOWN, NULL);
-  assert(g_count == 4 && Is(3, MREC_TRACK_MICROPHONE, MREC_TRACK_INTERRUPTED));
+  mrec_track_interrupted(g_session, MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_UNKNOWN, NULL);
+  assert(g_count == 6 && Is(5, MREC_TRACK_MICROPHONE, MREC_TRACK_INTERRUPTED));
   mrec_tracks_close();
-  mrec_track_resumed(MREC_TRACK_MICROPHONE, 0, "Other");
-  assert(g_count == 4);
+  mrec_track_resumed(g_session, MREC_TRACK_MICROPHONE, 0, "Other");
+  assert(g_count == 6);
   assert(mrec_current_microphone_name(name, sizeof name) == MREC_ERR_NOT_RUNNING);
 
   /* Without a callback, state is still kept. */
-  mrec_tracks_open(NULL, NULL);
-  mrec_track_started(MREC_TRACK_MICROPHONE, "Built-in");
+  g_session = mrec_tracks_open(NULL, NULL);
+  mrec_track_started(g_session, MREC_TRACK_MICROPHONE, 1, "Built-in");
   assert(mrec_current_microphone_name(name, sizeof name) == MREC_OK);
   assert(strcmp(name, "Built-in") == 0);
+  mrec_tracks_close();
+
+  /* A retry from a stopped session must not publish into its replacement. */
+  const uint64_t previous_session = g_session;
+  Reset();
+  mrec_track_interrupted(previous_session, MREC_TRACK_MICROPHONE, 0,
+                         MREC_TRACK_REASON_DEVICE_REMOVED, "stale interruption");
+  mrec_track_resumed(previous_session, MREC_TRACK_MICROPHONE, 0, "Stale device");
+  assert(g_count == 0);
+  Source stale = {0, 1, 0, 0, {0}, "Old microphone"};
+  mrec_track_recover(previous_session, MREC_TRACK_MICROPHONE, 0,
+                     MREC_TRACK_REASON_UNKNOWN, "stale", Attempt, Wait, &stale);
+  assert(g_count == 0 && stale.attempts == 0);
+  assert(mrec_current_microphone_name(name, sizeof name) == MREC_ERR_NOT_RUNNING);
+  for (int result = 0; result <= 1; result++) {
+    mrec_track_recover(g_session, MREC_TRACK_MICROPHONE, 0, MREC_TRACK_REASON_UNKNOWN,
+                       "old attempt", ReplaceSession, StopWaiting, &result);
+    assert(g_count == 0);
+    assert(mrec_current_microphone_name(name, sizeof name) == MREC_ERR_NOT_RUNNING);
+  }
   mrec_tracks_close();
 
   printf("track tests passed\n");

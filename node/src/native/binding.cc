@@ -180,6 +180,7 @@ struct TrackContext {
 
   RingBuffer ring{1 << 20}; /* ~10s of mono 48k */
   Napi::ThreadSafeFunction tsfn;
+  Napi::FunctionReference callback;
   std::atomic<double> sample_rate{0};
   std::atomic<uint32_t> channels{0};
   std::atomic<bool> active{false};
@@ -250,6 +251,16 @@ void OnAudio(const float *frames, uint32_t frame_count, uint32_t channels,
   }
 }
 
+void DeliverChunk(Napi::Env env, Napi::Function callback, const RingBuffer::Chunk &chunk) {
+  Napi::Object info = Napi::Object::New(env);
+  info.Set("sampleRate", chunk.sample_rate);
+  info.Set("channels", chunk.channels);
+  info.Set("frameCount", chunk.frame_count);
+  info.Set("hostTimeNs", Napi::BigInt::New(env, chunk.host_time_ns));
+  info.Set("dropped", static_cast<double>(chunk.dropped));
+  callback.Call({Napi::Buffer<float>::Copy(env, chunk.samples.data(), chunk.samples.size()), info});
+}
+
 void ScheduleTrackWake(TrackContext *track) {
   if (!track || !track->active.load(std::memory_order_acquire) ||
       !track->delivery_enabled.load(std::memory_order_acquire)) {
@@ -272,16 +283,7 @@ void ScheduleTrackWake(TrackContext *track) {
 
     RingBuffer::Chunk chunk;
     if (track->ring.Read(chunk)) {
-      Napi::Object info = Napi::Object::New(env);
-      info.Set("sampleRate", chunk.sample_rate);
-      info.Set("channels", chunk.channels);
-      info.Set("frameCount", chunk.frame_count);
-      info.Set("hostTimeNs", Napi::BigInt::New(env, chunk.host_time_ns));
-      info.Set("dropped", static_cast<double>(chunk.dropped));
-
-      callback.Call({Napi::Buffer<float>::Copy(env, chunk.samples.data(),
-                                               chunk.samples.size()),
-                     info});
+      DeliverChunk(env, callback, chunk);
     }
     if (track->ring.HasData()) ScheduleTrackWake(track);
   });
@@ -291,14 +293,14 @@ void ScheduleTrackWake(TrackContext *track) {
 }
 
 Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
-  static const char *kTypes[] = {"interrupted", "resumed", "devicechange"};
+  static const char *kTypes[] = {"interrupted", "resumed", "devicechange", "degraded"};
   static const char *kReasons[] = {"unknown",        "device-removed", "device-changed",
                                    "format-changed", "app-exited",     "service-reset"};
   const int type = static_cast<int>(event->type);
   const int reason = static_cast<int>(event->reason);
   Napi::Object out = Napi::Object::New(env);
   out.Set("track", event->track == MREC_TRACK_MICROPHONE ? "microphone" : "systemAudio");
-  out.Set("type", (type >= 0 && type <= 2) ? kTypes[type] : "interrupted");
+  out.Set("type", (type >= 0 && type <= 3) ? kTypes[type] : "interrupted");
   out.Set("reason", (reason >= 0 && reason <= 5) ? kReasons[reason] : "unknown");
   out.Set("deviceName", event->device_name);
   out.Set("message", event->message);
@@ -324,7 +326,7 @@ void OnTrackEvent(const mrec_track_event *event, void *user_data) {
 class StartWorker : public Napi::AsyncWorker {
 public:
   StartWorker(Napi::Env env, uint32_t pid, bool system_wide,
-              bool mono, bool microphone)
+              bool mono, int32_t microphone)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
         pid_(pid), system_wide_(system_wide), mono_(mono),
         microphone_(microphone) {}
@@ -344,7 +346,7 @@ public:
     status_ = mrec_start_tracks_raw(
         cfg.pids, cfg.pid_count, cfg.global_mixdown, cfg.mono,
         cfg.mute_captured_output,
-        microphone_ ? MREC_MICROPHONE_DEFAULT : MREC_MICROPHONE_NONE, OnAudio,
+        microphone_, OnAudio,
         &g_capture->system_audio, microphone_ ? OnAudio : nullptr,
         microphone_ ? g_capture->microphone.get() : nullptr, OnTrackEvent, g_capture.get());
     if (status_ != MREC_OK) error_ = mrec_last_error();
@@ -418,7 +420,7 @@ private:
   uint32_t pid_;
   bool system_wide_;
   bool mono_;
-  bool microphone_;
+  int32_t microphone_;
   int32_t status_ = MREC_OK;
   std::string error_;
 };
@@ -506,22 +508,29 @@ public:
   Napi::Promise Promise() { return deferred_.Promise(); }
 
   void Execute() override {
-    size_t count = 0;
-    mrec_scan(meetings_, kCapacity, &count);
-    count_ = std::min(count, kCapacity);
+    do {
+      status_ = mrec_scan(meetings_.data(), meetings_.size(), &count_);
+      if (status_ == MREC_ERR_BUFFER_TOO_SMALL) meetings_.resize(meetings_.size() * 2);
+    } while (status_ == MREC_ERR_BUFFER_TOO_SMALL);
   }
 
   void OnOK() override {
     Napi::Env env = Env();
+    if (status_ != MREC_OK) {
+      Napi::Error error = Napi::Error::New(env, "failed to scan meetings");
+      error.Set("code", Napi::Number::New(env, status_));
+      deferred_.Reject(error.Value());
+      return;
+    }
     Napi::Array out = Napi::Array::New(env, count_);
     for (size_t i = 0; i < count_; i++) out.Set(i, MeetingToJS(env, &meetings_[i]));
     deferred_.Resolve(out);
   }
 
 private:
-  static constexpr size_t kCapacity = 16;
   Napi::Promise::Deferred deferred_;
-  mrec_meeting meetings_[kCapacity]{};
+  std::vector<mrec_meeting> meetings_{16};
+  mrec_status status_ = MREC_OK;
   size_t count_ = 0;
 };
 
@@ -590,8 +599,8 @@ Napi::Value CaptureStart(const Napi::CallbackInfo &info) {
   }
 
   const bool mono = !opts.Has("mono") || opts.Get("mono").ToBoolean().Value();
-  const bool microphone =
-      opts.Has("microphone") && opts.Get("microphone").ToBoolean().Value();
+  const int32_t microphone = opts.Has("microphone")
+      ? opts.Get("microphone").As<Napi::Number>().Int32Value() : MREC_MICROPHONE_NONE;
   if (microphone && (info.Length() < 3 || !info[2].IsFunction())) {
     Napi::TypeError::New(env, "microphone callback is required").ThrowAsJavaScriptException();
     return env.Undefined();
@@ -604,10 +613,12 @@ Napi::Value CaptureStart(const Napi::CallbackInfo &info) {
   g_capture = std::make_unique<CaptureContext>(microphone);
   g_capture->system_audio.tsfn = Napi::ThreadSafeFunction::New(
       env, on_system_audio, "mrec-system-audio", 1, 1);
+  g_capture->system_audio.callback = Napi::Persistent(on_system_audio);
   g_capture->system_audio.active.store(true);
   if (microphone) {
     g_capture->microphone->tsfn = Napi::ThreadSafeFunction::New(
         env, info[2].As<Napi::Function>(), "mrec-microphone", 1, 1);
+    g_capture->microphone->callback = Napi::Persistent(info[2].As<Napi::Function>());
     g_capture->microphone->active.store(true);
   }
   g_capture->events = Napi::ThreadSafeFunction::New(env, info[3].As<Napi::Function>(),
@@ -620,10 +631,41 @@ Napi::Value CaptureStart(const Napi::CallbackInfo &info) {
   return promise;
 }
 
+/* Stop HAL/WASAPI off the JS thread. Final callbacks still write into the rings. */
+class StopWorker : public Napi::AsyncWorker {
+public:
+  explicit StopWorker(Napi::Env env)
+      : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)) {}
+  Napi::Promise Promise() { return deferred_.Promise(); }
+  void Execute() override { status_ = mrec_stop(); }
+  void OnOK() override {
+    if (g_capture) {
+      DrainTail(&g_capture->system_audio);
+      if (g_capture->microphone) DrainTail(g_capture->microphone.get());
+      ReleaseCapture();
+    }
+    if (status_ != MREC_OK && status_ != MREC_ERR_NOT_RUNNING) {
+      Napi::Error error = Napi::Error::New(Env(), "could not stop capture");
+      error.Set("code", Napi::Number::New(Env(), status_));
+      deferred_.Reject(error.Value());
+    } else {
+      deferred_.Resolve(Env().Undefined());
+    }
+  }
+private:
+  void DrainTail(TrackContext *track) {
+    RingBuffer::Chunk chunk;
+    while (track->ring.Read(chunk)) DeliverChunk(Env(), track->callback.Value(), chunk);
+  }
+  Napi::Promise::Deferred deferred_;
+  int32_t status_ = MREC_OK;
+};
+
 Napi::Value CaptureStop(const Napi::CallbackInfo &info) {
-  const int32_t status = mrec_stop();
-  ReleaseCapture();
-  return Napi::Number::New(info.Env(), status);
+  auto *worker = new StopWorker(info.Env());
+  Napi::Promise promise = worker->Promise();
+  worker->Queue();
+  return promise;
 }
 
 Napi::Value CapturePause(const Napi::CallbackInfo &info) {
@@ -660,7 +702,7 @@ Napi::Value CaptureSetConsumerReady(const Napi::CallbackInfo &info) {
 }
 
 Napi::Value IsRunning(const Napi::CallbackInfo &info) {
-  return Napi::Boolean::New(info.Env(), mrec_is_running() != 0);
+  return Napi::Boolean::New(info.Env(), g_capture != nullptr || mrec_is_running() != 0);
 }
 
 Napi::Value LastError(const Napi::CallbackInfo &info) {
@@ -669,11 +711,20 @@ Napi::Value LastError(const Napi::CallbackInfo &info) {
 
 Napi::Value ToProcessArray(Napi::Env env,
                            mrec_status (*list)(mrec_process *, size_t, size_t *)) {
-  mrec_process procs[256]{};
+  std::vector<mrec_process> procs(256);
   size_t count = 0;
-  list(procs, 256, &count);
-
-  const size_t process_count = std::min(count, static_cast<size_t>(256));
+  mrec_status status;
+  do {
+    status = list(procs.data(), procs.size(), &count);
+    if (status == MREC_ERR_BUFFER_TOO_SMALL) procs.resize(procs.size() * 2);
+  } while (status == MREC_ERR_BUFFER_TOO_SMALL);
+  if (status != MREC_OK) {
+    Napi::Error error = Napi::Error::New(env, "failed to enumerate audio sources");
+    error.Set("code", Napi::Number::New(env, status));
+    error.ThrowAsJavaScriptException();
+    return Napi::Object::New(env);
+  }
+  const size_t process_count = std::min(count, procs.size());
   Napi::Array out = Napi::Array::New(env, process_count);
   for (size_t i = 0; i < process_count; i++) {
     Napi::Object p = Napi::Object::New(env);

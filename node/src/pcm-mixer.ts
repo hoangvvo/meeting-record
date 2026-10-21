@@ -38,11 +38,19 @@ export class PcmMixer {
 
   write(source: object, chunk: AudioChunk): void {
     const input = this.#input(source);
-    const samples = input.resampler.resample(chunk);
     this.#origin ??= chunk.hostTimeNs;
-    const position =
+    let position =
       this.#originFrame +
       Math.round((Number(chunk.hostTimeNs - this.#origin) * this.#sampleRate) / 1e9);
+    // When every source was absent for over a second, start a new segment.
+    // A live mix must not release minutes of backfilled silence on recovery.
+    if (position > this.#end + this.#sampleRate) {
+      this.finishSegment();
+      this.restart();
+      this.#origin = chunk.hostTimeNs;
+      position = this.#originFrame;
+    }
+    const samples = input.resampler.resample(chunk);
     // Absorb up to 20 ms of callback-clock jitter at packet joins.
     if (input.cursor === null || Math.abs(position - input.cursor) > this.#sampleRate / 50) {
       input.cursor = position;

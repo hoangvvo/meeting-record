@@ -16,7 +16,9 @@ function assertCaptureInactive() {
 
 test("invalid public inputs use TypeError without starting capture", async () => {
   assert.throws(() => MeetingRecord.permissions.status("camera"), TypeError);
-  await assert.rejects(MeetingRecord.capture.start({ type: "process", pid: 0 }), TypeError);
+  for (const pid of [0, -1, 1.5, 2 ** 31, 2 ** 32 + 1]) {
+    await assert.rejects(MeetingRecord.capture.start({ type: "process", pid }), TypeError);
+  }
   await assert.rejects(
     MeetingRecord.capture.start({ type: "system" }, { microphone: "built-in" }),
     TypeError,

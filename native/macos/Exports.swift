@@ -19,6 +19,10 @@ private final class Session {
     var captureConfiguration: SystemCaptureConfiguration?
     /// Bumped by every start and stop, so a retry never revives a later session.
     var generation = 0
+    var trackSession: UInt64 = 0
+    var capturePIDs: [pid_t] = []
+    var microphoneEnabled = false
+    var systemTargetExited = false
     var exitTimer: DispatchSourceTimer?
     let restartQueue = DispatchQueue(label: "meetingrecord.capture-restart")
     let microphoneRestartQueue = DispatchQueue(label: "meetingrecord.microphone-restart")
@@ -46,6 +50,8 @@ private func releaseSession() {
     session.microphone = nil
     session.capture = nil
     session.captureConfiguration = nil
+    session.capturePIDs = []
+    session.microphoneEnabled = false
     session.systemStateBox.clear()
     session.microphoneStateBox.clear()
     mrec_tracks_close()
@@ -71,10 +77,12 @@ private func setLastError(_ message: String) {
 private func makeTapCapture(_ configuration: SystemCaptureConfiguration) throws -> TapCapture {
     let capture = TapCapture(stateBox: Session.shared.systemStateBox,
                              onConfigurationChange: scheduleCaptureRestart)
-    try capture.start(pids: configuration.pids,
+    let pids = AudioAppRegistry.includingHelpers(configuration.pids).filter(AudioProcessRegistry.isAlive)
+    try capture.start(pids: pids,
                       globalMixdown: configuration.globalMixdown,
                       mono: configuration.mono,
                       muteCapturedOutput: configuration.muteCapturedOutput)
+    Session.shared.capturePIDs = pids
     return capture
 }
 
@@ -88,11 +96,13 @@ private func makeMicrophoneCapture() throws -> MicrophoneCapture {
 /// A source for the shared recovery in tracks.c to reopen.
 private final class Recovery {
     let generation: Int
+    let track: mrec_track
     /// Reopens the source and returns its device name, if it has one.
     let reopen: () throws -> String?
 
-    init(generation: Int, reopen: @escaping () throws -> String?) {
+    init(generation: Int, track: mrec_track, reopen: @escaping () throws -> String?) {
         self.generation = generation
+        self.track = track
         self.reopen = reopen
     }
 }
@@ -104,7 +114,8 @@ private let reopenSource: mrec_track_attempt = { context, deviceName, capacity i
     let session = Session.shared
     session.lock.lock()
     defer { session.lock.unlock() }
-    guard session.generation == recovery.generation else { return 0 }
+    guard session.generation == recovery.generation,
+          !(recovery.track == MREC_TRACK_SYSTEM_AUDIO && session.systemTargetExited) else { return 0 }
     do {
         if let name = try recovery.reopen(), let deviceName, capacity > 0 {
             let bytes = Array(name.utf8.prefix(capacity - 1))
@@ -130,16 +141,16 @@ private let waitForRetry: mrec_track_wait = { context, milliseconds in
     let session = Session.shared
     session.lock.lock()
     defer { session.lock.unlock() }
-    return session.generation == recovery.generation ? 1 : 0
+    return session.generation == recovery.generation
+        && !(recovery.track == MREC_TRACK_SYSTEM_AUDIO && session.systemTargetExited) ? 1 : 0
 }
 
 /// Never stops the recording: retries until the source returns or the session ends.
 private func recover(_ track: mrec_track, reason: mrec_track_reason, message: String,
-                     generation: Int, reopen: @escaping () throws -> String?) {
-    setLastError(message)
-    let context = Unmanaged.passRetained(Recovery(generation: generation, reopen: reopen))
+                     generation: Int, trackSession: UInt64, reopen: @escaping () throws -> String?) {
+    let context = Unmanaged.passRetained(Recovery(generation: generation, track: track, reopen: reopen))
     defer { context.release() }
-    _ = mrec_track_recover(track, 0, reason, message, reopenSource, waitForRetry,
+    _ = mrec_track_recover(trackSession, track, 0, reason, message, reopenSource, waitForRetry,
                            context.toOpaque())
 }
 
@@ -155,12 +166,14 @@ private func scheduleCaptureRestart(_ identifier: UUID, _ reason: mrec_track_rea
             return
         }
         let generation = session.generation
+        let trackSession = session.trackSession
+        setLastError(detail)
         current.stop()
         session.capture = nil
         session.lock.unlock()
 
         recover(MREC_TRACK_SYSTEM_AUDIO, reason: reason,
-                message: "system audio interrupted: \(detail)", generation: generation) {
+                message: "system audio interrupted: \(detail)", generation: generation, trackSession: trackSession) {
             session.capture = try makeTapCapture(configuration)
             return nil
         }
@@ -179,32 +192,48 @@ private func scheduleMicrophoneRestart(_ identifier: UUID, _ reason: mrec_track_
             return
         }
         let generation = session.generation
+        let trackSession = session.trackSession
+        setLastError(detail)
         current.stop()
         session.microphone = nil
         session.lock.unlock()
 
         recover(MREC_TRACK_MICROPHONE, reason: reason,
-                message: "microphone interrupted: \(detail)", generation: generation) {
+                message: "microphone interrupted: \(detail)", generation: generation, trackSession: trackSession) {
             session.microphone = try makeMicrophoneCapture()
             return MicrophoneCapture.defaultInputName()
         }
     }
 }
 
-/// Exited targets deliver silence; say so once, and keep recording.
-private func watchForExit(_ pids: [pid_t], generation: Int) -> DispatchSourceTimer {
+/// Follow helper replacement within the selected processes' lifetime. A relaunched
+/// app requires a new capture session after the selected processes exit.
+private func watchSources(generation: Int) -> DispatchSourceTimer {
     let session = Session.shared
     let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
     timer.schedule(deadline: .now() + 1, repeating: 1)
     timer.setEventHandler {
-        guard !pids.contains(where: { AudioProcessRegistry.isAlive($0) }) else { return }
         session.lock.lock()
         defer { session.lock.unlock() }
-        guard session.generation == generation else { return }
-        session.exitTimer?.cancel()
-        session.exitTimer = nil
-        mrec_track_interrupted(MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
-                               MREC_TRACK_REASON_APP_EXITED, "the captured apps exited")
+        guard session.generation == generation,
+              let configuration = session.captureConfiguration else { return }
+        let targets = configuration.pids.filter(AudioProcessRegistry.isAlive)
+        if targets.isEmpty {
+            session.exitTimer?.cancel()
+            session.exitTimer = nil
+            session.systemTargetExited = true
+            session.capture?.stop()
+            session.capture = nil
+            mrec_track_interrupted(session.trackSession, MREC_TRACK_SYSTEM_AUDIO,
+                                   MREC_TRACK_WHOLE, MREC_TRACK_REASON_APP_EXITED,
+                                   "the captured apps exited; start a new capture for a relaunched app")
+            return
+        }
+        let pids = AudioAppRegistry.includingHelpers(targets).filter(AudioProcessRegistry.isAlive)
+        if pids != session.capturePIDs, let capture = session.capture {
+            scheduleCaptureRestart(capture.identifier, MREC_TRACK_REASON_UNKNOWN,
+                                   "the app's audio processes changed")
+        }
     }
     timer.resume()
     return timer
@@ -341,11 +370,11 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
         return -3
     }
 
-    guard microphoneSource == 0 || microphoneSource == 1 else {
+    guard (0...2).contains(microphoneSource) else {
         setLastError("unknown microphone source")
         return -9
     }
-    if microphoneSource == 1, Permissions.microphoneStatus() != 1 {
+    if microphoneSource != 0, Permissions.microphoneStatus() != 1 {
         setLastError("microphone permission is not granted")
         return -2
     }
@@ -359,9 +388,15 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
 
     var pids: [pid_t] = []
     if let pidsPtr, pidCount > 0 {
-        for index in 0..<pidCount { pids.append(pid_t(pidsPtr[index])) }
+        for index in 0..<pidCount {
+            guard let pid = pid_t(exactly: pidsPtr[index]), pid > 0 else {
+                setLastError("process pid is out of range")
+                return -9
+            }
+            pids.append(pid)
+        }
     }
-    let global = globalMixdown != 0
+    let global = globalMixdown != 0 && pids.isEmpty
 
     // With no explicit pids and no global request, capture every process currently
     // rendering audio, which keeps working while output is muted.
@@ -375,7 +410,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     }
 
     let configuration = SystemCaptureConfiguration(
-        pids: AudioAppRegistry.includingHelpers(pids),
+        pids: Array(Set(pids)).sorted(),
         globalMixdown: global,
         mono: mono != 0,
         muteCapturedOutput: muteCapturedOutput != 0)
@@ -388,9 +423,10 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     //
     // A timeout here means the TCC grant is undetermined, which is when CoreAudio
     // blocks instead of failing.
+    let capturePIDs = AudioAppRegistry.includingHelpers(configuration.pids)
     let outcome: Int32? = withTimeout(seconds: 6) {
         do {
-            try capture.prepare(pids: configuration.pids,
+            try capture.prepare(pids: capturePIDs,
                                 globalMixdown: configuration.globalMixdown,
                                 mono: configuration.mono,
                                 muteCapturedOutput: configuration.muteCapturedOutput)
@@ -439,7 +475,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     Permissions.noteAudioCaptureGranted()
 
     var microphone: MicrophoneCapture?
-    if microphoneSource == 1 {
+    if microphoneSource != 0 {
         do {
             microphone = try makeMicrophoneCapture()
         } catch let error as CaptureError {
@@ -460,14 +496,26 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     session.capture = capture
     session.microphone = microphone
     session.captureConfiguration = configuration
+    session.capturePIDs = capturePIDs
+    session.systemTargetExited = false
+    session.microphoneEnabled = microphoneSource != 0
     session.generation += 1
-    mrec_tracks_open(eventCallback, eventUserData)
-    mrec_track_started(MREC_TRACK_SYSTEM_AUDIO, nil)
+    session.trackSession = mrec_tracks_open(eventCallback, eventUserData)
+    guard mrec_track_started(session.trackSession, MREC_TRACK_SYSTEM_AUDIO, 1, nil) != 0 else {
+        releaseSession()
+        setLastError("could not allocate track state")
+        return -9
+    }
     if microphone != nil {
-        mrec_track_started(MREC_TRACK_MICROPHONE, MicrophoneCapture.defaultInputName() ?? "")
+        guard mrec_track_started(session.trackSession, MREC_TRACK_MICROPHONE, 1,
+                                 MicrophoneCapture.defaultInputName() ?? "") != 0 else {
+            releaseSession()
+            setLastError("could not allocate track state")
+            return -9
+        }
     }
     if !configuration.globalMixdown {
-        session.exitTimer = watchForExit(configuration.pids, generation: session.generation)
+        session.exitTimer = watchSources(generation: session.generation)
     }
     setLastError("no error")
     return 0
@@ -513,7 +561,7 @@ public func mrec_current_microphone_format(_ sampleRate: UnsafeMutablePointer<Do
     session.lock.lock()
     defer { session.lock.unlock() }
 
-    guard session.microphone != nil else { return -4 }
+    guard session.captureConfiguration != nil, session.microphoneEnabled else { return -4 }
     let format = session.microphoneStateBox.currentFormat()
     sampleRate?.pointee = format.sampleRate
     channels?.pointee = format.channels

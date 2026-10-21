@@ -11,9 +11,7 @@ const appDir = process.cwd();
 const repoRoot = path.resolve(appDir, "../..");
 const addonDir = path.join(repoRoot, "node");
 const requireFromApp = createRequire(path.join(appDir, "package.json"));
-const nodeGypBuildDir = path.dirname(
-  requireFromApp.resolve("node-gyp-build/package.json"),
-);
+const nodeGypBuildDir = path.dirname(requireFromApp.resolve("node-gyp-build/package.json"));
 const electronVersion: string = requireFromApp("electron/package.json").version;
 
 // An ad-hoc signature (`codesign -s -`) gets you no TCC prompt at all; an Apple
@@ -80,13 +78,9 @@ const config: ForgeConfig = {
       // meeting-record loads its native binary through this production
       // dependency. npm hoists it to the workspace root too, so Forge does not
       // discover it while walking this app's otherwise-empty node_modules.
-      await cp(
-        nodeGypBuildDir,
-        path.join(buildPath, "node_modules", "node-gyp-build"),
-        {
-          recursive: true,
-        },
-      );
+      await cp(nodeGypBuildDir, path.join(buildPath, "node_modules", "node-gyp-build"), {
+        recursive: true,
+      });
     },
   },
   plugins: [

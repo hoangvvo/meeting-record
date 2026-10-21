@@ -132,12 +132,14 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
                          void *user_data);
 
 /*
- * DEFAULT is the user's microphone. Windows: the one the captured apps record
- * from, else the default communications microphone. macOS: the default input.
+ * DEFAULT follows the OS default input device. AUTO prefers the captured apps'
+ * microphone on Windows, else the communications default; macOS uses its default
+ * input. Both policies follow device changes during capture.
  */
 typedef enum {
   MREC_MICROPHONE_NONE = 0,
   MREC_MICROPHONE_DEFAULT = 1,
+  MREC_MICROPHONE_AUTO = 2,
 } mrec_microphone_source;
 
 /*

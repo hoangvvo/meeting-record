@@ -5,14 +5,7 @@ description = "System-audio and microphone capture with meeting detection for ma
 documentation = "https://docs.rs/meeting-record"
 edition = "2021"
 homepage = "https://github.com/hoangvvo/meeting-record"
-include = [
-  "/src/**",
-  "/tests/**",
-  "/native/**",
-  "/build.rs",
-  "/README.md",
-  "/LICENSE.md",
-]
+include = ["/src/**", "/tests/**", "/native/**", "/build.rs", "/README.md", "/LICENSE.md"]
 keywords = ["audio", "recording", "meeting", "macos", "windows"]
 license = "MIT"
 links = "meetingrecord"

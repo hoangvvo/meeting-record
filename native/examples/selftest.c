@@ -8,6 +8,7 @@
 #include "meeting-record.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,14 @@ struct metrics {
 
 static struct metrics g_system;
 static struct metrics g_microphone;
+static atomic_int g_source_exited;
+static atomic_uint g_callbacks_after_exit;
+
+static void on_event(const mrec_track_event *event, void *user_data) {
+  (void)user_data;
+  if (event->track == MREC_TRACK_SYSTEM_AUDIO && event->type == MREC_TRACK_INTERRUPTED &&
+      event->reason == MREC_TRACK_REASON_APP_EXITED) atomic_store(&g_source_exited, 1);
+}
 
 static int env_enabled(const char *name) {
   const char *value = getenv(name);
@@ -57,6 +66,7 @@ static void update_metrics(struct metrics *metrics, const float *frames,
 static void on_audio(const float *frames, uint32_t frame_count, uint32_t channels,
                      double sample_rate, uint64_t host_time_ns, void *user_data) {
   (void)user_data;
+  if (atomic_load(&g_source_exited)) atomic_fetch_add(&g_callbacks_after_exit, 1);
   update_metrics(&g_system, frames, frame_count, channels, sample_rate,
                  host_time_ns);
 }
@@ -137,7 +147,7 @@ int mrec_selftest_run(void) {
       cfg.pids, cfg.pid_count, cfg.global_mixdown, cfg.mono,
       cfg.mute_captured_output,
       test_microphone ? MREC_MICROPHONE_DEFAULT : MREC_MICROPHONE_NONE,
-      on_audio, NULL, test_microphone ? on_microphone : NULL, NULL, NULL, NULL);
+      on_audio, NULL, test_microphone ? on_microphone : NULL, NULL, on_event, NULL);
   fprintf(log, "mrec_start_tracks_raw -> %d (%s)\n", st, mrec_last_error());
   if (st != MREC_OK) {
     fclose(log);
@@ -164,6 +174,7 @@ int mrec_selftest_run(void) {
           test_microphone ? " and speak" : "");
   sleep(duration);
 
+  const int was_running = mrec_is_running();
   mrec_status stop_status = mrec_stop();
   fprintf(log, "mrec_stop -> %d\n", stop_status);
 
@@ -198,8 +209,13 @@ int mrec_selftest_run(void) {
   double minimum_peak = 0.0001;
   const char *minimum_peak_env = getenv("MREC_MIN_PEAK");
   if (minimum_peak_env) minimum_peak = strtod(minimum_peak_env, NULL);
-  int system_pass = stop_status == MREC_OK &&
-                    system_seconds >= (double)duration * 0.7 &&
+  const int test_exit = env_enabled("MREC_TEST_SOURCE_EXIT");
+  const int duration_pass = test_exit ? system_seconds > 0.1 : system_seconds >= (double)duration * 0.7;
+  const int exit_pass = !test_exit || (was_running && atomic_load(&g_source_exited) &&
+                                     atomic_load(&g_callbacks_after_exit) == 0);
+  if (test_exit) fprintf(log, "SOURCE EXIT interrupted=%d running=%d callbacks_after_exit=%u\n",
+                         atomic_load(&g_source_exited), was_running, atomic_load(&g_callbacks_after_exit));
+  int system_pass = stop_status == MREC_OK && exit_pass && duration_pass &&
                     g_system.peak >= minimum_peak &&
                     g_system.first_host_time_ns != 0 &&
                     g_system.timestamp_regressions == 0;

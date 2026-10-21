@@ -340,15 +340,17 @@ std::pair<int, int> CapturedSessions(IMMDevice *device,
  * device holding most of their sessions. Otherwise the default communications
  * microphone, which calls use, as Granola picks it.
  */
-std::optional<std::wstring> PreferredMicrophoneId(const std::vector<uint32_t> &targets) {
+std::optional<std::wstring> PreferredMicrophoneId(const std::vector<uint32_t> &targets,
+                                                  int32_t source) {
   ComPtr<IMMDeviceEnumerator> enumerator;
   if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                               IID_PPV_ARGS(&enumerator)))) {
     return std::nullopt;
   }
   ComPtr<IMMDeviceCollection> devices;
-  if (!targets.empty() && SUCCEEDED(enumerator->EnumAudioEndpoints(
-                              eCapture, DEVICE_STATE_ACTIVE, devices.GetAddressOf()))) {
+  if (source == MREC_MICROPHONE_AUTO && !targets.empty() &&
+      SUCCEEDED(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE,
+                                               devices.GetAddressOf()))) {
     const auto processes = ProcessSnapshot();
     std::wstring best;
     std::pair<int, int> best_counts{0, 0};
@@ -366,7 +368,8 @@ std::optional<std::wstring> PreferredMicrophoneId(const std::vector<uint32_t> &t
     if (!best.empty()) return best;
   }
   ComPtr<IMMDevice> device;
-  if (FAILED(enumerator->GetDefaultAudioEndpoint(eCapture, eCommunications, &device))) {
+  if (FAILED(enumerator->GetDefaultAudioEndpoint(
+          eCapture, source == MREC_MICROPHONE_AUTO ? eCommunications : eConsole, &device))) {
     return std::nullopt;
   }
   std::wstring id = DeviceId(device.Get());
@@ -515,6 +518,7 @@ public:
       SetLastErrorMessage("no pids supplied and global_mixdown not set");
       return MREC_ERR_NO_PROCESSES;
     }
+    if (!targets.empty()) global_mixdown = 0;
     if (!global_mixdown) {
       targets.erase(std::remove_if(targets.begin(), targets.end(),
                                    [](uint32_t pid) { return !IsProcessRunning(pid); }),
@@ -526,8 +530,8 @@ public:
       targets = CaptureRoots(std::move(targets));
     }
 
-    if (microphone != MREC_MICROPHONE_NONE &&
-        microphone != MREC_MICROPHONE_DEFAULT) {
+    if (microphone != MREC_MICROPHONE_NONE && microphone != MREC_MICROPHONE_DEFAULT &&
+        microphone != MREC_MICROPHONE_AUTO) {
       SetLastErrorMessage("unknown microphone source");
       return MREC_ERR_INTERNAL;
     }
@@ -574,9 +578,10 @@ public:
     }
 
     if (!global_mixdown) targets_ = targets;
-    if (microphone == MREC_MICROPHONE_DEFAULT) {
+    microphone_source_ = microphone;
+    if (microphone != MREC_MICROPHONE_NONE) {
       mrec_status failure = MREC_ERR_DEVICE_FAILED;
-      auto stream = ActivateMicrophone(PreferredMicrophoneId(targets_), failure);
+      auto stream = ActivateMicrophone(PreferredMicrophoneId(targets_, microphone_source_), failure);
       if (!stream) {
         streams_.clear();
         targets_.clear();
@@ -593,9 +598,15 @@ public:
     }
     running_ = true;
     stop_requested_ = false;
-    mrec_tracks_open(event_callback, event_user_data);
-    mrec_track_started(MREC_TRACK_SYSTEM_AUDIO, nullptr);
-    if (microphone_) mrec_track_started(MREC_TRACK_MICROPHONE, microphone_->name.c_str());
+    system_exited_ = false;
+    track_session_ = mrec_tracks_open(event_callback, event_user_data);
+    if (!mrec_track_started(track_session_, MREC_TRACK_SYSTEM_AUDIO, streams_.size(), nullptr) ||
+        (microphone_ && !mrec_track_started(track_session_, MREC_TRACK_MICROPHONE, 1,
+                                             microphone_->name.c_str()))) {
+      StopLocked();
+      SetLastErrorMessage("could not allocate track state");
+      return MREC_ERR_INTERNAL;
+    }
     for (size_t i = 0; i < streams_.size(); i++) {
       HRESULT hr = streams_[i].client->Start();
       if (FAILED(hr)) {
@@ -796,16 +807,24 @@ private:
     LoopbackStream &stream = streams_[index];
     uint64_t next_exit_check = 0;
 
-    while (!stop_requested_.load(std::memory_order_relaxed)) {
+    while (!stop_requested_.load(std::memory_order_relaxed) &&
+           !system_exited_.load(std::memory_order_relaxed)) {
       /* Exited targets deliver silence; say so, and keep recording. */
       if (index == 0 && !targets_.empty() && next_exit_check != UINT64_MAX) {
         const uint64_t now = MonotonicTimeNs();
         if (now >= next_exit_check) {
           next_exit_check = now + 1000000000ull;
-          if (std::none_of(targets_.begin(), targets_.end(), IsProcessRunning)) {
+          const auto processes = ProcessSnapshot();
+          const bool has_processes = std::any_of(processes.begin(), processes.end(),
+              [this, &processes](const auto &entry) {
+                return InTrees(processes, entry.first, targets_) && IsProcessRunning(entry.first);
+              });
+          if (!processes.empty() && !has_processes) {
+            system_exited_ = true;
             next_exit_check = UINT64_MAX;
-            mrec_track_interrupted(MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
+            mrec_track_interrupted(track_session_, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
                                    MREC_TRACK_REASON_APP_EXITED, "the captured apps exited");
+            break;
           }
         }
       }
@@ -853,7 +872,7 @@ private:
       const uint64_t now = MonotonicTimeNs();
       if (now >= next_device_check) {
         next_device_check = now + 500000000ull;
-        const auto preferred = PreferredMicrophoneId(targets_);
+        const auto preferred = PreferredMicrophoneId(targets_, microphone_source_);
         if (!preferred) {
           RecoverMicrophone(MREC_TRACK_REASON_DEVICE_REMOVED, "no microphone is available");
           continue;
@@ -930,7 +949,8 @@ private:
     Session *session = static_cast<Recovery *>(context)->session;
     mrec_status failure = MREC_ERR_DEVICE_FAILED;
     auto replacement =
-        session->ActivateMicrophone(PreferredMicrophoneId(session->targets_), failure);
+        session->ActivateMicrophone(
+            PreferredMicrophoneId(session->targets_, session->microphone_source_), failure);
     if (!replacement) return 0;
     HRESULT hr = replacement->client->Start();
     if (FAILED(hr)) {
@@ -948,8 +968,8 @@ private:
     const std::string message = "system audio interrupted: " + detail;
     SetLastErrorMessage(message);
     Recovery recovery{this, index};
-    mrec_track_recover(MREC_TRACK_SYSTEM_AUDIO, static_cast<uint32_t>(index), reason,
-                       message.c_str(), ReopenLoopback, WaitForRetry, &recovery);
+    mrec_track_recover(track_session_, MREC_TRACK_SYSTEM_AUDIO, static_cast<uint32_t>(index),
+                       reason, message.c_str(), ReopenLoopback, WaitForRetry, &recovery);
   }
 
   void RecoverMicrophone(mrec_track_reason reason, const std::string &detail) {
@@ -957,8 +977,8 @@ private:
     const std::string message = "microphone interrupted: " + detail;
     SetLastErrorMessage(message);
     Recovery recovery{this, 0};
-    mrec_track_recover(MREC_TRACK_MICROPHONE, 0, reason, message.c_str(), ReopenMicrophone,
-                       WaitForRetry, &recovery);
+    mrec_track_recover(track_session_, MREC_TRACK_MICROPHONE, 0, reason, message.c_str(),
+                       ReopenMicrophone, WaitForRetry, &recovery);
   }
 
   void StopLocked() {
@@ -991,12 +1011,15 @@ private:
   bool running_ = false;
   std::optional<ScopedMtaUsage> mta_usage_;
   std::atomic<bool> stop_requested_{false};
+  std::atomic<bool> system_exited_{false};
   /* Capture roots, which also pick the microphone; empty for system capture. */
   std::vector<uint32_t> targets_;
   std::vector<LoopbackStream> streams_;
   std::vector<std::thread> workers_;
   std::optional<MicrophoneStream> microphone_;
   bool microphone_enabled_ = false;
+  int32_t microphone_source_ = MREC_MICROPHONE_NONE;
+  uint64_t track_session_ = 0;
   std::thread microphone_worker_;
   TimelineMixer system_mixer_;
   TimelineMixer microphone_mixer_;

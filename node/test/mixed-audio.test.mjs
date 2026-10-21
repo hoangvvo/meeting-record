@@ -18,14 +18,14 @@ class Source {
   }
   send(frames, value, sampleRate, hostTimeNs) {
     const samples = new Float32Array(frames).fill(value);
-    const chunk = Buffer.from(samples.buffer);
-    Object.assign(chunk, {
+    const chunk = {
+      pcm: Buffer.from(samples.buffer),
       sampleRate,
       channels: 1,
       hostTimeNs,
       frameCount: frames,
       droppedSamples: 0,
-    });
+    };
     this.consumer?.(chunk);
   }
 }
@@ -133,4 +133,35 @@ void test("pause and stop flush startup packets without waiting for a missing so
   mix.finishCapture();
   assert.equal(mix.read()?.length, 20);
   mix.destroy();
+});
+
+void test("long gaps in every source do not backfill silence on recovery", async () => {
+  const system = new Source();
+  const microphone = new Source();
+  const mix = new MixedAudioImpl(100, system, microphone);
+  const chunks = collect(mix);
+  const ended = once(mix, "end");
+  system.send(10, 0.25, 100, 0n);
+  microphone.send(10, 0.25, 100, 0n);
+  system.send(10, 0.25, 100, 60_000_000_000n);
+  microphone.send(10, 0.25, 100, 60_000_000_000n);
+  mix.finishCapture();
+  await ended;
+  assert.equal(Buffer.concat(chunks).length, 40);
+});
+
+void test("a missing source retains silence while another source keeps recording", async () => {
+  const system = new Source();
+  const microphone = new Source();
+  const mix = new MixedAudioImpl(100, system, microphone);
+  const chunks = collect(mix);
+  const ended = once(mix, "end");
+  system.send(10, 0.25, 100, 0n);
+  microphone.send(10, 0.25, 100, 0n);
+  for (let index = 1; index <= 60; index++)
+    system.send(10, 0.25, 100, BigInt(index) * 100_000_000n);
+  microphone.send(10, 0.25, 100, 6_000_000_000n);
+  mix.finishCapture();
+  await ended;
+  assert.equal(Buffer.concat(chunks).length, 610 * 2);
 });

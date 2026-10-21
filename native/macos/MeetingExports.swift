@@ -205,23 +205,20 @@ public func mrec_start_meeting(_ meeting: UnsafeRawPointer?,
                                _ userData: UnsafeMutableRawPointer?) -> Int32 {
     guard let meeting else { return -9 /* INTERNAL */ }
 
-    let platform = meeting.advanced(by: Layout.platform)
-        .assumingMemoryBound(to: Int32.self).pointee
     let pid = meeting.advanced(by: Layout.pid)
         .assumingMemoryBound(to: UInt32.self).pointee
 
     // Two browsers can both host Meet, so the pid identifies the meeting first.
     let current = MeetingDetector.scan()
     var pids: [UInt32] = []
-    if let fresh = current.first(where: { UInt32(bitPattern: $0.pid) == pid })
-        ?? current.first(where: { $0.platform.rawValue == platform }) {
-        pids = fresh.audioPIDs.map(UInt32.init)
+    if let fresh = current.first(where: { UInt32(bitPattern: $0.pid) == pid }) {
+        pids = [UInt32(bitPattern: fresh.pid)] + fresh.audioPIDs.map(UInt32.init)
     } else {
         let count = min(meeting.advanced(by: Layout.audioPIDCount)
             .assumingMemoryBound(to: Int.self).pointee, Layout.maxAudioPIDs)
         let base = meeting.advanced(by: Layout.audioPIDs)
             .assumingMemoryBound(to: UInt32.self)
-        pids = (0..<count).map { base[$0] }
+        pids = [pid] + (0..<count).map { base[$0] }
     }
     guard !pids.isEmpty else { return -5 /* NO_PROCESSES */ }
 

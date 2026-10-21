@@ -91,7 +91,8 @@ mrec_status mrec_scan(mrec_meeting *out, size_t capacity,
 /*
  * Record a detected meeting. Equivalent to filling an mrec_config with its
  * audio_pids, except the pid list is re-resolved at start time, so it stays
- * correct when an app moves audio between helper processes.
+ * correct when an app moves audio between helper processes. Only the original
+ * owner PID is refreshed; a different meeting on the same service is never substituted.
  */
 mrec_status mrec_start_meeting(const mrec_meeting *meeting, mrec_audio_callback cb,
                                void *user_data);
