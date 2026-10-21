@@ -15,7 +15,8 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
   if (-not $installation) { throw "Visual Studio C++ build tools are required" }
   $vcvars = Join-Path $installation "VC/Auxiliary/Build/vcvarsall.bat"
   $target = if ($Arch -eq "arm64") { "arm64" } else { "amd64" }
-  $variables = & cmd.exe /d /s /c "`"`"$vcvars`" $target >nul && set`""
+  # `call` keeps the quoted path intact under both Windows PowerShell and pwsh.
+  $variables = & cmd.exe /d /c "call `"$vcvars`" $target >nul && set"
   if ($LASTEXITCODE -ne 0) { throw "Could not initialize the Visual Studio toolchain" }
   foreach ($variable in $variables) {
     if ($variable -match '^([^=]+)=(.*)$') {
@@ -28,7 +29,8 @@ function Test-Native {
   param([string]$Name, [string[]]$Sources, [switch]$Cxx)
 
   Write-Host "==> $Name"
-  $language = if ($Cxx) { @("/std:c++17", "/EHsc") } else { @("/std:c11") }
+  # @() keeps one flag an array; Windows PowerShell would splat a string per character.
+  $language = @(if ($Cxx) { "/std:c++17", "/EHsc" } else { "/std:c11" })
   & cl.exe /nologo /W4 /utf-8 /D_CRT_SECURE_NO_WARNINGS @language `
     "/I$root/native/include" "/I$root/native/common" "/Fe:$Name.exe" @Sources
   if ($LASTEXITCODE -ne 0) { throw "$Name compilation failed" }
