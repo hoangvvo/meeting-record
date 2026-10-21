@@ -111,14 +111,17 @@ class TrackMetrics {
     verifyGaps(name, this.gapsNs, expectations.pauseSeconds);
   }
 
-  /** A removed device leaves one timestamp gap: audio is neither backfilled nor overlapped. */
-  verifyRecovered(name) {
+  /**
+   * An interruption leaves one timestamp gap, and moving to another device none:
+   * audio is neither backfilled nor overlapped.
+   */
+  verifyRecovered(name, interrupted) {
     if (this.malformedChunks !== 0 || this.timestampRegressions !== 0) {
       throw new Error(`${name}: malformed chunks or timestamp regressions around recovery`);
     }
-    if (this.gapsNs.length !== 1) {
+    if (this.gapsNs.length !== (interrupted ? 1 : 0)) {
       throw new Error(
-        `${name}: timestamp gaps ${formatGaps(this.gapsNs)} do not match one removal`,
+        `${name}: timestamp gaps ${formatGaps(this.gapsNs)} do not match the removal`,
       );
     }
   }
@@ -291,20 +294,26 @@ function frequencies(name) {
     });
 }
 
-/** Track events must be exactly those the scenario causes. */
+/**
+ * Track events must be exactly those the scenario causes. A removed microphone is
+ * interrupted until it returns, or moves to another device when one is available.
+ */
 function verifyTrackEvents(events, expectDeviceChange, expectRecovery) {
   const removed = "microphone interrupted (device-removed)";
+  const changed = "microphone devicechange";
   const expected = (event) =>
-    (expectDeviceChange && event === "microphone devicechange") ||
+    ((expectDeviceChange || expectRecovery) && event === changed) ||
     (expectRecovery && (event === removed || event === "microphone resumed"));
   const unexpected = events.filter((event) => !expected(event));
   if (unexpected.length > 0) throw new Error(`unexpected track events: ${unexpected.join(", ")}`);
-  if (expectDeviceChange && !events.includes("microphone devicechange")) {
+  if (expectDeviceChange && !events.includes(changed)) {
     throw new Error("expected a microphone device change");
   }
   const lost = events.indexOf(removed);
-  if (expectRecovery && (lost < 0 || !events.includes("microphone resumed", lost))) {
-    throw new Error("expected the microphone to be interrupted and resume");
+  const recovered =
+    lost >= 0 ? events.includes("microphone resumed", lost) : events.includes(changed);
+  if (expectRecovery && !recovered) {
+    throw new Error("expected the microphone to resume or move to another device");
   }
 }
 
@@ -567,7 +576,10 @@ async function main() {
   if (microphone) {
     microphone.report("microphone");
     if (expectRecovery) {
-      microphone.verifyRecovered("microphone");
+      microphone.verifyRecovered(
+        "microphone",
+        trackEvents.includes("microphone interrupted (device-removed)"),
+      );
     } else {
       microphone.verify("microphone", expectedSeconds, expectations);
     }

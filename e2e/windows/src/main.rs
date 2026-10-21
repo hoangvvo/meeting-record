@@ -132,17 +132,17 @@ impl TrackMetrics {
         verify_gaps(name, &self.gaps_ns, expectations.pause)
     }
 
-    /// A removed device leaves one timestamp gap: audio is neither backfilled
-    /// nor overlapped.
-    fn verify_recovered(&self, name: &str) -> Result<(), String> {
+    /// An interruption leaves one timestamp gap, and moving to another device
+    /// none: audio is neither backfilled nor overlapped.
+    fn verify_recovered(&self, name: &str, interrupted: bool) -> Result<(), String> {
         if self.malformed_chunks != 0 || self.timestamp_regressions != 0 {
             return Err(format!(
                 "{name}: malformed chunks or timestamp regressions around recovery"
             ));
         }
-        if self.gaps_ns.len() != 1 {
+        if self.gaps_ns.len() != usize::from(interrupted) {
             return Err(format!(
-                "{name}: timestamp gaps {:?} do not match one removal",
+                "{name}: timestamp gaps {:?} do not match the removal",
                 self.gaps_ns
                     .iter()
                     .map(|gap| Duration::from_nanos(*gap))
@@ -385,7 +385,9 @@ fn microphone_changed(event: &TrackEvent) -> bool {
     )
 }
 
-/// Track events must be exactly those the scenario causes.
+/// Track events must be exactly those the scenario causes. A removed microphone
+/// is interrupted until it returns, or moves to another device when one is
+/// available.
 fn verify_track_events(
     events: &[TrackEvent],
     expect_device_change: bool,
@@ -394,7 +396,7 @@ fn verify_track_events(
     let unexpected: Vec<_> = events
         .iter()
         .filter(|event| {
-            !(expect_device_change && microphone_changed(event))
+            !((expect_device_change || expect_recovery) && microphone_changed(event))
                 && !(expect_recovery && (microphone_removed(event) || microphone_resumed(event)))
         })
         .collect();
@@ -404,9 +406,12 @@ fn verify_track_events(
     if expect_device_change && !events.iter().any(microphone_changed) {
         return Err("expected a microphone device change".into());
     }
-    let lost = events.iter().position(microphone_removed);
-    if expect_recovery && !lost.is_some_and(|lost| events[lost..].iter().any(microphone_resumed)) {
-        return Err("expected the microphone to be interrupted and resume".into());
+    let recovered = match events.iter().position(microphone_removed) {
+        Some(lost) => events[lost..].iter().any(microphone_resumed),
+        None => events.iter().any(microphone_changed),
+    };
+    if expect_recovery && !recovered {
+        return Err("expected the microphone to resume or move to another device".into());
     }
     Ok(())
 }
@@ -808,7 +813,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
     if let Some(microphone) = microphone {
         microphone.report("microphone");
         if expect_recovery {
-            microphone.verify_recovered("microphone")?;
+            microphone.verify_recovered("microphone", events.iter().any(microphone_removed))?;
         } else {
             microphone.verify("microphone", expected_duration, &expectations)?;
         }

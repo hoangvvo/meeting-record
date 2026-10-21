@@ -5,8 +5,10 @@ param(
     [string]$Device,
     [switch]$Output,
     # Default makes the device the default for every role. Disable removes it, as
-    # unplugging would; Enable restores it and makes it the default again.
-    [ValidateSet("Default", "Disable", "Enable")]
+    # unplugging would; Enable restores it and makes it the default again. Find
+    # prints the active device's full name, or nothing. List prints every active
+    # device's name.
+    [ValidateSet("Default", "Disable", "Enable", "Find", "List")]
     [string]$Action = "Default",
     [ValidateRange(0, 600)]
     [double]$DelaySeconds = 0
@@ -104,6 +106,30 @@ namespace MeetingRecord {
                                         " device name contains " + text);
         }
 
+        public static string[] ListActive(int flow) {
+            IMMDeviceCollection devices;
+            ((IMMDeviceEnumerator)new MMDeviceEnumerator()).EnumAudioEndpoints(flow, Active, out devices);
+            int count;
+            devices.GetCount(out count);
+            string[] names = new string[count];
+            for (int index = 0; index < count; index++) {
+                IMMDevice device;
+                devices.Item(index, out device);
+                names[index] = Name(device);
+            }
+            return names;
+        }
+
+        public static string FindActive(int flow, string text) {
+            try {
+                string name;
+                Find(flow, Active, text, out name);
+                return name;
+            } catch (ArgumentException) {
+                return "";
+            }
+        }
+
         static void MakeDefault(string id) {
             IPolicyConfig policy = (IPolicyConfig)new PolicyConfigClient();
             for (int role = 0; role < 3; role++) {
@@ -148,8 +174,16 @@ namespace MeetingRecord {
 }
 
 $flow = if ($Output) { [MeetingRecord.AudioDevices]::Playback } else { [MeetingRecord.AudioDevices]::Recording }
+if ($Action -eq "List") {
+    [MeetingRecord.AudioDevices]::ListActive($flow)
+    return
+}
 if (-not $Device) {
     [MeetingRecord.AudioDevices]::Default($flow)
+    return
+}
+if ($Action -eq "Find") {
+    [MeetingRecord.AudioDevices]::FindActive($flow, $Device)
     return
 }
 Start-Sleep -Milliseconds ([int]($DelaySeconds * 1000))

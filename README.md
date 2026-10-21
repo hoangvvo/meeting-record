@@ -128,14 +128,17 @@ MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Developer ID A
 Live audio tests on Windows:
 
 ```powershell
-./e2e/windows.ps1                                         # system, process, app exit; both bindings
-./e2e/windows.ps1 -Binding Rust                           # one binding
-./e2e/windows.ps1 -MicrophoneDevice "CABLE Input"         # loopback microphone
-./e2e/windows.ps1 -SwitchMicrophone "Stereo Mix"          # default-input switching
-./e2e/windows.ps1 -RemoveMicrophone "CABLE Output"        # microphone loss and recovery
-./e2e/windows.ps1 -SwitchOutput "Realtek Digital Output"  # default-output switching
-./e2e/windows.ps1 -Mode Meeting -MeetingPid 1234          # a live meeting
+./e2e/windows.ps1                                                 # every scenario, both bindings
+./e2e/windows.ps1 -Binding Rust                                   # every scenario, one binding
+./e2e/windows.ps1 -SwitchMicrophone "Stereo Mix"                  # choose a device instead of detecting one
+./e2e/windows.ps1 -Mode All                                       # system, process, and app exit only
+./e2e/windows.ps1 -Mode Process -RemoveMicrophone "CABLE Output"  # one scenario
+./e2e/windows.ps1 -Mode Meeting -MeetingPid 1234                  # a live meeting
 ```
+
+Without `-Mode`, the script detects devices: a [VB-Audio cable](https://vb-audio.com/Cable/)
+for the microphone tone and microphone removal, and other active devices for the
+input and output switches. Scenarios without a device are skipped.
 
 See [internals](./docs/INTERNALS.md) for backend details.
 

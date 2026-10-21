@@ -1,5 +1,10 @@
 # Live-audio E2E for the Windows backend through the Rust and Node.js bindings.
 #
+# Without -Mode, every scenario below runs in turn, each alone since two change the
+# same microphone. Devices not named are detected: a VB-Audio cable for the
+# microphone tone and removal, and other active devices for the switches. Scenarios
+# without a device are skipped. -Mode runs one pass.
+#
 # System and Process play test tones. Meeting needs a call receiving audio. Exit
 # ends the captured app mid-capture: only its system audio may stop, with app-exited.
 #
@@ -10,9 +15,9 @@
 # -SwitchMicrophone makes another recording device the default mid-capture, then
 # restores the original, and requires a microphone device change.
 #
-# -RemoveMicrophone disables that recording device mid-capture, then restores it,
-# and requires the microphone track to be interrupted and resume while system audio
-# and the mix continue.
+# -RemoveMicrophone disables that recording device mid-capture, then restores it.
+# The microphone track must resume, or move to another device when one exists,
+# while system audio and the mix continue.
 #
 # -SwitchOutput makes another playback device the default mid-capture, then restores
 # the original; capture must continue without gaps.
@@ -21,7 +26,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet("System", "Process", "Exit", "Meeting", "All")]
-    [string]$Mode = "All",
+    [string]$Mode,
     [string]$MeetingPlatform = "meet",
     [ValidateRange(0, [int]::MaxValue)]
     [int]$MeetingPid = 0,
@@ -56,6 +61,68 @@ $deviceScript = Join-Path $PSScriptRoot "windows-audio-device.ps1"
 $targetFrequency = 997
 $otherFrequency = 440
 $microphoneFrequency = 660
+if (-not $Mode) {
+    $shared = @{ Mode = "All" }
+    foreach ($name in "Binding", "DurationSeconds", "MinimumPeak", "MixSampleRate", "PauseSeconds", "RestartCycles", "Microphone") {
+        if ($PSBoundParameters.ContainsKey($name)) { $shared[$name] = $PSBoundParameters[$name] }
+    }
+    function Test-Device([string]$Device, [bool]$Output) {
+        [bool]$Device -and [bool](& $deviceScript -Device $Device -Output:$Output -Action Find)
+    }
+    $recording = @(& $deviceScript -Action List)
+    $playback = @(& $deviceScript -Output -Action List)
+    # A VB-Audio cable plays what reaches "CABLE Input" into the "CABLE Output" microphone.
+    $cable = @($playback -like "CABLE Input*").Count -gt 0 -and @($recording -like "CABLE Output*").Count -gt 0
+    $useCable = $cable -and -not $PSBoundParameters.ContainsKey("MicrophoneDevice")
+    if ($useCable) { $MicrophoneDevice = "CABLE Input" }
+    if ($cable -and -not $PSBoundParameters.ContainsKey("RemoveMicrophone")) { $RemoveMicrophone = "CABLE Output" }
+    if (-not $PSBoundParameters.ContainsKey("SwitchMicrophone")) {
+        $SwitchMicrophone = $recording | Where-Object { $_ -notlike "CABLE *" } | Select-Object -First 1
+    }
+    if (-not $PSBoundParameters.ContainsKey("SwitchOutput")) {
+        $defaultOutput = & $deviceScript -Output
+        $SwitchOutput = $playback | Where-Object { $_ -ne $defaultOutput -and $_ -notlike "CABLE *" } | Select-Object -First 1
+    }
+    # The cable's tone reaches the microphone track only while it is the default input.
+    $originalMicrophone = & $deviceScript
+    if ($useCable) { & $deviceScript -Device "CABLE Output" | Out-Null }
+    $loopback = @{}
+    if (Test-Device $MicrophoneDevice $true) {
+        $loopback.MicrophoneDevice = $MicrophoneDevice
+    } elseif ($MicrophoneDevice) {
+        Write-Host "no active playback device matches '$MicrophoneDevice'; running without the microphone tone"
+    }
+    $scenarios = @(
+        @{ Name = "capture and app exit"; Arguments = $loopback },
+        @{ Name = "microphone switch"; Device = $SwitchMicrophone; Output = $false; Arguments = @{ SwitchMicrophone = $SwitchMicrophone } },
+        @{ Name = "microphone removal"; Device = $RemoveMicrophone; Output = $false; Arguments = @{ RemoveMicrophone = $RemoveMicrophone } + $loopback },
+        @{ Name = "output switch"; Device = $SwitchOutput; Output = $true; Arguments = @{ SwitchOutput = $SwitchOutput } }
+    )
+    $failed = @()
+    try {
+        foreach ($scenario in $scenarios) {
+            if ($scenario.ContainsKey("Device") -and -not (Test-Device $scenario.Device $scenario.Output)) {
+                $reason = if ($scenario.Device) { "no active device matches '$($scenario.Device)'" } else { "no device found" }
+                Write-Host "`n### skipped $($scenario.Name): $reason"
+                continue
+            }
+            Write-Host "`n### $($scenario.Name)"
+            $arguments = $scenario.Arguments
+            try {
+                & $PSCommandPath @shared @arguments
+            } catch {
+                Write-Host "FAILED $($scenario.Name): $_"
+                $failed += $scenario.Name
+            }
+        }
+    } finally {
+        if ($useCable -and $originalMicrophone) { & $deviceScript -Device $originalMicrophone | Out-Null }
+    }
+    if ($failed) { throw "failed scenarios: $($failed -join ', ')" }
+    Write-Host "`nPASS: every scenario that ran met its E2E assertions"
+    return
+}
+
 $variableNames = @(
     "MREC_TARGET_PID",
     "MREC_DURATION_SECONDS",
