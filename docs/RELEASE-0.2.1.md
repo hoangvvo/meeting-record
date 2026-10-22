@@ -21,20 +21,20 @@ Release preparation for the `meeting-record` npm package and Rust crate.
 
 ## Prepare artifacts
 
-Run the Release workflow from the release commit with `package=all` and `publish=false`:
+Run the Release workflow from a branch or tag pointing to the release commit with `package=all` and `publish=false`:
 
 ```sh
-gh workflow run release.yml --ref <release-branch-or-commit> -f package=all -f publish=false
+gh workflow run release.yml --ref <release-branch-or-tag> -f package=all -f publish=false
 ```
 
 The workflow produces `npm-package` (the tarball with all four native prebuilds) and `rust-crate` (the crate with bundled native sources). Confirm Rust CI and Node CI pass on the same commit, and confirm the release workflow's artifact verification succeeds.
 
 ## Publish
 
-After release approval, run the Release workflow from that same reviewed commit with `package=all` and `publish=true`. Both selected packages must pass artifact verification before either publish job starts.
+After release approval, run the Release workflow from a branch or tag still pointing to that same reviewed commit with `package=all` and `publish=true`. Both selected packages must pass artifact verification before either publish job starts.
 
 ```sh
-gh workflow run release.yml --ref <reviewed-release-branch-or-commit> -f package=all -f publish=true
+gh workflow run release.yml --ref <reviewed-release-branch-or-tag> -f package=all -f publish=true
 ```
 
 Verify both registries report version `0.2.1` after publishing. Use the changes above for the GitHub release notes.
