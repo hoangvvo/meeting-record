@@ -92,9 +92,10 @@ void test("retain an earlier microphone prefix regardless of first packet order 
   const chunks = collect(mix);
   const ended = once(mix, "end");
   for (const origin of [0n, 60_000_000_000n]) {
+    const previousChunks = chunks.length;
     system.send(10, 0.25, 100, origin + 50_000_000n);
     mix.read(0);
-    await delay(20);
+    assert.equal(chunks.length, previousChunks);
     microphone.send(10, 0.5, 100, origin);
     mix.pauseCapture();
     mix.resumeCapture();

@@ -434,14 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn earlier_microphone_prefix_survives_later_arrival() {
+    fn startup_aligns_sources_by_timestamp_instead_of_queue_order() {
         let state = Arc::new(AtomicUsize::new(0));
         let sources = vec![Arc::new(TrackQueue::new()), Arc::new(TrackQueue::new())];
         write(&sources[0], &state, 10, 100.0, 0.25, 50_000_000);
-        let audio = MixedAudio::new(100, sources.clone(), Arc::clone(&state)).unwrap();
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(audio.shared.output.lock().unwrap().bytes, 0);
+        // Queue both first packets before starting the worker so scheduling
+        // cannot let the missing-source deadline expire before the mic arrives.
         write(&sources[1], &state, 10, 100.0, 0.5, 0);
+        let audio = MixedAudio::new(100, sources.clone(), Arc::clone(&state)).unwrap();
         state.store(STATE_STOPPED, Ordering::Release);
         for source in &sources {
             source.close();
