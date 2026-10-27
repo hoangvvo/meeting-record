@@ -100,14 +100,33 @@ jobs:
           path: node/prebuilds
           merge-multiple: true
 
+      - name: Create universal macOS prebuild
+        run: |
+          mkdir -p node/prebuilds/darwin-x64+arm64
+          lipo -create \
+            node/prebuilds/darwin-arm64/meeting-record.node \
+            node/prebuilds/darwin-x64/meeting-record.node \
+            -output node/prebuilds/darwin-x64+arm64/meeting-record.node
+          rm -rf node/prebuilds/darwin-arm64 node/prebuilds/darwin-x64
+
       - name: Verify complete prebuild set
         run: |
-          targets=(darwin-arm64 darwin-x64 win32-arm64 win32-x64)
+          targets=(darwin-x64+arm64 win32-arm64 win32-x64)
           for target in "${targets[@]}"; do
             test -f "node/prebuilds/$target/meeting-record.node"
           done
           file_count="$(find node/prebuilds -type f | wc -l | tr -d ' ')"
           test "$file_count" = "${#targets[@]}"
+          archs="$(lipo -archs node/prebuilds/darwin-x64+arm64/meeting-record.node)"
+          case "$archs" in
+            "x86_64 arm64"|"arm64 x86_64") ;;
+            *) echo "Unexpected macOS prebuild architectures: $archs" >&2; exit 1 ;;
+          esac
+
+      - name: Verify universal macOS prebuild loads
+        env:
+          PREBUILDS_ONLY: "1"
+        run: node -e 'require("node-gyp-build")("node")'
 
       - name: Pack npm package
         run: |
