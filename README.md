@@ -67,12 +67,16 @@ macOS app requirements:
 | `discord` | Discord                      |
 | `browser` | Other browser-based meetings |
 
-- Record when `shouldRecord` / `should_record` is true, including listen-only meetings.
-- An idle conferencing app alone does not count as a call.
+- Record when `shouldRecord` / `should_record` is true. The library combines the evidence and makes this recommendation; consumers do not need to interpret call states or UI controls.
+- Classification and confidence rules are shared by macOS and Windows. Audio activity is combined only within the same app instance.
+- Recognised in-call controls yield confidence 90–100, including silent/listen-only calls and Teams web calls on `/v2/`. Recognised pre-join, lobby, and ended-screen controls suppress detection even while the microphone is active.
+- Call checks cover Teams, Meet, Zoom, Webex, Slack huddles, Discord voice connections, and recognised browser services. Stable accessibility identifiers are preferred; exact English control/status labels provide additional matches. UI inspection is bounded and scoped to the relevant app window or service document.
+- When call UI is unavailable or unrecognised, detection falls back to microphone activity from the meeting app. Browsers also need a recognised call URL or tab title. Playback alone, Teams home/chat pages, and microphone use on unrelated sites do not qualify through this fallback.
 - Scan for current meetings or watch for `started`, `updated`, and `ended` events.
 - The watcher confirms starts after about two seconds and endings after about three seconds of absence.
-- Detection works without Accessibility; titles and URLs may be empty.
+- Native app audio-based detection works without Accessibility. On macOS, Accessibility enables call-state checks and browser detection; relaunch after granting it.
 - Windows: a background browser meeting may have a title but no URL.
+- The watcher also emits updates when confidence changes. Detection remains a heuristic: UI changes, unsupported labels/languages, inaccessible controls, and browser-wide audio attribution can force a less precise fallback. Manual capture remains available independently of detection.
 
 ## Capture
 

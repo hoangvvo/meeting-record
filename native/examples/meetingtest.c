@@ -1,8 +1,8 @@
 /*
  * Meeting detection: one scan, then live watching.
  *
- * Needs no permission, so this runs as a plain binary. Titles and URLs are empty
- * without Accessibility.
+ * Native app detection needs no permission, so this runs as a plain binary.
+ * Browser detection and titles/URLs need Accessibility on macOS.
  */
 #include "meeting-record.h"
 #include "meeting-record-detect.h"

@@ -100,9 +100,18 @@ struct CatalogTests {
         expectEqual(MeetingCatalog.confidence(isBrowser: false, playingAudio: false,
                                               usingMic: false, recognised: nil),
                     0, "an app with no audio is not a meeting")
+        expectEqual(MeetingCatalog.confidence(isBrowser: false, playingAudio: true,
+                                              usingMic: false, recognised: nil),
+                    0, "native chat/video playback is not a meeting")
         expectEqual(MeetingCatalog.confidence(isBrowser: true, playingAudio: true,
                                               usingMic: false, recognised: nil),
                     0, "a browser playing audio is not a meeting on its own")
+        expectEqual(MeetingCatalog.confidence(isBrowser: true, playingAudio: true,
+                                              usingMic: false, recognised: .meet),
+                    0, "a stale meeting tab plus playback is not a meeting")
+        expectEqual(MeetingCatalog.confidence(isBrowser: true, playingAudio: true,
+                                              usingMic: true, recognised: nil),
+                    0, "unrelated microphone use and playback are not a browser meeting")
         expectEqual(MeetingCatalog.confidence(isBrowser: true, playingAudio: false,
                                               usingMic: true, recognised: .meet),
                     MeetingCatalog.recordThreshold, "a recognised call with the mic records")

@@ -14,16 +14,19 @@
  *       mrec_start(&cfg, on_audio, NULL);
  *     }
  *
- * Four signals, in order of dependency:
+ * Evidence combined inside the library:
  *
  *   1. process identity   — is a known conferencing app running?
- *   2. audio/mic activity — is it doing audio IO? Distinguishes a live call from
- *                           an app that is merely open.
+ *   2. audio/mic activity — a conservative fallback when call UI is unavailable.
  *   3. window title / URL — needs the Accessibility permission.
- *   4. AX tree scraping   — participants and mute state; also language-dependent.
+ *   4. call controls      — provider-specific in-call, pre-join, lobby and ended UI.
  *
- * Layers 1-2 need no permission and are sufficient to decide whether to record.
- * Recording is never gated on 3-4.
+ * Recognised in-call controls can identify silent/mic-disabled calls. Recognised
+ * pre-join/lobby/ended UI vetoes audio activity. Otherwise native clients fall
+ * back to 1-2; browsers also need a recognised call URL/title from 3. On macOS,
+ * Accessibility enables 3-4. Consumers use confidence and should_record; they do
+ * not need to interpret these states. UI checks and audio attribution remain
+ * heuristic. Manual capture does not depend on detection.
  */
 #ifndef MEETING_RECORD_DETECT_H
 #define MEETING_RECORD_DETECT_H
@@ -45,7 +48,7 @@ typedef enum {
   MREC_PLATFORM_WEBEX,
   MREC_PLATFORM_SLACK,
   MREC_PLATFORM_DISCORD,
-  MREC_PLATFORM_GENERIC_BROWSER, /* a tab on a call URL we recognise */
+  MREC_PLATFORM_GENERIC_BROWSER, /* another recognised browser call service */
 } mrec_platform;
 
 #define MREC_MAX_AUDIO_PIDS 16
@@ -69,11 +72,13 @@ typedef struct {
   char url[1024];  /* active tab's URL for browser-based calls; may be empty */
 
   int32_t is_using_mic;     /* the user is (or could be) speaking */
-  int32_t is_playing_audio; /* someone else is speaking */
+  int32_t is_playing_audio; /* the app has active audio output */
 
   /*
-   * 0-100: known app running 40, doing audio output +30, using the mic +25,
-   * recognised meeting URL/title +5.
+   * 0-100: recognised in-call UI scores 90, plus 5 each for audio output/mic.
+   * Pre-join/lobby/ended UI scores 0 and is omitted from scans. With unknown UI,
+   * microphone capture is required: known app 40, output +30, mic +25,
+   * recognised browser call URL/title +5. Browsers need that URL/title match.
    */
   int32_t confidence;
 
@@ -122,8 +127,8 @@ mrec_status mrec_watch_stop(void);
 int32_t mrec_is_watching(void);
 
 /*
- * Needed only for titles, URLs and participants, never for deciding whether to
- * record. Backed by AXIsProcessTrusted, so this is a real preflight check.
+ * Needed for titles/URLs and browser detection, not native-client detection.
+ * Backed by AXIsProcessTrusted, so this is a real preflight check.
  *
  * On Windows returns GRANTED.
  */

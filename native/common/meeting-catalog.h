@@ -17,7 +17,7 @@ extern "C" {
 /* Watchers end a meeting once missing this long, so one missed scan never does. */
 #define MREC_CATALOG_END_DELAY_MS 3000
 
-/* macOS: the conferencing app owning `bundle_id`. Prefixes match, so helpers count. */
+/* macOS: the conferencing app owning `bundle_id`. Dotted helper suffixes count. */
 int32_t mrec_catalog_bundle_platform(const char *bundle_id);
 
 /* macOS: the bundle-id prefix of the browser owning `bundle_id`, or NULL. */
@@ -29,8 +29,36 @@ int32_t mrec_catalog_executable_platform(const char *executable);
 /* Windows: the browser executable `executable` names, or NULL. */
 const char *mrec_catalog_executable_browser(const char *executable);
 
-/* The meeting a URL points at. */
+/* The call route a URL points at; home/chat URLs and embedded hosts do not count. */
 int32_t mrec_catalog_url_platform(const char *url);
+
+/* Service identity for scoped UI inspection, including Teams' general /v2/ app. */
+int32_t mrec_catalog_context_platform(const char *url, const char *title);
+
+/* Internal evidence. Consumers continue to use confidence/should_record. */
+enum {
+  MREC_CALL_UNKNOWN = 0,
+  MREC_CALL_JOINED = 1,
+  MREC_CALL_NOT_JOINED = 2,
+};
+enum {
+  MREC_CONTROL_BUTTON = 1,
+  MREC_CONTROL_MENU_ITEM = 2,
+  MREC_CONTROL_TEXT = 3,
+  MREC_CONTROL_STATUS = 4,
+};
+enum {
+  MREC_CALL_SIGNAL_JOINED = 1,
+  MREC_CALL_SIGNAL_NOT_JOINED = 2,
+  MREC_CALL_SIGNAL_DISCONNECT = 4,
+  MREC_CALL_SIGNAL_VOICE_CONNECTED = 8,
+  MREC_CALL_SIGNAL_BLOCKED = 16,
+};
+
+/* Same identifier/label rules for AX on macOS and UI Automation on Windows. */
+uint32_t mrec_catalog_call_control(int32_t platform, int32_t role,
+                                 const char *identifier, const char *label);
+int32_t mrec_catalog_call_state(uint32_t signals);
 
 /*
  * The meeting a window or tab title names. `page_length` receives how many bytes
@@ -54,11 +82,16 @@ mrec_browser_match mrec_catalog_browser_match(const char *url, const char *title
                                              size_t tab_count);
 
 /*
- * How likely audio activity is a meeting; 0 when it is not one. A browser needs
- * `recognised`, the platform its URL or title names, or a live microphone.
+ * Conservative fallback when call UI is unknown. All clients need a live mic;
+ * a browser also needs `recognised`, the call its URL or title names.
  */
 int32_t mrec_catalog_confidence(int32_t is_browser, int32_t playing_audio,
                                 int32_t using_mic, int32_t recognised);
+
+/* Confirmed call UI supersedes the audio heuristic; pre-join/ended UI vetoes it. */
+int32_t mrec_catalog_call_confidence(int32_t is_browser, int32_t playing_audio,
+                                   int32_t using_mic, int32_t recognised,
+                                   int32_t call_state);
 
 #ifdef __cplusplus
 }

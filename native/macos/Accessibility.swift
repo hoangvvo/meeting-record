@@ -90,20 +90,43 @@ enum Accessibility {
     }
 
     static func browserWindows(pid: pid_t) -> [BrowserWindowContent] {
+        windowContents(pid: pid, nativePlatform: nil)
+    }
+
+    static func nativeWindows(pid: pid_t, platform: MeetingPlatform) -> [BrowserWindowContent] {
+        windowContents(pid: pid, nativePlatform: platform)
+    }
+
+    private static func windowContents(pid: pid_t, nativePlatform: MeetingPlatform?) -> [BrowserWindowContent] {
         guard isTrusted() else { return [] }
         let app = application(pid)
         enableEnhancedInterface(app)
         let deadline = ProcessInfo.processInfo.systemUptime + traversalTimeout
+        // Native Zoom exposes in-meeting actions in its app menu. Inspect it
+        // before a large participant tree can consume the traversal budget.
+        var menuContent: BrowserWindowContent?
+        if nativePlatform == .zoom, let menu = elementAttribute(app, kAXMenuBarAttribute as String) {
+            menuContent = BrowserContentReader.read(
+                Element(menu), deadline: deadline, now: { ProcessInfo.processInfo.systemUptime },
+                nativePlatform: nativePlatform)
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            return menuContent.map { [$0] } ?? []
+        }
         var windows = elementsAttribute(app, kAXWindowsAttribute as String, limit: 4)
-        if let window = elementAttribute(app, kAXFocusedWindowAttribute as String) {
+        if ProcessInfo.processInfo.systemUptime < deadline,
+           let window = elementAttribute(app, kAXFocusedWindowAttribute as String) {
             windows.removeAll { CFEqual($0, window) }
             windows.insert(window, at: 0)
         }
-        return windows.prefix(4).compactMap { window in
+        var contents = windows.prefix(4).compactMap { window -> BrowserWindowContent? in
             guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
             return BrowserContentReader.read(Element(window), deadline: deadline,
-                                             now: { ProcessInfo.processInfo.systemUptime })
+                                             now: { ProcessInfo.processInfo.systemUptime },
+                                             nativePlatform: nativePlatform)
         }
+        if let menu = menuContent { contents.append(menu) }
+        return contents
     }
 
     private struct Element: BrowserAccessibilityElement {
@@ -125,6 +148,11 @@ enum Accessibility {
             return raw as? String
         }
         var value: String? { stringAttribute(element, kAXValueAttribute as String) }
+        var identifier: String? {
+            stringAttribute(element, "AXDOMIdentifier") ?? stringAttribute(element, "AXIdentifier")
+        }
+        var isHidden: Bool { (copyAttribute(element, "AXHidden") as? Bool) == true }
+        var subrole: String? { stringAttribute(element, kAXSubroleAttribute as String) }
 
         func children(limit: Int) -> [Element] {
             elementsAttribute(element, kAXChildrenAttribute as String, limit: limit).map(Element.init)

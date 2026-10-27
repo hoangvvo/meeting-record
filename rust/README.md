@@ -154,8 +154,9 @@ let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"
 ```
 
 - Use `should_record` to decide whether a meeting is ready to record.
+- The library incorporates call controls and audio signals into `confidence` and `should_record`; no consumer-side call-state logic is required.
 - The watcher reports `Started`, `Updated`, and `Ended` events.
-- Request `Permission::Accessibility` on macOS for titles and URLs; relaunch after granting it.
+- Request `Permission::Accessibility` on macOS for call-state checks, browser detection, titles, and URLs; relaunch after granting it.
 - See [supported services and detection behavior](https://github.com/hoangvvo/meeting-record#detection).
 
 ## Types and errors

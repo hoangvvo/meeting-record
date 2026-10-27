@@ -134,7 +134,8 @@ meetings.watch();
 ```
 
 - Use `shouldRecord` to decide whether a meeting is ready to record.
-- Request `Permission.Accessibility` on macOS for titles and URLs; relaunch after granting it.
+- The library incorporates call controls and audio signals into `confidence` and `shouldRecord`; no consumer-side call-state logic is required.
+- Request `Permission.Accessibility` on macOS for call-state checks, browser detection, titles, and URLs; relaunch after granting it.
 - See [supported services and detection behavior](https://github.com/hoangvvo/meeting-record#detection).
 
 ## Types and errors

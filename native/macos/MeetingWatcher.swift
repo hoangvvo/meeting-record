@@ -154,7 +154,7 @@ final class MeetingWatcher {
         queue.asyncAfter(deadline: .now() + max(deadline - now, 0), execute: work)
     }
 
-    /// Compares only fields a consumer would act on, excluding confidence.
+    /// Confidence changes can change should_record even when audio/title stay the same.
     private func changed(_ a: DetectedMeeting, _ b: DetectedMeeting) -> Bool {
         a.platform != b.platform
             || a.title != b.title
@@ -162,6 +162,7 @@ final class MeetingWatcher {
             || a.isUsingMic != b.isUsingMic
             || a.isPlayingAudio != b.isPlayingAudio
             || a.audioPIDs != b.audioPIDs
+            || a.confidence != b.confidence
     }
 
     private func emit(_ meeting: DetectedMeeting, _ event: MrecMeetingEvent) {

@@ -68,8 +68,11 @@ static void BrowserMatches(void) {
   assert(match.title_length == strlen("Meet \xE2\x80\x93 abc-defg-hij"));
 
   const char *nonmeetings[] = {NULL, "", "https://zoom.us/pricing", "Google Meet",
-                               "https://meet.google.com/", "Music"};
-  match = mrec_catalog_browser_match("https://example.com", "Inbox", nonmeetings, 6);
+                               "https://meet.google.com/", "Music",
+                               "Chat | Debt | Microsoft Teams",
+                               "https://teams.microsoft.com/v2/"};
+  match = mrec_catalog_browser_match("https://example.com", "Inbox", nonmeetings,
+                                     sizeof nonmeetings / sizeof nonmeetings[0]);
   assert(match.platform == MREC_PLATFORM_UNKNOWN);
   assert(match.tab_index == -1);
   assert(match.title_length == strlen("Inbox"));
@@ -83,8 +86,121 @@ static void BrowserMatches(void) {
   assert(match.title_length == 0);
 }
 
+static void NonMeetingURLs(void) {
+  const char *urls[] = {
+      "https://teams.microsoft.com/", "https://teams.microsoft.com/v2/",
+      "https://teams.cloud.microsoft/v2/", "https://dod.teams.microsoft.us/",
+      "https://teams.live.com/_#/conversations", "https://teams.office.com/calendar",
+      "https://teams.microsoftonline.cn/l/chat/0/0", "https://teams.microsoft.com/l/meetup-join/",
+      "https://teams.microsoft.com/meet/", "https://zoom.us/j/",
+      "https://app.slack.com/huddle", "https://discord.com/channels",
+      "https://whereby.com/", "https://meet.jit.si/", "https://app.gather.town/",
+      "https://around.co/", "https://webex.com/meetings",
+      "https://notzoom.us/j/123", "https://zoom.us.example.org/j/123",
+      "https://notmeet.google.com/abc-defg-hij",
+      "https://meet.google.com.evil.test/abc-defg-hij",
+      "https://meet.google.com/abc-defg-hij.example",
+      "https://teams.microsoft.com.evil.test/l/meetup-join/123",
+      "https://example.org/teams.microsoft.com/l/meetup-join/123",
+      "https://example.org/?next=https://zoom.us/j/123",
+      "https://example.org/#https://meet.google.com/abc-defg-hij",
+      "https://zoom.us@evil.test/j/123", "https://evil.test@zoom.us/j/123",
+      "file://zoom.us/j/123", "Chat | Debt | Microsoft Teams",
+  };
+  for (size_t index = 0; index < sizeof urls / sizeof urls[0]; index++) {
+    assert(mrec_catalog_url_platform(urls[index]) == MREC_PLATFORM_UNKNOWN);
+    assert(mrec_catalog_title_platform(urls[index], NULL) == MREC_PLATFORM_UNKNOWN);
+    mrec_browser_match match = mrec_catalog_browser_match(urls[index], "Inbox", NULL, 0);
+    assert(match.platform == MREC_PLATFORM_UNKNOWN);
+    assert(mrec_catalog_confidence(1, 1, 0, match.platform) == 0);
+  }
+}
+
+static void CallStateEvidence(void) {
+  const struct {
+    int32_t platform;
+    int32_t role;
+    const char *identifier;
+    const char *label;
+  } joined[] = {
+      {MREC_PLATFORM_TEAMS, MREC_CONTROL_BUTTON, "hangup-button", "Localized leave label"},
+      {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, "", "Leave call"},
+      {MREC_PLATFORM_ZOOM, MREC_CONTROL_MENU_ITEM, "", "Leave Meeting"},
+      {MREC_PLATFORM_WEBEX, MREC_CONTROL_BUTTON, "", "Leave meeting"},
+      {MREC_PLATFORM_SLACK, MREC_CONTROL_BUTTON, "", "Leave huddle"},
+      {MREC_PLATFORM_GENERIC_BROWSER, MREC_CONTROL_BUTTON, "", "Leave call"},
+  };
+  for (size_t index = 0; index < sizeof joined / sizeof joined[0]; index++) {
+    const uint32_t signals = mrec_catalog_call_control(joined[index].platform, joined[index].role,
+                                                       joined[index].identifier, joined[index].label);
+    const int32_t state = mrec_catalog_call_state(signals);
+    assert(state == MREC_CALL_JOINED);
+    /* Silent/listen-only calls are actionable without any audio stream. */
+    assert(mrec_catalog_call_confidence(0, 0, 0, joined[index].platform, state) == 90);
+    assert(mrec_catalog_call_confidence(1, 1, 0, joined[index].platform, state) == 95);
+    assert(mrec_catalog_call_confidence(1, 1, 1, joined[index].platform, state) == 100);
+    /* A text message quoting a control's label is not evidence. */
+    assert(mrec_catalog_call_control(joined[index].platform, MREC_CONTROL_TEXT,
+                                      joined[index].identifier, joined[index].label) == 0);
+  }
+
+  const struct { int32_t platform; const char *identifier; const char *label; } previews[] = {
+      {MREC_PLATFORM_TEAMS, "prejoin-join-button", "Localized join label"},
+      {MREC_PLATFORM_MEET, "", "Join now"},
+      {MREC_PLATFORM_MEET, "", "Ask to join"},
+      {MREC_PLATFORM_MEET, "", "Rejoin"},
+      {MREC_PLATFORM_ZOOM, "", "Join meeting"},
+      {MREC_PLATFORM_WEBEX, "", "Join meeting"},
+      {MREC_PLATFORM_SLACK, "", "Join huddle"},
+      {MREC_PLATFORM_DISCORD, "", "Join voice"},
+      {MREC_PLATFORM_GENERIC_BROWSER, "", "Ask to join"},
+  };
+  for (size_t index = 0; index < sizeof previews / sizeof previews[0]; index++) {
+    const int32_t state = mrec_catalog_call_state(mrec_catalog_call_control(
+        previews[index].platform, MREC_CONTROL_BUTTON, previews[index].identifier, previews[index].label));
+    assert(state == MREC_CALL_NOT_JOINED);
+    assert(mrec_catalog_call_confidence(0, 1, 1, previews[index].platform, state) == 0);
+    assert(mrec_catalog_call_confidence(1, 1, 1, previews[index].platform, state) == 0);
+  }
+
+  /* Discord's generic Disconnect control alone can belong to account settings. */
+  const uint32_t disconnect = mrec_catalog_call_control(MREC_PLATFORM_DISCORD, MREC_CONTROL_BUTTON,
+                                                       "", "Disconnect");
+  const uint32_t voice = mrec_catalog_call_control(MREC_PLATFORM_DISCORD, MREC_CONTROL_TEXT,
+                                                 "", "Voice Connected");
+  assert(mrec_catalog_call_state(disconnect) == MREC_CALL_UNKNOWN);
+  assert(mrec_catalog_call_state(voice) == MREC_CALL_UNKNOWN);
+  assert(mrec_catalog_call_state(disconnect | voice) == MREC_CALL_JOINED);
+  assert(mrec_catalog_call_control(MREC_PLATFORM_TEAMS, MREC_CONTROL_BUTTON, "", "Leave") == 0);
+  assert(mrec_catalog_call_control(MREC_PLATFORM_UNKNOWN, MREC_CONTROL_BUTTON, "hangup-button", "Leave call") == 0);
+  assert(mrec_catalog_call_control(MREC_PLATFORM_TEAMS, MREC_CONTROL_BUTTON, "not-hangup-button", "Cancel") == 0);
+  assert(mrec_catalog_call_confidence(1, 1, 1, MREC_PLATFORM_UNKNOWN, MREC_CALL_JOINED) == 0);
+  assert(mrec_catalog_call_confidence(0, 1, 1, MREC_PLATFORM_UNKNOWN, MREC_CALL_JOINED) == 0);
+
+  const uint32_t lobby = mrec_catalog_call_control(MREC_PLATFORM_ZOOM, MREC_CONTROL_STATUS, "",
+      "Please wait for the host to start this meeting.");
+  assert(mrec_catalog_call_state(lobby | MREC_CALL_SIGNAL_JOINED) == MREC_CALL_NOT_JOINED);
+  assert(mrec_catalog_call_control(MREC_PLATFORM_ZOOM, MREC_CONTROL_TEXT, "",
+      "Please wait for the host to start this meeting.") == 0);
+  assert(mrec_catalog_call_control(MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, "", "Join Audio") == 0);
+  assert(mrec_catalog_call_state(MREC_CALL_SIGNAL_JOINED | MREC_CALL_SIGNAL_NOT_JOINED) == MREC_CALL_JOINED);
+
+  /* Service identity permits probing /v2/ without making that URL a meeting. */
+  assert(mrec_catalog_context_platform("https://teams.microsoft.com/v2/", "Chat") == MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_url_platform("https://teams.microsoft.com/v2/") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_context_platform("", "Chat | Debt | Microsoft Teams") == MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_context_platform("https://example.com/", "Meet - abc-defg-hij") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_context_platform("https://example.com", "Meet - abc-defg-hij") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_context_platform("https://meet.google.com", "") == MREC_PLATFORM_MEET);
+  assert(mrec_catalog_context_platform("file://somewhere", "Meet - abc-defg-hij") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_context_platform("https://teams.microsoft.com.evil.test/v2/", "") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_context_platform(NULL, NULL) == MREC_PLATFORM_UNKNOWN);
+}
+
 int main(void) {
   BrowserMatches();
+  NonMeetingURLs();
+  CallStateEvidence();
   /* macOS: bundle-id prefixes reach the helpers that carry the audio. */
   assert(mrec_catalog_bundle_platform("us.zoom.xos") == MREC_PLATFORM_ZOOM);
   assert(mrec_catalog_bundle_platform("us.zoom.xos.cpthost") == MREC_PLATFORM_ZOOM);
@@ -93,6 +209,13 @@ int main(void) {
   assert(mrec_catalog_bundle_platform("com.tinyspeck.slackmacgap.helper") ==
          MREC_PLATFORM_SLACK);
   assert(mrec_catalog_bundle_platform("US.ZOOM.XOS") == MREC_PLATFORM_ZOOM);
+  assert(mrec_catalog_bundle_platform("us.zoom.ZoomHybridConf") == MREC_PLATFORM_ZOOM);
+  assert(mrec_catalog_bundle_platform("Cisco-Systems.Spark") == MREC_PLATFORM_WEBEX);
+  assert(mrec_catalog_bundle_platform("com.cisco.webexmeetingsapp") == MREC_PLATFORM_WEBEX);
+  assert(mrec_catalog_bundle_platform("us.zoom.unrelated") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_bundle_platform("com.microsoft.teamsbackup") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_bundle_platform("com.microsoft.teams2backup") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_bundle_platform("com.hnc.discordlike") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_bundle_platform("com.apple.Music") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_bundle_platform("") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_bundle_platform(NULL) == MREC_PLATFORM_UNKNOWN);
@@ -105,6 +228,8 @@ int main(void) {
                 "company.thebrowser.browser") == 0);
   assert(strcmp(mrec_catalog_bundle_browser("org.chromium.Chromium"), "org.chromium.chromium") == 0);
   assert(mrec_catalog_bundle_browser("us.zoom.xos") == NULL);
+  assert(mrec_catalog_bundle_browser("com.google.chromelike") == NULL);
+  assert(mrec_catalog_bundle_browser("org.mozilla.firefoxbackup") == NULL);
 
   /* Windows: executable names, including media hosts, in any case. */
   assert(mrec_catalog_executable_platform("zoom.exe") == MREC_PLATFORM_ZOOM);
@@ -126,6 +251,8 @@ int main(void) {
   /* URLs may omit the scheme, and matching ignores case. */
   assert(mrec_catalog_url_platform("https://meet.google.com/abc-defg-hij") == MREC_PLATFORM_MEET);
   assert(mrec_catalog_url_platform("MEET.GOOGLE.COM/abc-defg-hij") == MREC_PLATFORM_MEET);
+  assert(mrec_catalog_url_platform("https://meet.google.com/meet/abc-defg-hij") ==
+         MREC_PLATFORM_MEET);
   assert(mrec_catalog_url_platform("https://meet.google.com/abc-defg-hij?authuser=1") ==
          MREC_PLATFORM_MEET);
   /* Meet needs a meeting code: its home page and lookups are not calls. */
@@ -136,8 +263,14 @@ int main(void) {
   assert(mrec_catalog_url_platform("https://meet.google.com/abc-defg-hijk") == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_url_platform("https://teams.microsoft.com/l/meetup-join/1") ==
          MREC_PLATFORM_TEAMS);
-  assert(mrec_catalog_url_platform("https://teams.cloud.microsoft/v2/") == MREC_PLATFORM_TEAMS);
-  assert(mrec_catalog_url_platform("https://dod.teams.microsoft.us/") == MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_url_platform("https://teams.cloud.microsoft/meet/123?p=passcode") ==
+         MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_url_platform("https://dod.teams.microsoft.us/l/meetup-join/123") ==
+         MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_url_platform("https://teams.live.com/meet/123") == MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_url_platform("https://teams.microsoft.com/l/call/0/0?users=someone") ==
+         MREC_PLATFORM_TEAMS);
+  assert(mrec_catalog_url_platform("HTTPS://US02WEB.ZOOM.US:443/j/123") == MREC_PLATFORM_ZOOM);
   assert(mrec_catalog_url_platform("https://us02web.zoom.us/j/123456789") == MREC_PLATFORM_ZOOM);
   assert(mrec_catalog_url_platform("https://us06web.zoom.us/w/123?tk=1") == MREC_PLATFORM_ZOOM);
   assert(mrec_catalog_url_platform("https://agency.zoomgov.com/j/123") == MREC_PLATFORM_ZOOM);
@@ -169,27 +302,45 @@ int main(void) {
   assert(mrec_catalog_title_platform("Meet - the team", NULL) == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_title_platform("Google Meet", NULL) == MREC_PLATFORM_UNKNOWN);
   assert(mrec_catalog_title_platform("Meet", NULL) == MREC_PLATFORM_UNKNOWN);
-  /* Other titles fall back to URL fragments and stay whole. */
-  assert(mrec_catalog_title_platform("Daily standup | meet.jit.si", NULL) ==
+  /* Other titles fall back to complete call links and stay whole. */
+  assert(mrec_catalog_title_platform("Daily standup | meet.jit.si/room", NULL) ==
          MREC_PLATFORM_GENERIC_BROWSER);
-  assert(PageTitleIs("Daily standup | meet.jit.si", "Daily standup | meet.jit.si"));
+  assert(PageTitleIs("Daily standup | meet.jit.si/room", "Daily standup | meet.jit.si/room"));
   assert(mrec_catalog_title_platform("Sync | meet.google.com/abc-defg-hij - Google Chrome", NULL) ==
          MREC_PLATFORM_MEET);
   assert(mrec_catalog_title_platform("Inbox - Outlook", NULL) == MREC_PLATFORM_UNKNOWN);
   assert(PageTitleIs("", ""));
 
-  /* Scores: an app needs audio; a browser also needs a recognised meeting or the mic. */
+  /* Native playback can be a notification, message, or video in any supported app. */
+  const char *apps[] = {"zoom.exe", "ms-teams.exe", "webex.exe", "slack.exe", "discord.exe"};
+  for (size_t index = 0; index < sizeof apps / sizeof apps[0]; index++) {
+    const int32_t platform = mrec_catalog_executable_platform(apps[index]);
+    assert(platform != MREC_PLATFORM_UNKNOWN);
+    assert(mrec_catalog_confidence(0, 1, 0, platform) == 0);
+    assert(mrec_catalog_confidence(0, 1, 1, platform) >= MREC_CATALOG_RECORD_THRESHOLD);
+  }
+
+  /* Browsers need a recognised call and the mic; native clients need the mic. */
   assert(mrec_catalog_confidence(0, 0, 0, MREC_PLATFORM_UNKNOWN) == 0);
-  assert(mrec_catalog_confidence(0, 1, 0, MREC_PLATFORM_UNKNOWN) == 70);
+  assert(mrec_catalog_confidence(0, 1, 0, MREC_PLATFORM_UNKNOWN) == 0);
   assert(mrec_catalog_confidence(0, 0, 1, MREC_PLATFORM_UNKNOWN) == 65);
   assert(mrec_catalog_confidence(0, 1, 1, MREC_PLATFORM_UNKNOWN) == 95);
   assert(mrec_catalog_confidence(0, 0, 1, MREC_PLATFORM_ZOOM) == 65);
   assert(mrec_catalog_confidence(1, 1, 0, MREC_PLATFORM_UNKNOWN) == 0);
   assert(mrec_catalog_confidence(1, 0, 0, MREC_PLATFORM_MEET) == 0);
-  assert(mrec_catalog_confidence(1, 1, 0, MREC_PLATFORM_MEET) == 75);
-  assert(mrec_catalog_confidence(1, 0, 1, MREC_PLATFORM_UNKNOWN) == 65);
+  assert(mrec_catalog_confidence(1, 1, 0, MREC_PLATFORM_MEET) == 0);
+  assert(mrec_catalog_confidence(1, 0, 1, MREC_PLATFORM_UNKNOWN) == 0);
+  assert(mrec_catalog_confidence(1, 1, 1, MREC_PLATFORM_UNKNOWN) == 0);
   assert(mrec_catalog_confidence(1, 0, 1, MREC_PLATFORM_MEET) == MREC_CATALOG_RECORD_THRESHOLD);
   assert(mrec_catalog_confidence(1, 1, 1, MREC_PLATFORM_MEET) == 100);
+
+  const int32_t browser_platforms[] = {MREC_PLATFORM_ZOOM, MREC_PLATFORM_TEAMS,
+      MREC_PLATFORM_MEET, MREC_PLATFORM_WEBEX, MREC_PLATFORM_SLACK,
+      MREC_PLATFORM_DISCORD, MREC_PLATFORM_GENERIC_BROWSER};
+  for (size_t index = 0; index < sizeof browser_platforms / sizeof browser_platforms[0]; index++) {
+    assert(mrec_catalog_confidence(1, 1, 0, browser_platforms[index]) == 0);
+    assert(mrec_catalog_confidence(1, 1, 1, browser_platforms[index]) == 100);
+  }
 
   /* Identifiers are stable. */
   assert(strcmp(mrec_platform_id(MREC_PLATFORM_MEET), "meet") == 0);

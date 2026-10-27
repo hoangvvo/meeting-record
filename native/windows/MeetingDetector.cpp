@@ -232,18 +232,36 @@ std::map<uint32_t, meeting_record::AudioAppProcess> CollectProcesses(
 struct BrowserWindowContent {
   std::string url;
   std::vector<std::string> tab_titles;
+  mrec_platform call_platform = MREC_PLATFORM_UNKNOWN;
+  uint32_t call_signals = 0;
 };
 
-/* Read browser URLs and tab titles with a bounded walk that skips documents. */
+/* Inspect the browser shell first; probe controls only within a known service. */
 class BrowserAccessibility {
 public:
-  BrowserWindowContent Read(HWND window, uint64_t deadline_ns) {
+  BrowserWindowContent Read(HWND window, uint64_t deadline_ns, const std::string &title,
+                            mrec_platform native_platform = MREC_PLATFORM_UNKNOWN) {
     BrowserWindowContent content;
-    if (!Ready()) return content;
+    if (MonotonicTimeNs() >= deadline_ns || !Ready() || MonotonicTimeNs() >= deadline_ns) return content;
     ComPtr<IUIAutomationElement> root;
     if (FAILED(automation_->ElementFromHandle(window, &root)) || !root) return content;
+    if (native_platform != MREC_PLATFORM_UNKNOWN) {
+      content.call_platform = native_platform;
+      int budget = 1200;
+      Probe(root.Get(), 0, deadline_ns, budget, content, false, false);
+      return content;
+    }
     int budget = kAccessibilityMaxNodes;
-    Visit(root.Get(), 0, deadline_ns, budget, content);
+    std::vector<ComPtr<IUIAutomationElement>> documents;
+    Visit(root.Get(), 0, deadline_ns, budget, content, documents);
+    content.call_platform = static_cast<mrec_platform>(mrec_catalog_context_platform(content.url.c_str(), title.c_str()));
+    if (content.call_platform == MREC_PLATFORM_UNKNOWN) return content;
+    if (documents.empty()) documents = {root};
+    int call_budget = 1200;
+    for (const auto &document : documents) {
+      Probe(document.Get(), 0, deadline_ns, call_budget, content, false, true);
+      if (call_budget <= 0 || MonotonicTimeNs() >= deadline_ns) break;
+    }
     return content;
   }
 
@@ -266,21 +284,27 @@ private:
   }
 
   void Visit(IUIAutomationElement *element, int depth, uint64_t deadline_ns,
-             int &budget, BrowserWindowContent &content) {
+             int &budget, BrowserWindowContent &content,
+             std::vector<ComPtr<IUIAutomationElement>> &documents) {
     if (depth > kAccessibilityMaxDepth || budget-- <= 0 ||
         MonotonicTimeNs() > deadline_ns) {
       return;
     }
+    BOOL offscreen = FALSE;
+    if (SUCCEEDED(element->get_CurrentIsOffscreen(&offscreen)) && offscreen) return;
+    if (MonotonicTimeNs() >= deadline_ns) return;
     CONTROLTYPEID type = 0;
-    if (FAILED(element->get_CurrentControlType(&type))) return;
+    if (FAILED(element->get_CurrentControlType(&type)) || MonotonicTimeNs() >= deadline_ns) return;
     switch (type) {
       case UIA_TabItemControlTypeId:
         if (std::string title = Name(element); !title.empty()) {
           content.tab_titles.push_back(std::move(title));
         }
         return;
-      case UIA_EditControlTypeId:
       case UIA_DocumentControlTypeId:
+        documents.emplace_back(element);
+        [[fallthrough]];
+      case UIA_EditControlTypeId:
         /* The omnibox, or the page itself in an app window without one. */
         if (content.url.empty()) {
           std::string value = Value(element);
@@ -292,11 +316,59 @@ private:
     }
     ComPtr<IUIAutomationElement> child;
     walker_->GetFirstChildElement(element, &child);
-    while (child) {
-      Visit(child.Get(), depth + 1, deadline_ns, budget, content);
+    while (child && budget > 0 && MonotonicTimeNs() < deadline_ns) {
+      Visit(child.Get(), depth + 1, deadline_ns, budget, content, documents);
+      if (budget <= 0 || MonotonicTimeNs() >= deadline_ns) break;
       ComPtr<IUIAutomationElement> next;
       if (FAILED(walker_->GetNextSiblingElement(child.Get(), &next))) break;
       child = std::move(next);
+    }
+  }
+
+  void Probe(IUIAutomationElement *element, int depth, uint64_t deadline_ns,
+             int &budget, BrowserWindowContent &content, bool status_context, bool scope_documents) {
+    if (depth > kAccessibilityMaxDepth || budget <= 0 || MonotonicTimeNs() >= deadline_ns) return;
+    budget--;
+    BOOL offscreen = FALSE;
+    if (SUCCEEDED(element->get_CurrentIsOffscreen(&offscreen)) && offscreen) return;
+    if (MonotonicTimeNs() >= deadline_ns) return;
+    CONTROLTYPEID type = 0;
+    if (FAILED(element->get_CurrentControlType(&type)) || MonotonicTimeNs() >= deadline_ns) return;
+    if (type == UIA_EditControlTypeId) return;
+    if (scope_documents && type == UIA_DocumentControlTypeId) {
+      const std::string url = Value(element);
+      if ((url.rfind("https://", 0) == 0 || url.rfind("http://", 0) == 0) &&
+          mrec_catalog_context_platform(url.c_str(), "") != content.call_platform) return;
+    }
+    std::string aria_role;
+    if (type == UIA_GroupControlTypeId || type == UIA_TextControlTypeId) {
+      aria_role = StringProperty(element, UIA_AriaRolePropertyId);
+    }
+    const bool status = status_context || type == UIA_StatusBarControlTypeId ||
+        aria_role == "status" || aria_role == "alert" || aria_role == "heading";
+    if (MonotonicTimeNs() >= deadline_ns) return;
+    int32_t role = 0;
+    if (type == UIA_ButtonControlTypeId || type == UIA_SplitButtonControlTypeId) role = MREC_CONTROL_BUTTON;
+    else if (type == UIA_MenuItemControlTypeId) role = MREC_CONTROL_MENU_ITEM;
+    else if (status && (type == UIA_TextControlTypeId || type == UIA_StatusBarControlTypeId)) role = MREC_CONTROL_STATUS;
+    else if (content.call_platform == MREC_PLATFORM_DISCORD &&
+             (type == UIA_TextControlTypeId || type == UIA_HyperlinkControlTypeId)) role = MREC_CONTROL_TEXT;
+    if (role) {
+      const std::string identifier = StringProperty(element, UIA_AutomationIdPropertyId);
+      content.call_signals |= mrec_catalog_call_control(content.call_platform, role, identifier.c_str(), "");
+      if (MonotonicTimeNs() >= deadline_ns) return;
+      const std::string label = Name(element);
+      content.call_signals |= mrec_catalog_call_control(content.call_platform, role, "", label.c_str());
+    }
+    if (MonotonicTimeNs() >= deadline_ns) return;
+    ComPtr<IUIAutomationElement> child;
+    walker_->GetLastChildElement(element, &child);
+    while (child && budget > 0 && MonotonicTimeNs() < deadline_ns) {
+      Probe(child.Get(), depth + 1, deadline_ns, budget, content, status, scope_documents);
+      if (budget <= 0 || MonotonicTimeNs() >= deadline_ns) break;
+      ComPtr<IUIAutomationElement> previous;
+      if (FAILED(walker_->GetPreviousSiblingElement(child.Get(), &previous))) break;
+      child = std::move(previous);
     }
   }
 
@@ -309,10 +381,14 @@ private:
   }
 
   static std::string Value(IUIAutomationElement *element) {
+    return StringProperty(element, UIA_ValueValuePropertyId);
+  }
+
+  static std::string StringProperty(IUIAutomationElement *element, PROPERTYID property) {
     VARIANT value;
     VariantInit(&value);
     std::string result;
-    if (SUCCEEDED(element->GetCurrentPropertyValue(UIA_ValueValuePropertyId, &value)) &&
+    if (SUCCEEDED(element->GetCurrentPropertyValue(property, &value)) &&
         value.vt == VT_BSTR && value.bstrVal) {
       result = Narrow(std::wstring(value.bstrVal, SysStringLen(value.bstrVal)));
     }
@@ -330,6 +406,7 @@ struct BrowserMeeting {
   mrec_platform platform = MREC_PLATFORM_UNKNOWN;
   std::string title;
   std::string url;
+  int32_t call_state = MREC_CALL_UNKNOWN;
 };
 
 /* The front window showing a meeting in its URL, title or any tab; else the front window. */
@@ -338,13 +415,20 @@ BrowserMeeting FindBrowserMeeting(const std::vector<VisibleWindow> &windows,
                                   Predicate predicate,
                                   BrowserAccessibility &accessibility) {
   BrowserMeeting front;
+  BrowserMeeting fallback;
   const uint64_t deadline_ns = MonotonicTimeNs() + kAccessibilityTraversalNs;
   int inspected = 0;
   for (const auto &window : windows) {
     if (!predicate(window)) continue;
     if (inspected++ == kMaxBrowserWindows) break;
-    BrowserWindowContent content = accessibility.Read(window.handle, deadline_ns);
+    BrowserWindowContent content = accessibility.Read(window.handle, deadline_ns, window.title);
     if (!front.window) front = {&window, MREC_PLATFORM_UNKNOWN, window.title, content.url};
+    const int32_t state = mrec_catalog_call_state(content.call_signals);
+    if (state == MREC_CALL_JOINED) {
+      return {&window, content.call_platform, window.title, std::move(content.url), state};
+    }
+    // Pre-join content must not borrow a stale meeting title from another tab.
+    if (state == MREC_CALL_NOT_JOINED) continue;
 
     std::vector<const char *> tabs;
     tabs.reserve(content.tab_titles.size());
@@ -355,11 +439,11 @@ BrowserMeeting FindBrowserMeeting(const std::vector<VisibleWindow> &windows,
     const std::string &title = match.tab_index >= 0
                                    ? content.tab_titles[static_cast<size_t>(match.tab_index)]
                                    : window.title;
-    return {&window, static_cast<mrec_platform>(match.platform),
+    if (!fallback.window) fallback = {&window, static_cast<mrec_platform>(match.platform),
             title.substr(0, match.title_length),
             match.tab_index >= 0 ? std::string{} : std::move(content.url)};
   }
-  return front;
+  return fallback.window ? fallback : front;
 }
 
 struct Detected {
@@ -388,6 +472,25 @@ const VisibleWindow *BestWindow(const std::vector<VisibleWindow> &windows,
   return best;
 }
 
+BrowserMeeting FindNativeMeeting(const std::vector<VisibleWindow> &windows, DWORD owner,
+                                 mrec_platform platform, BrowserAccessibility &accessibility) {
+  BrowserMeeting result;
+  if (const auto *window = BestWindow(windows, [owner](const VisibleWindow &w) { return w.pid == owner; })) {
+    result = {window, platform, window->title, {}};
+  }
+  const uint64_t deadline = MonotonicTimeNs() + kAccessibilityTraversalNs;
+  int inspected = 0;
+  for (const auto &window : windows) {
+    if (window.pid != owner) continue;
+    if (inspected++ == kMaxBrowserWindows || MonotonicTimeNs() >= deadline) break;
+    const auto content = accessibility.Read(window.handle, deadline, window.title, platform);
+    const int32_t state = mrec_catalog_call_state(content.call_signals);
+    if (state == MREC_CALL_JOINED) return {&window, platform, window.title, {}, state};
+    if (state == MREC_CALL_NOT_JOINED) result = {&window, platform, window.title, {}, state};
+  }
+  return result;
+}
+
 std::vector<Detected> Scan() {
   ScopedComApartment apartment;
   const auto activity = CollectAudioActivity();
@@ -397,9 +500,8 @@ std::vector<Detected> Scan() {
   DWORD shell_pid = 0;
   GetWindowThreadProcessId(GetShellWindow(), &shell_pid);
 
-  /* Group by platform (native) or by the browser instance that owns the audio. */
-  std::map<mrec_platform, Detected> native;
-  std::map<mrec_platform, std::vector<DWORD>> native_owners;
+  /* Only combine activity from helpers belonging to the same app instance. */
+  std::map<DWORD, Detected> native;
   std::map<DWORD, Detected> browser;
 
   for (const auto &[pid, state] : activity) {
@@ -410,6 +512,7 @@ std::vector<Detected> Scan() {
 
     /* Attribute helper audio to its owning app. */
     const auto *root = meeting_record::FindAudioAppRoot(processes, pid, shell_pid);
+    if (root && root->pid == self) continue;
     std::string exe = Narrow(process->second.executable);
     const bool is_browser = IsBrowser(exe);
     mrec_platform platform = AppPlatform(exe);
@@ -419,9 +522,10 @@ std::vector<Detected> Scan() {
     }
 
     if (platform != MREC_PLATFORM_UNKNOWN) {
-      Detected &entry = native[platform];
+      const DWORD owner = root ? root->pid : pid;
+      Detected &entry = native[owner];
+      entry.pid = owner;
       entry.platform = platform;
-      native_owners[platform].push_back(root ? root->pid : pid);
       entry.audio_pids.push_back(pid);
       entry.app_name = exe;
       entry.mic = entry.mic || state.capturing;
@@ -436,30 +540,38 @@ std::vector<Detected> Scan() {
     }
   }
 
-  std::vector<Detected> results;
+  // Confirmed UI can identify a silent call before either audio stream opens.
+  for (const auto &window : windows) {
+    const mrec_platform platform = AppPlatform(window.executable);
+    if (platform != MREC_PLATFORM_UNKNOWN) {
+      auto &entry = native[window.pid];
+      entry.pid = window.pid;
+      entry.platform = platform;
+      entry.app_name = window.executable;
+    } else if (IsBrowser(window.executable)) {
+      auto &entry = browser[window.pid];
+      entry.pid = window.pid;
+      entry.app_name = window.executable;
+    }
+  }
 
-  for (auto &[platform, entry] : native) {
-    /* Pick a stable owner PID, preferring one with a window. */
-    auto &owners = native_owners[platform];
-    std::sort(owners.begin(), owners.end());
-    const auto windowed = std::find_if(owners.begin(), owners.end(), [&processes](DWORD pid) {
-      const auto process = processes.find(pid);
-      return process != processes.end() && process->second.has_app_window;
-    });
-    entry.pid = windowed != owners.end() ? *windowed : owners.front();
-    if (const auto *window = BestWindow(windows, [platform](const VisibleWindow &candidate) {
-          return AppPlatform(candidate.executable) == platform;
-        })) {
-      entry.app_name = window->executable;
-      entry.title = window->title;
+  std::vector<Detected> results;
+  BrowserAccessibility accessibility;
+
+  for (auto &[owner, entry] : native) {
+    const auto meeting = FindNativeMeeting(windows, owner, entry.platform, accessibility);
+    if (meeting.window) {
+      entry.app_name = meeting.window->executable;
+      entry.title = meeting.title;
     }
     entry.confidence =
-        mrec_catalog_confidence(0, entry.output, entry.mic, MREC_PLATFORM_UNKNOWN);
+        mrec_catalog_call_confidence(0, entry.output, entry.mic, entry.platform, meeting.call_state);
+    if (entry.confidence == 0) continue;
+    if (entry.audio_pids.empty()) entry.audio_pids.push_back(owner);
     results.push_back(entry);
   }
 
   /* Only an instance's own windows describe it; another instance is another target. */
-  BrowserAccessibility accessibility;
   for (auto &[owner, entry] : browser) {
     const DWORD instance = owner;
     BrowserMeeting meeting = FindBrowserMeeting(
@@ -469,8 +581,9 @@ std::vector<Detected> Scan() {
     entry.title = std::move(meeting.title);
     entry.url = std::move(meeting.url);
     const mrec_platform matched = meeting.platform;
-    entry.confidence = mrec_catalog_confidence(1, entry.output, entry.mic, matched);
+    entry.confidence = mrec_catalog_call_confidence(1, entry.output, entry.mic, matched, meeting.call_state);
     if (entry.confidence == 0) continue;
+    if (entry.audio_pids.empty()) entry.audio_pids.push_back(owner);
     entry.platform =
         matched != MREC_PLATFORM_UNKNOWN ? matched : MREC_PLATFORM_GENERIC_BROWSER;
     results.push_back(entry);
@@ -629,7 +742,8 @@ private:
 
   static bool Changed(const Detected &a, const Detected &b) {
     return a.platform != b.platform || a.title != b.title || a.url != b.url ||
-           a.mic != b.mic || a.output != b.output || a.audio_pids != b.audio_pids;
+           a.mic != b.mic || a.output != b.output || a.audio_pids != b.audio_pids ||
+           a.confidence != b.confidence;
   }
 
   static constexpr uint64_t kStartDelayNs = MREC_CATALOG_START_DELAY_MS * 1000000ull;
