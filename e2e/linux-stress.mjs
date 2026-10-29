@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { capture, meetings } from "../node/dist/index.js";
 
@@ -15,13 +15,23 @@ function resources() {
     rss: Number(readFileSync("/proc/self/status", "utf8").match(/VmRSS:\s+(\d+)/)[1]) * 1024,
   };
 }
-function collect(track, frequency) {
-  const stats = { frames: 0, packets: 0, first: null, end: null, maxGapMs: 0, powers: [] };
+function collect(track, frequency, name) {
+  const stats = {
+    frames: 0,
+    packets: 0,
+    first: null,
+    end: null,
+    maxGapMs: 0,
+    powers: [],
+    energies: [],
+  };
   let count = 0,
     re = 0,
     im = 0,
     energy = 0;
   track.on("data", (chunk) => {
+    if (process.env.MREC_STRESS_PCM)
+      appendFileSync(`${process.env.MREC_STRESS_PCM}-${name}.f32`, chunk.pcm);
     assert.equal(chunk.droppedSamples, 0);
     assert.equal(chunk.sampleRate, 48000);
     assert.equal(chunk.channels, 1);
@@ -42,8 +52,11 @@ function collect(track, frequency) {
       re += value * Math.cos(angle);
       im += value * Math.sin(angle);
       energy += value * value;
-      if (++count === 48000) {
+      // Match the Windows E2E's 100 ms spectral blocks. Device resampling can
+      // change phase within a second without losing PCM or the test tone.
+      if (++count === 4800) {
         stats.powers.push((2 * (re * re + im * im)) / count / Math.max(energy, 1e-12));
+        stats.energies.push(energy / count);
         count = re = im = energy = 0;
       }
     }
@@ -83,8 +96,8 @@ console.log(`${cycles} capture restarts with concurrent meeting watcher passed`,
 });
 
 const session = await capture.start(target, { microphone: "default", mix: { sampleRate: 16000 } });
-const system = collect(session.systemAudio, 440);
-const microphone = collect(session.microphone, 660);
+const system = collect(session.systemAudio, 440, "system");
+const microphone = collect(session.microphone, 660, "microphone");
 let mixedBytes = 0;
 session.mixedAudio.on("data", (data) => (mixedBytes += data.length));
 const start = performance.now();
@@ -99,21 +112,7 @@ try {
   await session.stopRecording();
 }
 const elapsedSeconds = (performance.now() - start) / 1000;
-for (const [name, stats] of Object.entries({ system, microphone })) {
-  assert(stats.frames / 48000 > elapsedSeconds - 1.5, `${name} lost sustained PCM`);
-  assert(stats.frames / 48000 < elapsedSeconds + 0.5, `${name} delivered excess PCM`);
-  assert.equal(stats.maxGapMs, 0, `${name} timeline has gaps`);
-  const stable = stats.powers.slice(1, -1);
-  assert(stable.length > seconds - 5);
-  assert(
-    stable.every((power) => power > 0.7),
-    `${name} tone disappeared during sustained capture`,
-  );
-}
-assert(Math.abs(mixedBytes / 32000 - system.frames / 48000) < 0.5, "mixed duration drifted");
 const final = resources();
-assert(final.fds <= baseline.fds + 4, "file descriptors leaked during soak");
-assert(final.rss < baseline.rss + 64 * 1024 * 1024, "unbounded capture memory growth");
 const report = {
   cycles,
   seconds,
@@ -123,6 +122,7 @@ const report = {
   afterCycles,
   final,
   mixedSeconds: mixedBytes / 32000,
+  spectralBlockFrames: 4800,
   system,
   microphone,
 };
@@ -132,6 +132,24 @@ writeFileSync(
   output,
   JSON.stringify(report, (_, value) => (typeof value === "bigint" ? String(value) : value), 2),
 );
+for (const [name, stats] of Object.entries({ system, microphone })) {
+  assert(stats.frames / 48000 > elapsedSeconds - 1.5, `${name} lost sustained PCM`);
+  assert(stats.frames / 48000 < elapsedSeconds + 0.5, `${name} delivered excess PCM`);
+  assert.equal(stats.maxGapMs, 0, `${name} timeline has gaps`);
+  const stable = stats.powers.slice(10, -10);
+  assert(stable.length > (seconds - 5) * 10);
+  assert(
+    stats.energies.slice(10, -10).every((energy) => energy > 1e-8),
+    `${name} has silent blocks`,
+  );
+  assert(
+    stable.reduce((total, power) => total + power, 0) / stable.length > 0.7,
+    `${name} tone disappeared during sustained capture`,
+  );
+}
+assert(Math.abs(mixedBytes / 32000 - system.frames / 48000) < 0.5, "mixed duration drifted");
+assert(final.fds <= baseline.fds + 4, "file descriptors leaked during soak");
+assert(final.rss < baseline.rss + 64 * 1024 * 1024, "unbounded capture memory growth");
 console.log(
   "sustained PCM, timing, tone integrity, mixed output, and bounded resources passed",
   output,
