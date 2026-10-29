@@ -21,3 +21,4 @@ done
 "${CXX:-g++}" "${flags[@]}" -std=c++17 -Wall -Wextra -Werror native/tests/linux_tone.cpp $(pkg-config --cflags --libs libpulse-simple) -pthread -o "$BUILD/zoom"
 "${CXX:-g++}" "${flags[@]}" -std=c++17 -Wall -Wextra -Werror -fPIC -shared -Wl,-z,defs -Inative/include -Inative/common native/linux/{Capture,MeetingDetector,Accessibility}.cpp "$BUILD/tracks.o" "$BUILD/catalog.o" $(pkg-config --cflags --libs libpulse atspi-2 gobject-2.0) -pthread -o "$BUILD/libmeetingrecord.so"
 "${CXX:-g++}" "${flags[@]}" -std=c++17 -Inative/include native/examples/linux-diagnose.cpp -L"$BUILD" -lmeetingrecord -Wl,-rpath,"$BUILD" -o "$BUILD/diagnose"
+"${CXX:-g++}" "${flags[@]}" -std=c++17 -Wall -Wextra -Werror -Inative/include native/tests/linux_accessibility_context_test.cpp -L"$BUILD" -lmeetingrecord $(pkg-config --cflags --libs atspi-2 gobject-2.0) -pthread -Wl,-rpath,"$BUILD" -o "$BUILD/accessibility_context"

@@ -52,6 +52,7 @@ export TEST_PID_A TEST_PID_B MREC_LINUX_BUILD="$BUILD"
 sleep 1
 cd "$ROOT"
 python3 e2e/linux-native.py
+"$BUILD/accessibility_context"
 AT_SPI_BUS_ADDRESS="unix:path=$RUNTIME/missing-a11y" node e2e/linux-no-accessibility.mjs
 node e2e/linux-node.mjs
 if [[ "${MREC_SKIP_RUST:-0}" != 1 ]]; then

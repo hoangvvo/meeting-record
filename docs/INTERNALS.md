@@ -89,8 +89,8 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 - Set a ~250 ms messaging timeout.
 - Set `AXEnhancedUserInterface` for Chromium and Electron trees.
 - Cap traversal depth and node count.
-- Linux: serialize AT-SPI cache access on a private GLib context; never dispatch the host GUI's default context from a scan worker. Use bounded Collection queries to find browser documents, and inspect controls only inside a recognized top-level service document. Nested documents never inherit the host's call identity. Unrelated document URLs cannot fall back to stale window titles. Chromium exposes the URL as the document's `URI` attribute.
-- Linux: check the accessibility bus before setting its main context; libatspi otherwise dereferences a null D-Bus connection on audio-only desktops. Failed probes remain retryable. Link GObject explicitly, after the native archives for GNU ld's `--as-needed` ordering.
+- Linux: query AT-SPI over a private D-Bus connection; never initialize, move, or dispatch the host's libatspi cache or GLib context. libatspi attaches newly discovered application buses to the default loop, which races SDK scan workers in GTK/WebKit hosts. The regression runs a host-owned libatspi connection and UI loop alongside SDK scans, checking that its dispatch stays on the UI thread.
+- Linux: bound Collection queries, traversal, reply size, and method timeouts. Inspect controls only inside a recognized top-level service document. Nested documents never inherit the host's call identity; unrelated URLs cannot fall back to stale window titles. Chromium supplies the document `URI`; Firefox also supports `DocURL`. Missing buses remain retryable. GNU ld dependencies follow the native archives.
 - Linux: a live Meet listen-only call with no microphone activity can disappear from detection when its tab is hidden. Returning to the tab restores detection. Manual process capture continues independently; playback alone must not become a browser-call fallback.
 
 ## macOS permissions
