@@ -29,6 +29,10 @@ int32_t mrec_catalog_executable_platform(const char *executable);
 /* Windows: the browser executable `executable` names, or NULL. */
 const char *mrec_catalog_executable_browser(const char *executable);
 
+/* Linux executable basenames; case-sensitive, independent of Windows names. */
+int32_t mrec_catalog_linux_platform(const char *executable);
+const char *mrec_catalog_linux_browser(const char *executable);
+
 /* The call route a URL points at; home/chat URLs and embedded hosts do not count. */
 int32_t mrec_catalog_url_platform(const char *url);
 

@@ -10,6 +10,19 @@
       "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS", "NAPI_VERSION=8"],
       "cflags_cc": ["-std=c++17"],
       "conditions": [
+        ["OS=='linux'", {
+          "sources": [
+            "../native/common/meeting-catalog.c",
+            "../native/common/tracks.c",
+            "../native/linux/Capture.cpp",
+            "../native/linux/MeetingDetector.cpp",
+            "../native/linux/Accessibility.cpp"
+          ],
+          "include_dirs": ["../native/common", "<!@(pkg-config --cflags-only-I libpulse atspi-2 | sed s/-I//g)"],
+          "libraries": ["<!@(pkg-config --libs libpulse atspi-2)", "-lpthread"],
+          "cflags_cc!": ["-fno-exceptions"],
+          "cflags_cc": ["-std=c++17", "-fexceptions"]
+        }],
         ["OS=='mac'", {
           "variables": {
             "xcode_path": "<!(xcode-select -p)"

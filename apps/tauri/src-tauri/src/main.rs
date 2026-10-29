@@ -496,10 +496,20 @@ fn reveal(path: String) -> Result<(), String> {
         command.raw_arg(format!("/select,\"{path}\""));
         command
     };
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");
         command.args(["-R", &path]);
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let directory = PathBuf::from(&path)
+            .parent()
+            .ok_or("recording has no parent folder")?
+            .to_path_buf();
+        let mut command = Command::new("xdg-open");
+        command.arg(directory);
         command
     };
     command.spawn().map(drop).map_err(|error| error.to_string())

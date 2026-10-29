@@ -10,6 +10,9 @@ on:
       - "node/**"
       - "scripts/build-macos.sh"
       - "scripts/build-native.mjs"
+      - "scripts/build-prebuild.mjs"
+      - "scripts/test-linux.sh"
+      - "e2e/linux*"
       - "scripts/test-windows.ps1"
       - "package.json"
       - "package-lock.json"
@@ -21,6 +24,9 @@ on:
       - "node/**"
       - "scripts/build-macos.sh"
       - "scripts/build-native.mjs"
+      - "scripts/build-prebuild.mjs"
+      - "scripts/test-linux.sh"
+      - "e2e/linux*"
       - "scripts/test-windows.ps1"
       - "package.json"
       - "package-lock.json"
@@ -34,8 +40,8 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux compatibility
-    runs-on: ubuntu-latest
+    name: Linux native and live audio
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -51,14 +57,39 @@ jobs:
       - name: Install Node.js dependencies
         run: npm ci --ignore-scripts
 
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libpulse-dev libatspi2.0-dev pulseaudio pulseaudio-utils pipewire pipewire-pulse wireplumber dbus-x11 xvfb weston
+
+      - name: Ensure Chrome is installed
+        run: |
+          if ! command -v google-chrome >/dev/null; then
+            curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o "$RUNNER_TEMP/chrome.deb"
+            sudo apt-get install -y "$RUNNER_TEMP/chrome.deb"
+          fi
+
       - name: Lint
         run: npm run lint
 
-      - name: Build TypeScript package
-        run: npm run build:ts --workspace meeting-record
+      - name: Build native and TypeScript package
+        run: npm run build --workspace meeting-record
 
       - name: Test JavaScript API
         run: npm test --workspace meeting-record
+
+      - name: Test real audio servers
+        env:
+          MREC_RUST_E2E: ${{ github.workspace }}/target/debug/examples/linux_e2e
+        run: |
+          cargo build --locked -p meeting-record --example linux_e2e
+          bash e2e/linux.sh pulse
+          bash e2e/linux.sh pipewire
+
+      - name: Test Chrome WebRTC on X11 and Wayland
+        env:
+          CHROME: google-chrome
+        run: |
+          bash e2e/linux-browser.sh x11
+          bash e2e/linux-browser.sh wayland
 
   test:
     name: ${{ matrix.name }}

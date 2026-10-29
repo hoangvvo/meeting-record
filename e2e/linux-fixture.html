@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Meet - abc-defg-hij</title>
+  </head>
+  <body>
+    <h1>Linux accessibility test fixture</h1>
+    <main id="controls"><button>Leave call</button></main>
+    <iframe title="Unrelated embedded page" srcdoc="<button>Join now</button>"></iframe>
+    <audio id="remote" autoplay></audio>
+    <script>
+      // A real local WebRTC media connection: a deterministic peer sends audio,
+      // Chrome decodes/plays it, and getUserMedia opens the selected Linux input.
+      window.startCall = async () => {
+        window.microphone = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+        window.context = new AudioContext({ sampleRate: 48000 });
+        await context.resume();
+        const oscillator = context.createOscillator();
+        oscillator.frequency.value = 440;
+        const gain = context.createGain();
+        gain.gain.value = 0.15;
+        const destination = context.createMediaStreamDestination();
+        oscillator.connect(gain).connect(destination);
+        window.sender = new RTCPeerConnection({ iceServers: [] });
+        window.receiver = new RTCPeerConnection({ iceServers: [] });
+        sender.onicecandidate = ({ candidate }) => candidate && receiver.addIceCandidate(candidate);
+        receiver.onicecandidate = ({ candidate }) => candidate && sender.addIceCandidate(candidate);
+        const playing = new Promise((resolve, reject) => {
+          receiver.ontrack = async ({ streams }) => {
+            const audio = document.getElementById("remote");
+            audio.srcObject = streams[0];
+            try {
+              await audio.play();
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          };
+        });
+        for (const track of destination.stream.getTracks())
+          sender.addTrack(track, destination.stream);
+        await sender.setLocalDescription(await sender.createOffer());
+        await receiver.setRemoteDescription(sender.localDescription);
+        await receiver.setLocalDescription(await receiver.createAnswer());
+        await sender.setRemoteDescription(receiver.localDescription);
+        oscillator.start();
+        await playing;
+        return {
+          input: microphone.getAudioTracks()[0].label,
+          connection: receiver.connectionState,
+        };
+      };
+    </script>
+  </body>
+</html>

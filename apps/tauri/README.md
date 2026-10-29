@@ -1,6 +1,6 @@
 # mrec-tauri
 
-Rust binding test app. macOS 14.2+ (arm64) or Windows 11 / Server 2022+.
+Rust binding test app. macOS 14.2+ (arm64), Windows 11 / Server 2022+, or Linux (experimental; see the root requirements).
 
 Build the core first:
 
@@ -27,4 +27,5 @@ open "$(git rev-parse --show-toplevel)/target/release/bundle/macos/mrec-tauri.ap
 Notes:
 
 - macOS dev mode: detection only; no permission prompts, no recording.
-- Windows dev mode: detection and recording.
+- Windows/Linux dev mode: detection and recording.
+- Linux: install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#linux) and the SDK development libraries. `npm run package --workspace meeting-record-tauri` builds a Debian package; revealing a recording opens its parent folder with `xdg-open`.

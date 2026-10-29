@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "targets": ["deb"],
+    "linux": {
+      "deb": {
+        "depends": ["libpulse0", "libatspi2.0-0", "xdg-utils"]
+      }
+    }
+  }
+}

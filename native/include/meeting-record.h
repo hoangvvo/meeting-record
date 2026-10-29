@@ -1,11 +1,12 @@
 /*
- * meeting-record — system-audio and microphone capture for macOS and Windows.
+ * meeting-record — system-audio and microphone capture for macOS, Windows and Linux.
  *
- * One C ABI, two backends:
+ * One C ABI, three backends:
  *   macOS   : CoreAudio process taps (CATapDescription + private aggregate device)
  *   Windows : WASAPI process loopback (ActivateAudioInterfaceAsync)
+ *   Linux   : PulseAudio stream monitors (PulseAudio or pipewire-pulse)
  *
- * Both backends deliver interleaved float32 PCM on a realtime audio thread. The
+ * Backends deliver interleaved float32 PCM on native audio threads. The
  * callback must not allocate, lock, or call into a managed runtime.
  */
 #ifndef MEETING_RECORD_H
@@ -42,6 +43,8 @@ typedef enum {
 
 /*
  * macOS: whether this app holds kTCCServiceAudioCapture. Windows: always GRANTED.
+ * Linux: GRANTED when the PulseAudio-compatible server is reachable, else UNKNOWN.
+ * Individual source access is checked when capture starts; no portable grant UI.
  *
  * No preflight API exists, so this starts at most one throwaway tap probe. A
  * status call waits briefly for that probe and otherwise returns UNKNOWN; the
@@ -99,6 +102,7 @@ mrec_status mrec_list_audio_apps(mrec_process *out, size_t capacity,
  * for the duration of the call. `host_time_ns` is the capture time of the first
  * frame on a process-wide monotonic clock shared by the system and microphone
  * tracks. The callback's format fields are authoritative after device recovery.
+ * Linux dates client receipt of PCM, without hardware-latency compensation.
  */
 typedef void (*mrec_audio_callback)(const float *frames, uint32_t frame_count,
                                      uint32_t channels, double sample_rate,
@@ -121,7 +125,7 @@ typedef struct {
   /* System audio only: 1 = mono mixdown, 0 = stereo. */
   int32_t mono;
 
-  /* Mute captured output on macOS. Ignored on Windows. */
+  /* Mute captured output on macOS. Ignored on Windows/Linux. */
   int32_t mute_captured_output;
 } mrec_config;
 
@@ -133,8 +137,8 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
 
 /*
  * DEFAULT follows the OS default input device. AUTO prefers the captured apps'
- * microphone on Windows, else the communications default; macOS uses its default
- * input. Both policies follow device changes during capture.
+ * microphone on Windows/Linux, else the default (communications default on
+ * Windows); macOS uses its default input. Both policies follow device changes.
  */
 typedef enum {
   MREC_MICROPHONE_NONE = 0,

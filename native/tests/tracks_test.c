@@ -55,7 +55,11 @@ static int32_t Attempt(void *context, char *device_name, size_t capacity) {
 
 static double Seconds(void) {
   struct timespec now;
+#ifdef __linux__
+  clock_gettime(CLOCK_MONOTONIC, &now);
+#else
   timespec_get(&now, TIME_UTC);
+#endif
   return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 }
 

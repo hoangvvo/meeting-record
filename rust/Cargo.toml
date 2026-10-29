@@ -1,7 +1,7 @@
 [package]
 authors = ["Hoang Vo"]
 categories = ["multimedia::audio", "os::macos-apis", "os::windows-apis"]
-description = "System-audio and microphone capture with meeting detection for macOS and Windows"
+description = "System-audio and microphone capture with meeting detection for macOS, Windows, and Linux"
 documentation = "https://docs.rs/meeting-record"
 edition = "2021"
 homepage = "https://github.com/hoangvvo/meeting-record"

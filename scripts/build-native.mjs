@@ -4,8 +4,8 @@ import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-if (process.platform === "win32") {
-  console.log("Windows native sources are compiled by node-gyp or Cargo");
+if (process.platform === "win32" || process.platform === "linux") {
+  console.log("Native sources are compiled by node-gyp or Cargo");
   process.exit(0);
 }
 

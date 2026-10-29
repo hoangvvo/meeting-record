@@ -147,8 +147,11 @@ static void CallStateEvidence(void) {
   const struct { int32_t platform; const char *identifier; const char *label; } previews[] = {
       {MREC_PLATFORM_TEAMS, "prejoin-join-button", "Localized join label"},
       {MREC_PLATFORM_MEET, "", "Join now"},
+      {MREC_PLATFORM_MEET, "", "Join now without camera"},
       {MREC_PLATFORM_MEET, "", "Ask to join"},
       {MREC_PLATFORM_MEET, "", "Rejoin"},
+      {MREC_PLATFORM_MEET, "", "Switch here"},
+      {MREC_PLATFORM_MEET, "", "Switch here without camera"},
       {MREC_PLATFORM_ZOOM, "", "Join meeting"},
       {MREC_PLATFORM_WEBEX, "", "Join meeting"},
       {MREC_PLATFORM_SLACK, "", "Join huddle"},
@@ -347,6 +350,17 @@ int main(void) {
   assert(strcmp(mrec_platform_id(MREC_PLATFORM_GENERIC_BROWSER), "browser") == 0);
   assert(strcmp(mrec_platform_id((mrec_platform)99), "unknown") == 0);
 
+  assert(mrec_catalog_linux_platform("zoom") == MREC_PLATFORM_ZOOM);
+  assert(mrec_catalog_linux_platform("slack") == MREC_PLATFORM_SLACK);
+  assert(mrec_catalog_linux_platform("Discord") == MREC_PLATFORM_DISCORD);
+  assert(mrec_catalog_linux_platform("zoom-helper-lookalike") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_linux_platform("zoom.exe") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_linux_platform(NULL) == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_linux_browser("chrome") != NULL);
+  assert(mrec_catalog_linux_browser("firefox-bin") != NULL);
+  assert(mrec_catalog_linux_browser("chromium-browser") != NULL);
+  assert(mrec_catalog_linux_browser("chrome-malware") == NULL);
+  assert(mrec_catalog_linux_browser(NULL) == NULL);
   printf("meeting catalog tests passed\n");
   return 0;
 }

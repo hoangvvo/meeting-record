@@ -1,6 +1,6 @@
 # meeting-record for Node.js
 
-System-audio and microphone capture with meeting detection for macOS and Windows.
+System-audio and microphone capture with meeting detection for macOS, Windows, and Linux.
 
 ## Install
 
@@ -57,7 +57,7 @@ const recording = await capture.start(
 ```
 
 - `MicrophoneSource.Default` follows the OS input device.
-- `MicrophoneSource.Auto` prefers the captured app's mic on Windows, then the communications default. On macOS, it uses the default input.
+- `MicrophoneSource.Auto` prefers the captured app's mic on Windows/Linux, then the default (communications default on Windows). On macOS, it uses the default input.
 - Without `microphone`, only system audio is captured.
 
 ## Audio output

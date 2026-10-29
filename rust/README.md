@@ -1,6 +1,6 @@
 # meeting-record for Rust
 
-System-audio and microphone capture with meeting detection for macOS and Windows.
+System-audio and microphone capture with meeting detection for macOS, Windows, and Linux.
 
 ## Install
 
@@ -66,7 +66,7 @@ let recording = capture::start(CaptureTarget::System, options)?;
 ```
 
 - `MicrophoneSource::Default` follows the OS input device.
-- `MicrophoneSource::Auto` prefers the captured app's mic on Windows, then the communications default. On macOS, it uses the default input.
+- `MicrophoneSource::Auto` prefers the captured app's mic on Windows/Linux, then the default (communications default on Windows). On macOS, it uses the default input.
 - Without `microphone`, only system audio is captured.
 
 ## Audio output

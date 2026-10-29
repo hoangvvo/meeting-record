@@ -19,6 +19,7 @@ fn main() {
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("macos") => build_macos(&native),
         Ok("windows") => build_windows(&native),
+        Ok("linux") => build_linux(&native),
         Ok(platform) => panic!("meeting-record does not support {platform}"),
         Err(error) => panic!("Cargo did not provide the target OS: {error}"),
     }
@@ -136,6 +137,7 @@ fn build_windows(native: &Path) {
         "windows/CapturePump.h",
         "windows/MeetingDetector.cpp",
         "windows/TimelineMixer.h",
+        "common/TimelineMixer.h",
     ] {
         println!("cargo:rerun-if-changed={}", native.join(source).display());
     }
@@ -151,6 +153,54 @@ fn build_windows(native: &Path) {
     for library in ["advapi32", "ole32", "oleaut32", "mmdevapi", "user32"] {
         println!("cargo:rustc-link-lib=dylib={library}");
     }
+    build_common(native);
+}
+
+fn build_linux(native: &Path) {
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++17")
+        .include(native.join("include"))
+        .include(native.join("common"));
+    for library in ["libpulse", "atspi-2"] {
+        let cflags = Command::new("pkg-config")
+            .args(["--cflags", library])
+            .output()
+            .expect("Linux builds require pkg-config, libpulse-dev and libatspi2.0-dev");
+        assert!(
+            cflags.status.success(),
+            "missing Linux development library: {library}"
+        );
+        for flag in String::from_utf8(cflags.stdout).unwrap().split_whitespace() {
+            build.flag(flag);
+        }
+        let libs = Command::new("pkg-config")
+            .args(["--libs", library])
+            .output()
+            .unwrap();
+        assert!(libs.status.success(), "pkg-config failed for {library}");
+        for flag in String::from_utf8(libs.stdout).unwrap().split_whitespace() {
+            if let Some(name) = flag.strip_prefix("-l") {
+                println!("cargo:rustc-link-lib={name}");
+            } else if let Some(path) = flag.strip_prefix("-L") {
+                println!("cargo:rustc-link-search=native={path}");
+            } else {
+                println!("cargo:rustc-link-arg={flag}");
+            }
+        }
+    }
+    for source in ["Capture.cpp", "MeetingDetector.cpp", "Accessibility.cpp"] {
+        build.file(native.join("linux").join(source));
+    }
+    for directory in ["linux", "include", "common"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            native.join(directory).display()
+        );
+    }
+    build.compile("meetingrecord_linux");
+    println!("cargo:rustc-link-lib=pthread");
     build_common(native);
 }
 

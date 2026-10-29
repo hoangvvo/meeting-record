@@ -3,6 +3,27 @@
 
 #include <string.h>
 
+int32_t mrec_catalog_linux_platform(const char *name) {
+  if (!name) return MREC_PLATFORM_UNKNOWN;
+  if (!strcmp(name, "zoom") || !strcmp(name, "ZoomLauncher")) return MREC_PLATFORM_ZOOM;
+  if (!strcmp(name, "slack")) return MREC_PLATFORM_SLACK;
+  if (!strcmp(name, "Discord") || !strcmp(name, "discord") ||
+      !strcmp(name, "DiscordCanary") || !strcmp(name, "DiscordPTB")) return MREC_PLATFORM_DISCORD;
+  if (!strcmp(name, "webex") || !strcmp(name, "Webex")) return MREC_PLATFORM_WEBEX;
+  return MREC_PLATFORM_UNKNOWN;
+}
+
+const char *mrec_catalog_linux_browser(const char *name) {
+  static const char *const browsers[] = {
+      "chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+      "firefox", "firefox-bin", "brave", "brave-browser", "msedge", "microsoft-edge",
+      "vivaldi-bin", "opera", "zen", "zen-bin"};
+  if (!name) return NULL;
+  for (size_t i = 0; i < sizeof browsers / sizeof browsers[0]; ++i)
+    if (!strcmp(name, browsers[i])) return browsers[i];
+  return NULL;
+}
+
 typedef struct {
   const char *identifier; /* lowercased */
   mrec_platform platform;
@@ -314,8 +335,11 @@ static const CallControl kCallControls[] = {
     {MREC_PLATFORM_TEAMS, MREC_CONTROL_BUTTON, NULL, "rejoin", MREC_CALL_SIGNAL_NOT_JOINED},
     {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "leave call", MREC_CALL_SIGNAL_JOINED},
     {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "join now", MREC_CALL_SIGNAL_NOT_JOINED},
+    {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "join now without camera", MREC_CALL_SIGNAL_NOT_JOINED},
     {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "ask to join", MREC_CALL_SIGNAL_NOT_JOINED},
     {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "rejoin", MREC_CALL_SIGNAL_NOT_JOINED},
+    {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "switch here", MREC_CALL_SIGNAL_NOT_JOINED},
+    {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, NULL, "switch here without camera", MREC_CALL_SIGNAL_NOT_JOINED},
     {MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, NULL, "leave meeting", MREC_CALL_SIGNAL_JOINED},
     {MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, NULL, "end meeting", MREC_CALL_SIGNAL_JOINED},
     {MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, NULL, "end meeting for all", MREC_CALL_SIGNAL_JOINED},

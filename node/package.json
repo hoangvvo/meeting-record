@@ -1,7 +1,7 @@
 {
   "name": "meeting-record",
   "version": "0.3.0",
-  "description": "System-audio and microphone capture with meeting detection for macOS and Windows",
+  "description": "System-audio and microphone capture with meeting detection for macOS, Windows, and Linux",
   "bugs": "https://github.com/hoangvvo/meeting-record/issues",
   "license": "MIT",
   "author": {
@@ -29,7 +29,7 @@
   "scripts": {
     "build:native": "node ../scripts/build-native.mjs",
     "build:addon": "node-gyp rebuild",
-    "build:prebuild": "npm run build:native && prebuildify --napi",
+    "build:prebuild": "npm run build:native && node ../scripts/build-prebuild.mjs",
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:native && npm run build:addon && npm run build:ts",
     "prepack": "npm run build:ts",

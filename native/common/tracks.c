@@ -8,8 +8,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#ifdef __APPLE__
 #include <mach/mach_time.h>
+#endif
 #include <pthread.h>
+#include <time.h>
 #endif
 
 enum { kTrackCount = 2 };
@@ -55,22 +58,56 @@ static uint64_t HostTimeNs(void) {
 }
 #else
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef __linux__
+static pthread_cond_t g_changed;
+static pthread_once_t g_init = PTHREAD_ONCE_INIT;
+static void InitCondition(void) {
+  pthread_condattr_t attributes;
+  pthread_condattr_init(&attributes);
+  pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+  pthread_cond_init(&g_changed, &attributes);
+  pthread_condattr_destroy(&attributes);
+}
+static void Lock(void) {
+  pthread_once(&g_init, InitCondition);
+  pthread_mutex_lock(&g_lock);
+}
+#else
 static pthread_cond_t g_changed = PTHREAD_COND_INITIALIZER;
 static void Lock(void) { pthread_mutex_lock(&g_lock); }
+#endif
 static void Unlock(void) { pthread_mutex_unlock(&g_lock); }
 static void Broadcast(void) { pthread_cond_broadcast(&g_changed); }
 /* Caller holds the lock. */
 static void WaitForChange(uint32_t milliseconds) {
+#ifdef __APPLE__
   const struct timespec timeout = {milliseconds / 1000, (long)(milliseconds % 1000) * 1000000};
   pthread_cond_timedwait_relative_np(&g_changed, &g_lock, &timeout);
+#else
+  struct timespec timeout;
+  clock_gettime(CLOCK_MONOTONIC, &timeout);
+  timeout.tv_sec += milliseconds / 1000;
+  timeout.tv_nsec += (long)(milliseconds % 1000) * 1000000;
+  if (timeout.tv_nsec >= 1000000000) {
+    timeout.tv_sec++;
+    timeout.tv_nsec -= 1000000000;
+  }
+  pthread_cond_timedwait(&g_changed, &g_lock, &timeout);
+#endif
 }
 
 /* The clock the macOS backend stamps audio with. */
 static uint64_t HostTimeNs(void) {
+#ifdef __APPLE__
   mach_timebase_info_data_t info;
   const uint64_t ticks = mach_absolute_time();
   if (mach_timebase_info(&info) != KERN_SUCCESS || info.denom == 0) return ticks;
   return ticks / info.denom * info.numer + ticks % info.denom * info.numer / info.denom;
+#else
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+#endif
 }
 #endif
 

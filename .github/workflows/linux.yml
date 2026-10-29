@@ -1,0 +1,34 @@
+name: Linux portability
+
+on:
+  push:
+    branches: [main]
+    paths: ["native/**", "scripts/test-linux.sh", ".github/workflows/linux.yml"]
+  pull_request:
+    paths: ["native/**", "scripts/test-linux.sh", ".github/workflows/linux.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            install: apt-get update && apt-get install -y build-essential pkg-config libpulse-dev libatspi2.0-dev
+          - image: debian:12-slim
+            install: apt-get update && apt-get install -y build-essential pkg-config libpulse-dev libatspi2.0-dev
+          - image: fedora:44
+            install: dnf install -y gcc gcc-c++ pkgconf-pkg-config pulseaudio-libs-devel at-spi2-core-devel
+    steps:
+      - name: Install native dependencies
+        run: ${{ matrix.install }}
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build Linux backend and run shared native tests
+        run: bash scripts/test-linux.sh

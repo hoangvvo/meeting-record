@@ -240,6 +240,21 @@ void FlushEndsTheSession() {
   assert(blocks.size() == 1);
 }
 
+void ConfigurableHeadroomPreservesBatchedSiblingAudio() {
+  std::vector<Block> blocks;
+  TimelineMixer mixer;
+  mixer.Reset(2, 1, Collect, &blocks, 20);
+  const auto early = Constant(kFramesPerBlock * 10, 0.25f);
+  const auto late = Constant(kFramesPerBlock * 10, 0.5f);
+  mixer.Add(0, early.data(), kFramesPerBlock * 10, false, false, BlockTime(100));
+  assert(blocks.empty());
+  mixer.Add(1, late.data(), kFramesPerBlock * 10, false, false, BlockTime(100));
+  assert(blocks.size() == 10);
+  for (const auto &block : blocks)
+    assert(All(block.samples, 0, kFramesPerBlock, 0.75f));
+  mixer.Flush();
+}
+
 } // namespace
 
 int main() {
@@ -255,5 +270,6 @@ int main() {
   AddedSourceJoinsAtTheCurrentTimeline();
   SilentPacketsAdvanceTheTimeline();
   FlushEndsTheSession();
+  ConfigurableHeadroomPreservesBatchedSiblingAudio();
   std::cout << "timeline mixer tests passed\n";
 }

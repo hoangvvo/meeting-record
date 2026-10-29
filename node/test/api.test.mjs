@@ -4,7 +4,8 @@ import test from "node:test";
 import * as MeetingRecord from "../dist/index.js";
 
 const nativeSupported =
-  ["darwin", "win32"].includes(process.platform) && ["arm64", "x64"].includes(process.arch);
+  ["darwin", "win32", "linux"].includes(process.platform) &&
+  ["arm64", "x64"].includes(process.arch);
 
 function assertCaptureInactive() {
   if (nativeSupported) {

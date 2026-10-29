@@ -131,6 +131,7 @@ int32_t mrec_is_watching(void);
  * Backed by AXIsProcessTrusted, so this is a real preflight check.
  *
  * On Windows returns GRANTED.
+ * On Linux checks AT-SPI bus availability, not whether each app exposes its UI.
  */
 mrec_permission mrec_accessibility_permission_status(void);
 

@@ -84,7 +84,7 @@ export type CaptureTarget =
 export const MicrophoneSource = {
   /** Follow the OS default input device. */
   Default: "default",
-  /** Prefer the captured app's mic on Windows, then its communications default. Use the OS default on macOS. */
+  /** Prefer the captured app's mic on Windows/Linux, then the default (communications default on Windows). Use the OS default on macOS. */
   Auto: "auto",
 } as const;
 export type MicrophoneSource = (typeof MicrophoneSource)[keyof typeof MicrophoneSource];
@@ -151,11 +151,11 @@ let cachedNative: NativeBinding | undefined;
 function getNative(): NativeBinding {
   if (cachedNative) return cachedNative;
   if (
-    (process.platform !== "darwin" && process.platform !== "win32") ||
+    !["darwin", "win32", "linux"].includes(process.platform) ||
     (process.arch !== "arm64" && process.arch !== "x64")
   ) {
     throw new UnsupportedOsError(
-      `meeting-record native APIs require macOS or Windows on arm64 or x64; received ${process.platform}-${process.arch}`,
+      `meeting-record native APIs require macOS, Windows, or Linux on arm64 or x64; received ${process.platform}-${process.arch}`,
       -1,
     );
   }

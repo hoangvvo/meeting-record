@@ -1,6 +1,6 @@
 # mrec-electron
 
-Node binding test app. macOS 14.2+ (arm64) or Windows 11 / Server 2022+.
+Node binding test app. macOS 14.2+ (arm64), Windows 11 / Server 2022+, or Linux (experimental; see the root requirements).
 
 Build the core first, from the repo root:
 
@@ -25,5 +25,5 @@ open out/mrec-electron-darwin-arm64/mrec-electron.app
 Notes:
 
 - macOS dev mode: detection only; no permission prompts, no recording.
-- Windows dev mode: detection and recording.
+- Windows/Linux dev mode: detection and recording.
 - Windows build: needs Python and the Visual Studio C++ build tools.
