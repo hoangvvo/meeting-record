@@ -52,6 +52,7 @@ export TEST_PID_A TEST_PID_B MREC_LINUX_BUILD="$BUILD"
 sleep 1
 cd "$ROOT"
 python3 e2e/linux-native.py
+AT_SPI_BUS_ADDRESS="unix:path=$RUNTIME/missing-a11y" node e2e/linux-no-accessibility.mjs
 node e2e/linux-node.mjs
 if [[ "${MREC_SKIP_RUST:-0}" != 1 ]]; then
   if [[ -z "${MREC_RUST_E2E:-}" ]]; then
@@ -69,4 +70,10 @@ if [[ "$SERVER" == pipewire ]]; then
   node e2e/linux-native-pipewire.mjs
 fi
 if [[ "$SERVER" == pulse ]]; then dbus-run-session -- python3 e2e/linux-recovery.py; fi
+if [[ -n "${MREC_STRESS_SECONDS:-}" ]]; then
+  "$BUILD/zoom" mrec_speaker 440 mrec_input & TEST_STRESS_PID=$!; pids+=("$!")
+  export TEST_STRESS_PID
+  export MREC_STRESS_OUTPUT="${MREC_STRESS_OUTPUT:-$BUILD/artifacts/stress-$SERVER.json}"
+  node e2e/linux-stress.mjs
+fi
 echo "Linux $SERVER E2E passed"

@@ -90,6 +90,7 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 - Set `AXEnhancedUserInterface` for Chromium and Electron trees.
 - Cap traversal depth and node count.
 - Linux: serialize AT-SPI cache access on a private GLib context; never dispatch the host GUI's default context from a scan worker. Use bounded Collection queries to find browser documents, and inspect controls only inside a recognized top-level service document. Nested documents never inherit the host's call identity. Unrelated document URLs cannot fall back to stale window titles. Chromium exposes the URL as the document's `URI` attribute.
+- Linux: check the accessibility bus before setting its main context; libatspi otherwise dereferences a null D-Bus connection on audio-only desktops. Failed probes remain retryable. Link GObject explicitly, after the native archives for GNU ld's `--as-needed` ordering.
 - Linux: a live Meet listen-only call with no microphone activity can disappear from detection when its tab is hidden. Returning to the tab restores detection. Manual process capture continues independently; playback alone must not become a browser-call fallback.
 
 ## macOS permissions

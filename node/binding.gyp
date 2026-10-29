@@ -18,8 +18,8 @@
             "../native/linux/MeetingDetector.cpp",
             "../native/linux/Accessibility.cpp"
           ],
-          "include_dirs": ["../native/common", "<!@(pkg-config --cflags-only-I libpulse atspi-2 | sed s/-I//g)"],
-          "libraries": ["<!@(pkg-config --libs libpulse atspi-2)", "-lpthread"],
+          "include_dirs": ["../native/common", "<!@(pkg-config --cflags-only-I libpulse atspi-2 gobject-2.0 | sed s/-I//g)"],
+          "libraries": ["<!@(pkg-config --libs libpulse atspi-2 gobject-2.0)", "-lpthread"],
           "cflags_cc!": ["-fno-exceptions"],
           "cflags_cc": ["-std=c++17", "-fexceptions"]
         }],

@@ -11,6 +11,10 @@ std::mutex access_lock;
 bool initialized = false;
 GMainContext *access_context = nullptr;
 bool Init() {
+  // atspi_set_main_context dereferences the bus even when no accessibility
+  // service is installed. Audio-only/headless sessions must remain usable.
+  if (!atspi_get_a11y_bus())
+    return false;
   if (!initialized) {
     // Never dispatch the host GUI's default context on a scan worker. AT-SPI
     // events belong to a private context, serialized with all cache access.
@@ -18,7 +22,8 @@ bool Init() {
       access_context = g_main_context_new();
       atspi_set_main_context(access_context);
     }
-    if (atspi_init() != 0)
+    const auto status = atspi_init();
+    if (status != 0 && status != 1)
       return false;
     atspi_set_timeout(150, 150);
     initialized = true;

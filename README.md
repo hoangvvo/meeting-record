@@ -138,11 +138,14 @@ bash e2e/linux.sh pulse
 bash e2e/linux.sh pipewire
 bash e2e/linux-browser.sh x11
 bash e2e/linux-browser.sh wayland
+MREC_BROWSER=firefox bash e2e/linux-browser.sh x11
+MREC_BROWSER=firefox bash e2e/linux-browser.sh wayland
 ```
 
-- Linux E2E needs Rust, PulseAudio, PipeWire, WirePlumber, `pactl`, D-Bus, Python, Xvfb, Weston, OpenSSL, and Chrome (`CHROME` overrides its executable). Run after building the Node package; both bindings run by default (`MREC_SKIP_RUST=1` skips Rust). Tests use private audio servers and a local WebRTC call without changing desktop audio settings.
+- Linux E2E needs Rust, PulseAudio, PipeWire, WirePlumber, `pactl`, D-Bus, AT-SPI, Python, Xvfb, Weston, OpenSSL, and Chrome or Firefox with geckodriver (`CHROME`, `FIREFOX`, and `GECKODRIVER` override executables). Run after building the Node package; both bindings run by default (`MREC_SKIP_RUST=1` skips Rust). Tests use private audio servers and local WebRTC without changing desktop audio settings.
+- Set `MREC_STRESS_SECONDS=180` for sustained capture and 50 capture restarts alongside meeting scans. `MREC_SANITIZERS=address,undefined bash scripts/test-linux.sh` runs the native checks with sanitizers.
 - For real calls, run `node e2e/linux-live.mjs BROWSER_PID` in the browser's Linux desktop/audio session. Commands: `mark LABEL`, `start LABEL`, `pause`, `resume`, `stop`, `finish`. Saves detection events, PCM metrics, separate tracks, and a mixed WAV under `native/build/linux/artifacts/`.
-- Verified on Ubuntu 24.04 x86-64 under WSL2 with PulseAudio/PipeWire, Chrome WebRTC on X11/Wayland, and live Meet calls on X11. Native builds pass on Ubuntu 22.04, Debian 12, and Fedora 44; the same Ubuntu 22.04 Node prebuild loads on all three. Other real providers, physical device hotplug/Bluetooth, and arm64 hardware remain unverified.
+- Verified on Ubuntu 24.04 x86-64 under WSL2 with PulseAudio/PipeWire, Chrome/Firefox WebRTC on X11/Wayland, and live Chrome Meet calls on X11. Native builds pass on Ubuntu 22.04, Debian 12, and Fedora 44; the same Ubuntu 22.04 Node prebuild loads on all three. Other real providers, physical device hotplug/Bluetooth, and arm64 hardware remain unverified.
 
 Live audio tests on macOS:
 

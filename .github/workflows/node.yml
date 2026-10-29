@@ -40,9 +40,21 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux native and live audio
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    name: Linux native and live audio (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            firefox_os: linux64
+            geckodriver_arch: linux64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            firefox_os: linux64-aarch64
+            geckodriver_arch: linux-aarch64
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,14 +70,22 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Install Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libpulse-dev libatspi2.0-dev pulseaudio pulseaudio-utils pipewire pipewire-pulse wireplumber dbus-x11 xvfb weston
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libpulse-dev libatspi2.0-dev at-spi2-core pulseaudio pulseaudio-utils pipewire pipewire-pulse wireplumber dbus-x11 xvfb weston libgtk-3-0t64 libasound2t64 libdbus-glib-1-2
 
       - name: Ensure Chrome is installed
+        if: matrix.arch == 'x64'
         run: |
           if ! command -v google-chrome >/dev/null; then
             curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o "$RUNNER_TEMP/chrome.deb"
             sudo apt-get install -y "$RUNNER_TEMP/chrome.deb"
           fi
+
+      - name: Install Firefox and geckodriver
+        run: |
+          curl -fsSL 'https://download.mozilla.org/?product=firefox-latest-ssl&os=${{ matrix.firefox_os }}&lang=en-US' -o "$RUNNER_TEMP/firefox.tar.xz"
+          tar -xf "$RUNNER_TEMP/firefox.tar.xz" -C "$RUNNER_TEMP"
+          curl -fsSL 'https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-${{ matrix.geckodriver_arch }}.tar.gz' -o "$RUNNER_TEMP/geckodriver.tar.gz"
+          tar -xf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
 
       - name: Lint
         run: npm run lint
@@ -79,17 +99,36 @@ jobs:
       - name: Test real audio servers
         env:
           MREC_RUST_E2E: ${{ github.workspace }}/target/debug/examples/linux_e2e
+          MREC_STRESS_SECONDS: 60
         run: |
           cargo build --locked -p meeting-record --example linux_e2e
           bash e2e/linux.sh pulse
           bash e2e/linux.sh pipewire
 
       - name: Test Chrome WebRTC on X11 and Wayland
+        if: matrix.arch == 'x64'
         env:
           CHROME: google-chrome
         run: |
           bash e2e/linux-browser.sh x11
           bash e2e/linux-browser.sh wayland
+
+      - name: Test Firefox WebRTC on X11 and Wayland
+        env:
+          MREC_BROWSER: firefox
+          FIREFOX: ${{ runner.temp }}/firefox/firefox
+          GECKODRIVER: ${{ runner.temp }}/geckodriver
+        run: |
+          bash e2e/linux-browser.sh x11
+          bash e2e/linux-browser.sh wayland
+
+      - name: Save Linux test artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-e2e-${{ matrix.arch }}
+          path: native/build/linux/artifacts/
+          if-no-files-found: ignore
 
   test:
     name: ${{ matrix.name }}

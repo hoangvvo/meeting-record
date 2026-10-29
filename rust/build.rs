@@ -163,7 +163,8 @@ fn build_linux(native: &Path) {
         .std("c++17")
         .include(native.join("include"))
         .include(native.join("common"));
-    for library in ["libpulse", "atspi-2"] {
+    let mut link_flags = Vec::new();
+    for library in ["libpulse", "atspi-2", "gobject-2.0"] {
         let cflags = Command::new("pkg-config")
             .args(["--cflags", library])
             .output()
@@ -182,11 +183,11 @@ fn build_linux(native: &Path) {
         assert!(libs.status.success(), "pkg-config failed for {library}");
         for flag in String::from_utf8(libs.stdout).unwrap().split_whitespace() {
             if let Some(name) = flag.strip_prefix("-l") {
-                println!("cargo:rustc-link-lib={name}");
+                link_flags.push(format!("cargo:rustc-link-lib={name}"));
             } else if let Some(path) = flag.strip_prefix("-L") {
-                println!("cargo:rustc-link-search=native={path}");
+                link_flags.push(format!("cargo:rustc-link-search=native={path}"));
             } else {
-                println!("cargo:rustc-link-arg={flag}");
+                link_flags.push(format!("cargo:rustc-link-arg={flag}"));
             }
         }
     }
@@ -200,8 +201,12 @@ fn build_linux(native: &Path) {
         );
     }
     build.compile("meetingrecord_linux");
-    println!("cargo:rustc-link-lib=pthread");
     build_common(native);
+    // GNU ld with --as-needed must see the archives before their dependencies.
+    for flag in link_flags {
+        println!("{flag}");
+    }
+    println!("cargo:rustc-link-lib=pthread");
 }
 
 /// Meeting classification and source recovery shared by both backends.
