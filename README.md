@@ -9,6 +9,8 @@ System-audio and microphone capture with meeting detection for macOS, Windows, a
 | [Node.js / TypeScript](./node/README.md) | [![npm](https://img.shields.io/npm/v/meeting-record)](https://www.npmjs.com/package/meeting-record)                                                                                                | [Electron](./apps/electron/README.md) |
 | [Rust](./rust/README.md)                 | [![crates.io](https://img.shields.io/crates/v/meeting-record)](https://crates.io/crates/meeting-record) [![docs.rs](https://img.shields.io/docsrs/meeting-record)](https://docs.rs/meeting-record) | [Tauri](./apps/tauri/README.md)       |
 
+For AI meeting notes, try [Fireflies.ai](https://fireflies.ai/?utm_source=github&utm_medium=referral&utm_campaign=hoangvvo_meeting-record).
+
 ## Requirements
 
 | Platform             | Minimum version                              | Architectures |
@@ -107,6 +109,7 @@ Browser calls are recognised for 8x8, Around, Dialpad Meetings, Discord, Gather,
 | Mixed audio  | Signed 16-bit little-endian PCM | Mono                             | Configurable          |
 
 - Select an app with `meetings.audioApps()` in Node.js or `meetings::audio_apps()` in Rust, then pass its `pid` as the capture target.
+- Choose `Default` for the OS microphone or `Auto` to follow the captured app’s microphone when available.
 - One recording can run at a time per process.
 - Stop the session, then drain the outputs to keep the final audio.
 - Capturing a browser may include audio from other tabs in the same instance.

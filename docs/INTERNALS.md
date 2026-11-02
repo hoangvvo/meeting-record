@@ -7,7 +7,7 @@ Linux: Ubuntu 24.04 x86-64 under WSL2; real PulseAudio/PipeWire servers, Chrome 
 
 | Platform | System audio                           | Microphone                                              |
 | -------- | -------------------------------------- | ------------------------------------------------------- |
-| macOS    | CoreAudio process tap (14.2+)          | `AVAudioEngine`, default input                          |
+| macOS    | CoreAudio process tap (14.2+)          | `AVAudioEngine`, selected input                         |
 | Windows  | WASAPI process loopback (build 20348+) | WASAPI shared mode, default input or automatic call mic |
 | Linux    | `libpulse` per-sink-input monitors     | `libpulse`, default input or captured app's input       |
 
@@ -29,7 +29,7 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 - Node raw tracks use object-mode packets with a float32 `pcm` Buffer. Mixed output stays a byte stream.
 - Binding mixers omit long all-source gaps (> 1 s); a missing single source contributes silence while others continue.
 - macOS: process tap → private aggregate device (empty sub-device list) → `AudioDeviceCreateIOProcID`.
-- macOS microphone: separate `AVAudioEngine` input tap.
+- macOS microphone: separate `AVAudioEngine` input tap. Pin the resolved device on the input AudioUnit before negotiating format. AUTO reads active target processes’ input-scoped `kAudioProcessPropertyDevices`, unwraps active aggregate members by UID, and uses one unambiguous input. Missing or conflicting inputs fall back to the OS default. Resolve again every second; route/name changes reopen through the shared recovery path. Publish the bound device’s name.
 - Windows: one loopback client per PID, aligned on QPC into one 10 ms track.
 - Linux: one monitor per playback stream, with the shared timeline mixer and 200 ms alignment headroom. Drain every fragment in each notification. Both tracks use 48 kHz float32. Anchor the sample clock to client receipt minus all queued frames; preserve continuity until reads stall or a device/server is replaced. Pace callbacks, including final drain, until their sample timestamp is current. [Pulse timing estimates](https://www.freedesktop.org/software/pulseaudio/doxygen/structpa__timing__info.html) are in the device clock domain and can be stale or jump; using them to reposition contiguous PCM caused lost audio and misaligned mixes in live WSLg tests. Linux timestamps do not compensate hardware input/playback latency.
 - Linux: poll graph/default-device changes every 250 ms; reconnect after service loss. Target identity includes `/proc` start time; only descendants of the original instance join capture. Unknown local PIDs are excluded, and global capture excludes the recorder's process tree.
@@ -75,6 +75,7 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 - Joined controls supersede audio activity; pre-join/lobby/ended controls veto it. Unknown UI uses conservative audio evidence.
 - Meet exposes camera-less previews as `Join now without camera` and `Switch here without camera`; these also veto active microphone/playback evidence.
 - Watchers: STARTED after ~2 s detected, ENDED after ~3 s missing (shared constants).
+- macOS watcher: cache idle background UI for at most 30 s. Foreground apps, active audio/mic owners, call URLs, and call controls bypass the cache. App activation triggers a rescan; process lifetimes prevent stale snapshots after PID reuse. Direct `mrec_scan` calls always read fresh UI.
 - Browsers: need mic activity or a recognised URL or title.
 - `Meet - abc-defg-hij` titles match without a URL.
 - Process targets: native code expands app PIDs. Windows follows the process tree plus sibling processes (same conferencing app or package), and adds siblings started later, such as a call host, within a second; macOS refreshes helper membership every second.
@@ -87,7 +88,8 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 ## Accessibility (AX)
 
 - Set a ~250 ms messaging timeout.
-- Set `AXEnhancedUserInterface` for Chromium and Electron trees.
+- Read `AXEnhancedUserInterface` before enabling it. One owned activation per PID and process start time; never change a pre-enabled or unreadable flag. Hold it across scans and release on watcher stop or after 60 s without a read. Active reads defer cleanup; failed resets retry.
+- WebKit GPU services can be parented by launchd. Their optional libSystem responsibility lookup maps to the actual owning app; it never assigns every WebKit service to Safari. If the SPI is unavailable, normal ancestry and bundle matching remain available and unowned WebKit services are omitted.
 - Cap traversal depth and node count.
 - Linux: query AT-SPI over a private D-Bus connection; never initialize, move, or dispatch the host's libatspi cache or GLib context. libatspi attaches newly discovered application buses to the default loop, which races SDK scan workers in GTK/WebKit hosts. The regression runs a host-owned libatspi connection and UI loop alongside SDK scans, checking that its dispatch stays on the UI thread.
 - Linux: bound Collection queries, traversal, reply size, and method timeouts. Inspect controls only inside a recognized top-level service document. Nested documents never inherit the host's call identity; unrelated URLs cannot fall back to stale window titles. Chromium supplies the document `URI`; Firefox also supports `DocURL`. Missing buses remain retryable. GNU ld dependencies follow the native archives.

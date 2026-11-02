@@ -59,7 +59,7 @@ const recording = await capture.start(
 ```
 
 - `MicrophoneSource.Default` follows the OS input device.
-- `MicrophoneSource.Auto` prefers the captured app's mic on Windows/Linux, then the default (communications default on Windows). On macOS, it uses the default input.
+- `MicrophoneSource.Auto` prefers the captured app's mic, then the default (communications default on Windows). On macOS, unavailable or ambiguous app inputs use the default.
 - Without `microphone`, only system audio is captured.
 
 ## Audio output

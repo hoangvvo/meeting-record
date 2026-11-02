@@ -22,29 +22,40 @@ enum MeetingDetector {
         var owner: pid_t
     }
 
-    static func scan() -> [DetectedMeeting] {
+    static func scan(cache: MeetingWindowCache? = nil,
+                     forceFreshPIDs: Set<pid_t> = []) -> [DetectedMeeting] {
         let processes = AudioProcessRegistry.all()
         return scan(processes: processes, apps: AudioAppRegistry.applications(),
              tree: ProcessTree.read(ancestorsOf: processes.map(\.pid)), recorderPID: getpid(),
              browserWindows: Accessibility.browserWindows,
              windowTitle: Accessibility.focusedWindowTitle,
-             nativeWindows: Accessibility.nativeWindows)
+             nativeWindows: Accessibility.nativeWindows, cache: cache,
+             foregroundPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+             forceFreshPIDs: forceFreshPIDs)
     }
 
     static func scan(processes allProcesses: [AudioProcess], apps: [ApplicationProcess],
                      tree: ProcessTree, recorderPID: pid_t,
                      browserWindows: (pid_t) -> [BrowserWindowContent],
                      windowTitle: (pid_t) -> String?,
-                     nativeWindows: (pid_t, MeetingPlatform) -> [BrowserWindowContent] = { _, _ in [] }) -> [DetectedMeeting] {
+                     nativeWindows: (pid_t, MeetingPlatform) -> [BrowserWindowContent] = { _, _ in [] },
+                     cache: MeetingWindowCache? = nil, foregroundPID: pid_t? = nil,
+                     forceFreshPIDs: Set<pid_t> = []) -> [DetectedMeeting] {
         let processes = allProcesses.filter {
-            tree.owner(of: $0.pid, among: [recorderPID]) == nil
+            !AudioProcessRegistry.isRecorderProcess($0, recorderPID: recorderPID, tree: tree)
         }
 
         var nativeProcesses: [NativeTarget: [AudioProcess]] = [:]
         var browserProcesses: [AudioProcess] = []
+        var activeOwners = forceFreshPIDs
+        if let foregroundPID { activeOwners.insert(foregroundPID) }
+        cache?.retain(pids: Set(apps.map(\.pid) + processes.map(\.pid)))
 
         for process in processes {
             let owner = AudioAppRegistry.owner(of: process, in: apps, tree: tree)
+            if process.isRunningInput || process.isRunningOutput {
+                activeOwners.insert(owner?.pid ?? process.pid)
+            }
             let bundleID = owner?.bundleID ?? process.bundleID
             if let platform = MeetingCatalog.nativePlatform(forBundleID: bundleID) {
                 let target = NativeTarget(platform: platform, owner: owner?.pid ?? process.pid)
@@ -65,13 +76,21 @@ enum MeetingDetector {
         var meetings: [DetectedMeeting] = []
         for (target, group) in nativeProcesses {
             if let meeting = buildNative(platform: target.platform, owner: target.owner,
-                                         processes: group, apps: apps, windows: nativeWindows,
+                                         processes: group, apps: apps, windows: { pid, platform in
+                                             guard let cache else { return nativeWindows(pid, platform) }
+                                             return cache.read(pid: pid, platform: platform,
+                                                 forceFresh: activeOwners.contains(pid)) { nativeWindows(pid, platform) }
+                                         },
                                          windowTitle: windowTitle) {
                 meetings.append(meeting)
             }
         }
         meetings.append(contentsOf: buildBrowser(browserProcesses, apps: apps, tree: tree,
-                                                recorderPID: recorderPID, windows: browserWindows))
+                                                recorderPID: recorderPID, windows: { pid in
+                                                    guard let cache else { return browserWindows(pid) }
+                                                    return cache.read(pid: pid, platform: nil,
+                                                        forceFresh: activeOwners.contains(pid)) { browserWindows(pid) }
+                                                }))
 
         return meetings.sorted { $0.confidence > $1.confidence }
     }
@@ -198,6 +217,11 @@ enum AudioAppRegistry {
         let apps = applications().filter { $0.isRegular }
         let processes = AudioProcessRegistry.all()
         let tree = ProcessTree.read(ancestorsOf: processes.map(\.pid))
+        return includingHelpers(pids, processes: processes, apps: apps, tree: tree)
+    }
+
+    static func includingHelpers(_ pids: [pid_t], processes: [AudioProcess],
+                                 apps: [ApplicationProcess], tree: ProcessTree) -> [pid_t] {
         let helpers = processes.compactMap { process -> pid_t? in
             guard let app = owner(of: process, in: apps, tree: tree),
                   pids.contains(app.pid) else { return nil }
@@ -209,8 +233,15 @@ enum AudioAppRegistry {
     static func owner(of process: AudioProcess, in apps: [ApplicationProcess],
                       tree: ProcessTree) -> ApplicationProcess? {
         let regular = Set(apps.filter(\.isRegular).map(\.pid))
-        let owner = tree.owner(of: process.pid, among: regular)
-            ?? tree.owner(of: process.pid, among: Set(apps.map(\.pid)))
+        var owner = tree.owner(of: process.pid, among: regular)
+        if owner == nil, process.bundleID.lowercased() == "com.apple.webkit.gpu" {
+            // The same WebKit service also belongs to other browsers and native
+            // hosts. Its name alone must never assign it to Safari.
+            guard let responsible = tree.responsible[process.pid] else { return nil }
+            owner = tree.owner(of: responsible, among: regular)
+            return owner.flatMap { pid in apps.first { $0.pid == pid } }
+        }
+        owner = owner ?? tree.owner(of: process.pid, among: Set(apps.map(\.pid)))
         if let pid = owner {
             return apps.first { $0.pid == pid }
         }

@@ -26,6 +26,7 @@ final class MeetingWatcher {
 
     /// Meetings seen so far, keyed by pid, for diffing.
     private var tracked: [pid_t: Tracked] = [:]
+    private let windowCache = MeetingWindowCache()
     private var observers: [NSObjectProtocol] = []
     private var timer: DispatchSourceTimer?
     private var debounce: DispatchWorkItem?
@@ -42,7 +43,8 @@ final class MeetingWatcher {
     func start() {
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification,
-                     NSWorkspace.didTerminateApplicationNotification] {
+                     NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didActivateApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil,
                                                queue: nil) { [weak self] _ in
                 self?.scheduleRescan()
@@ -88,6 +90,8 @@ final class MeetingWatcher {
             self.followUp = nil
             // No ENDED events on explicit stop.
             self.tracked.removeAll()
+            self.windowCache.removeAll()
+            Accessibility.releaseEnhancedInterfaces()
         }
         if DispatchQueue.getSpecific(key: self.queueKey) != nil {
             cleanup()
@@ -114,7 +118,7 @@ final class MeetingWatcher {
         guard !stopped else { return }
         let now = ProcessInfo.processInfo.systemUptime
 
-        for meeting in MeetingDetector.scan() {
+        for meeting in MeetingDetector.scan(cache: windowCache, forceFreshPIDs: Set(tracked.keys)) {
             guard !stopped else { return }
             var entry = tracked[meeting.pid]
                 ?? Tracked(meeting: meeting, firstSeen: now, lastSeen: now)

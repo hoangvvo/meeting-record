@@ -146,6 +146,7 @@ typedef void (*mrec_meeting_callback)(const mrec_meeting *meeting,
 /*
  * Watch for meetings starting and ending. macOS rescans on app lifecycle and
  * CoreAudio process-list changes, with a 5 s backstop; Windows polls every 2 s.
+ * macOS may cache idle background UI for 30 s. mrec_scan() always reads fresh UI.
  * STARTED needs about 2 s of detection and ENDED about 3 s of absence.
  */
 mrec_status mrec_watch_start(mrec_meeting_callback cb,

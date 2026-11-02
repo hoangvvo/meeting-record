@@ -19,6 +19,8 @@ private final class Session {
     var trackSession: UInt64 = 0
     var capturePIDs: [pid_t] = []
     var microphoneEnabled = false
+    var microphoneSource: Int32 = 0
+    var microphoneTargets: () -> [pid_t] = { [] }
     var systemTargetExited = false
     var exitTimer: DispatchSourceTimer?
     var deviceListener: AudioObjectPropertyListenerBlock?
@@ -51,6 +53,8 @@ private func releaseSession() {
     session.captureConfiguration = nil
     session.capturePIDs = []
     session.microphoneEnabled = false
+    session.microphoneSource = 0
+    session.microphoneTargets = { [] }
     session.systemStateBox.clear()
     session.microphoneStateBox.clear()
     stopListeningForDevices()
@@ -132,10 +136,10 @@ private func makeTapCapture(_ configuration: SystemCaptureConfiguration) throws 
     return capture
 }
 
-private func makeMicrophoneCapture() throws -> MicrophoneCapture {
+private func makeMicrophoneCapture(source: Int32, pids: [pid_t]) throws -> MicrophoneCapture {
     let microphone = MicrophoneCapture(stateBox: Session.shared.microphoneStateBox,
                                        onConfigurationChange: scheduleMicrophoneRestart)
-    try microphone.start()
+    try microphone.start(source: source, pids: pids)
     return microphone
 }
 
@@ -235,8 +239,11 @@ private func scheduleMicrophoneRestart(_ identifier: UUID, _ reason: mrec_track_
 
         recover(MREC_TRACK_MICROPHONE, reason: reason,
                 message: "microphone interrupted: \(detail)", generation: generation, trackSession: trackSession) {
-            session.microphone = try makeMicrophoneCapture()
-            return MicrophoneCapture.defaultInputName()
+            let microphone = try makeMicrophoneCapture(
+                source: session.microphoneSource,
+                pids: session.systemTargetExited ? [] : session.microphoneTargets())
+            session.microphone = microphone
+            return microphone.deviceName
         }
     }
 }
@@ -505,7 +512,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     var microphone: MicrophoneCapture?
     if microphoneSource != 0 {
         do {
-            microphone = try makeMicrophoneCapture()
+            microphone = try makeMicrophoneCapture(source: microphoneSource, pids: configuration.pids)
         } catch let error as CaptureError {
             capture.stop()
             session.systemStateBox.clear()
@@ -527,6 +534,8 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     session.capturePIDs = capturePIDs
     session.systemTargetExited = false
     session.microphoneEnabled = microphoneSource != 0
+    session.microphoneSource = microphoneSource
+    session.microphoneTargets = microphone?.liveTargetPIDs ?? { [] }
     session.generation += 1
     session.trackSession = mrec_tracks_open(eventCallback, eventUserData)
     guard mrec_track_started(session.trackSession, MREC_TRACK_SYSTEM_AUDIO, 1, nil) != 0 else {
@@ -536,7 +545,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     }
     if microphone != nil {
         guard mrec_track_started(session.trackSession, MREC_TRACK_MICROPHONE, 1,
-                                 MicrophoneCapture.defaultInputName() ?? "") != 0 else {
+                                 microphone?.deviceName ?? "") != 0 else {
             releaseSession()
             setLastError("could not allocate track state")
             return -9

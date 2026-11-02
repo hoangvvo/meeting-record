@@ -726,8 +726,8 @@ pub enum CaptureTarget {
 pub enum MicrophoneSource {
     /// Follow the OS default input device.
     Default,
-    /// Prefer the captured app's microphone on Windows/Linux, then the default
-    /// (communications default on Windows). On macOS, follow the default input.
+    /// Prefer the captured app's microphone, then the default (communications
+    /// default on Windows). Ambiguous app inputs use the default on macOS.
     Auto,
 }
 

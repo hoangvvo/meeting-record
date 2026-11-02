@@ -82,6 +82,7 @@ private func run(_ body: () -> Void) {
         independentTracks()
         systemRecovery()
         microphoneRecovery()
+        automaticMicrophoneRecovery()
         independentRecovery()
         replacementFailures()
         staleCallbacks()
@@ -90,6 +91,37 @@ private func run(_ body: () -> Void) {
         helperReplacement()
         appExitDuringRecovery()
         print("capture lifecycle tests passed")
+    }
+
+    static func automaticMicrophoneRecovery() {
+        run {
+            precondition(start(pids: [123], microphone: 2) == 0)
+            let old = TestSources.read { TestSources.microphone! }
+            precondition(TestSources.read {
+                TestSources.microphones[old.identifier]?.microphoneSource == 2
+                    && TestSources.microphones[old.identifier]?.pids == [123]
+            })
+            TestSources.read { TestSources.microphoneName = "Selected headset" }
+            precondition(name() == "Test microphone", "report the bound source, not a newer default")
+            old.change(old.identifier, MREC_TRACK_REASON_DEVICE_CHANGED, "app input changed")
+            waitUntil("AUTO mic did not reopen with its policy and target") {
+                name() == "Selected headset"
+            }
+            let current = TestSources.read { TestSources.microphone! }
+            precondition(TestSources.read {
+                TestSources.microphones[current.identifier]?.microphoneSource == 2
+                    && TestSources.microphones[current.identifier]?.pids == [123]
+            })
+            TestSources.read {
+                TestSources.processLifetimes[123] = 2
+                TestSources.microphoneName = "Fallback microphone"
+            }
+            current.change(current.identifier, MREC_TRACK_REASON_DEVICE_CHANGED, "target lifetime ended")
+            waitUntil("AUTO mic did not drop a reused PID") { name() == "Fallback microphone" }
+            precondition(TestSources.read {
+                TestSources.microphones[TestSources.microphone!.identifier]?.pids == []
+            })
+        }
     }
 
     static func startupFailures() {

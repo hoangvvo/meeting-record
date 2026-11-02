@@ -90,12 +90,18 @@ ar rs "$BUILD/libmeetingrecord_macos.a" "$BUILD/meeting-catalog.o" "$BUILD/track
 
 echo "    $(du -h "$BUILD/libmeetingrecord_macos.a" | cut -f1) $BUILD/libmeetingrecord_macos.a"
 
+echo "==> enhanced accessibility tests"
+swiftc -O -parse-as-library -o "$BUILD/enhanced_accessibility_test" \
+  "$ROOT/native/tests/enhanced_accessibility_test.swift" \
+  "$ROOT/native/macos/EnhancedAccessibility.swift"
+"$BUILD/enhanced_accessibility_test"
+
 # Detection needs no entitlements or bundle.
 echo "==> classification tests"
 swiftc -O -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
   -o "$BUILD/catalog_test" \
   "$ROOT/native/tests/catalog_test.swift" \
-  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
+  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,MeetingWindowCache,Accessibility,EnhancedAccessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
   "$BUILD/meeting-catalog.o"
 "$BUILD/catalog_test" | tail -2
 
@@ -103,9 +109,25 @@ echo "==> browser detection tests"
 swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
   -o "$BUILD/browser_detection_test" \
   "$ROOT/native/tests/browser_detection_test.swift" \
-  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,Accessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
+  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,MeetingWindowCache,Accessibility,EnhancedAccessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
   "$BUILD/meeting-catalog.o"
 "$BUILD/browser_detection_test"
+
+echo "==> microphone device selection tests"
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
+  -o "$BUILD/microphone_device_test" \
+  "$ROOT/native/tests/microphone_device_test.swift" \
+  "$ROOT"/native/macos/{MicrophoneDevice,MeetingCatalog,MeetingDetector,MeetingWindowCache,Accessibility,EnhancedAccessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
+  "$BUILD/meeting-catalog.o"
+"$BUILD/microphone_device_test"
+
+echo "==> watcher UI cache tests"
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \
+  -o "$BUILD/window_cache_test" \
+  "$ROOT/native/tests/window_cache_test.swift" \
+  "$ROOT"/native/macos/{MeetingCatalog,MeetingDetector,MeetingWindowCache,Accessibility,EnhancedAccessibility,AudioProcesses,ProcessTree,BrowserContent}.swift \
+  "$BUILD/meeting-catalog.o"
+"$BUILD/window_cache_test"
 
 echo "==> tap description tests"
 swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGING_HEADER" \

@@ -110,7 +110,7 @@ export type CaptureTarget =
 export const MicrophoneSource = {
   /** Follow the OS default input device. */
   Default: "default",
-  /** Prefer the captured app's mic on Windows/Linux, then the default (communications default on Windows). Use the OS default on macOS. */
+  /** Prefer the captured app's mic, then the default (communications default on Windows). Ambiguous app inputs use the default on macOS. */
   Auto: "auto",
 } as const;
 export type MicrophoneSource = (typeof MicrophoneSource)[keyof typeof MicrophoneSource];

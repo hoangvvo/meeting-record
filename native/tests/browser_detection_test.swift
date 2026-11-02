@@ -336,6 +336,35 @@ private func tree(_ parents: [pid_t: pid_t]) -> ProcessTree {
                      "one instance's playback must not raise another instance's mic-only confidence")
 
         let ambiguous = tree([:])
+        let safari = ApplicationProcess(pid: 700, bundleID: "com.apple.Safari", name: "Safari", isRegular: true)
+        let orion = ApplicationProcess(pid: 800, bundleID: "com.kagi.kagimacos", name: "Orion", isRegular: true)
+        let mail = ApplicationProcess(pid: 900, bundleID: "com.apple.mail", name: "Mail", isRegular: true)
+        let gpu = process(701, "com.apple.WebKit.GPU", input: true)
+        for app in [safari, orion, mail] {
+            let ancestry = ProcessTree(parents: [701: 1], responsible: [701: app.pid])
+            precondition(AudioAppRegistry.owner(of: gpu, in: [safari, orion, mail], tree: ancestry)?.pid == app.pid)
+            precondition(AudioAppRegistry.includingHelpers([app.pid], processes: [gpu],
+                apps: [safari, orion, mail], tree: ancestry) == [app.pid, 701].sorted())
+        }
+        precondition(AudioAppRegistry.owner(of: gpu, in: [safari], tree: tree([701: 1])) == nil,
+                     "do not guess that every WebKit GPU service belongs to Safari")
+        let safariTree = ProcessTree(parents: [701: 1], responsible: [701: 700])
+        let safariCall = MeetingDetector.scan(processes: [gpu], apps: [safari, orion],
+            tree: safariTree, recorderPID: 999,
+            browserWindows: { pid in pid == 700 ? [page("https://meet.google.com/abc-defg-hij", controls: [])] : [] },
+            windowTitle: { _ in nil })
+        precondition(safariCall.count == 1 && safariCall[0].pid == 700
+            && safariCall[0].audioPIDs == [701] && safariCall[0].confidence == 100)
+        let recorderTree = ProcessTree(parents: [701: 1], responsible: [701: 999])
+        precondition(AudioProcessRegistry.recorderProcessObjects(
+            in: [gpu], recorderPID: 999, tree: recorderTree) == [701])
+        let recorderHost = ApplicationProcess(pid: 999, bundleID: "com.apple.Safari",
+            name: "Recorder host", isRegular: true)
+        let selfGPU = MeetingDetector.scan(processes: [gpu], apps: [recorderHost],
+            tree: recorderTree, recorderPID: 999,
+            browserWindows: { _ in preconditionFailure("the recorder's WebKit UI must not be scanned") },
+            windowTitle: { _ in nil })
+        precondition(selfGPU.isEmpty)
         precondition(AudioAppRegistry.owner(of: processes[0], in: apps, tree: ambiguous) == nil)
         precondition(AudioAppRegistry.owner(of: processes[0], in: [apps[0]], tree: ambiguous)?.pid == 100)
         precondition(AudioAppRegistry.owner(of: process(301, "com.google.chromelike"),

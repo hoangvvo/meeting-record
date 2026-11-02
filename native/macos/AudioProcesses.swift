@@ -93,6 +93,19 @@ enum HAL {
         return (id, uid)
     }
 
+    static func deviceObject(forUID uid: String) -> AudioObjectID? {
+        var address = address(kAudioHardwarePropertyTranslateUIDToDevice)
+        let value = uid as CFString
+        var pointer = Unmanaged.passUnretained(value).toOpaque()
+        var device = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withExtendedLifetime(value) {
+            AudioObjectGetPropertyData(system, &address,
+                UInt32(MemoryLayout.size(ofValue: pointer)), &pointer, &size, &device)
+        }
+        return status == noErr && device != kAudioObjectUnknown ? device : nil
+    }
+
     /// Translate a Unix pid into the HAL's process object id. The namespaces are
     /// unrelated; passing a raw pid fails with `kAudioHardwareBadObjectError`.
     static func processObject(forPID pid: pid_t) -> AudioObjectID? {
@@ -127,8 +140,15 @@ enum AudioProcessRegistry {
 
     static func recorderProcessObjects(in processes: [AudioProcess], recorderPID: pid_t,
                                        tree: ProcessTree) -> [AudioObjectID] {
-        processes.filter { tree.owner(of: $0.pid, among: [recorderPID]) != nil }
+        processes.filter { isRecorderProcess($0, recorderPID: recorderPID, tree: tree) }
             .map(\.objectID).sorted()
+    }
+
+    static func isRecorderProcess(_ process: AudioProcess, recorderPID: pid_t, tree: ProcessTree) -> Bool {
+        if tree.owner(of: process.pid, among: [recorderPID]) != nil { return true }
+        guard process.bundleID.lowercased() == "com.apple.webkit.gpu",
+              let responsible = tree.responsible[process.pid] else { return false }
+        return tree.owner(of: responsible, among: [recorderPID]) != nil
     }
 
     /// Exclude stale HAL objects whose processes have exited.

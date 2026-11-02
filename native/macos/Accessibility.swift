@@ -60,10 +60,16 @@ enum Accessibility {
         return unsafeBitCast(value, to: AXUIElement.self)
     }
 
-    /// Without this, `AXWebArea` does not exist in Chromium or Electron trees.
-    private static func enableEnhancedInterface(_ app: AXUIElement) {
-        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString,
-                                     kCFBooleanTrue)
+    private static let enhancedInterface = EnhancedAccessibility(
+        cleanupInterval: 5,
+        read: { copyAttribute(application($0), "AXEnhancedUserInterface") as? Bool },
+        write: { pid, enabled in
+            AXUIElementSetAttributeValue(application(pid), "AXEnhancedUserInterface" as CFString,
+                                         enabled ? kCFBooleanTrue : kCFBooleanFalse) == .success
+        }, identity: ProcessTree.identity)
+
+    static func releaseEnhancedInterfaces() {
+        enhancedInterface.releaseAll()
     }
 
     // MARK: - Titles
@@ -100,7 +106,13 @@ enum Accessibility {
     private static func windowContents(pid: pid_t, nativePlatform: MeetingPlatform?) -> [BrowserWindowContent] {
         guard isTrusted() else { return [] }
         let app = application(pid)
-        enableEnhancedInterface(app)
+        return enhancedInterface.withRead(pid: pid) {
+            readWindowContents(app, nativePlatform: nativePlatform)
+        }
+    }
+
+    private static func readWindowContents(_ app: AXUIElement,
+                                          nativePlatform: MeetingPlatform?) -> [BrowserWindowContent] {
         let deadline = ProcessInfo.processInfo.systemUptime + traversalTimeout
         // Native Zoom exposes in-meeting actions in its app menu. Inspect it
         // before a large participant tree can consume the traversal budget.

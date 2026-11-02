@@ -56,6 +56,7 @@ final class CaptureStateBox {
 
 struct TestSourceRecord {
     var pids: [pid_t] = []
+    var microphoneSource: Int32 = 0
     var global = false
     var prepared = false
     var started = false
@@ -92,6 +93,7 @@ enum TestSources {
     static var tapRate = 48000.0
     static var microphoneRate = 44100.0
     static var microphoneName = "Test microphone"
+    static var processLifetimes: [pid_t: UInt64] = [123: 1, 456: 1, 789: 1]
     static var events: [mrec_track_event] = []
     static var systemPackets: [TestAudioPacket] = []
     static var microphonePackets: [TestAudioPacket] = []
@@ -127,6 +129,7 @@ enum TestSources {
             tapRate = 48000
             microphoneRate = 44100
             microphoneName = "Test microphone"
+            processLifetimes = [123: 1, 456: 1, 789: 1]
             events = []
             systemPackets = []
             microphonePackets = []
@@ -237,6 +240,8 @@ final class MicrophoneCapture {
     let identifier = UUID()
     let change: (UUID, mrec_track_reason, String) -> Void
     private let stateBox: CaptureStateBox
+    private(set) var deviceName = ""
+    private(set) var liveTargetPIDs: () -> [pid_t] = { [] }
 
     init(
         stateBox: CaptureStateBox,
@@ -249,8 +254,15 @@ final class MicrophoneCapture {
 
     deinit { stop() }
 
-    func start() throws {
+    func start(source: Int32, pids: [pid_t]) throws {
         let rate = try TestSources.read {
+            let lifetimes = TestSources.processLifetimes
+            liveTargetPIDs = {
+                TestSources.read {
+                    pids.filter { TestSources.alive.contains($0)
+                        && lifetimes[$0] == TestSources.processLifetimes[$0] }
+                }
+            }
             TestSources.microphoneAttempts += 1
             guard TestSources.microphoneAvailable else { throw CaptureError.microphoneUnavailable }
             if TestSources.microphoneStartFailures > 0 {
@@ -258,6 +270,9 @@ final class MicrophoneCapture {
                 throw CaptureError.microphoneUnavailable
             }
             TestSources.microphones[identifier]?.started = true
+            TestSources.microphones[identifier]?.microphoneSource = source
+            TestSources.microphones[identifier]?.pids = pids
+            deviceName = TestSources.microphoneName
             TestSources.microphone = self
             return TestSources.microphoneRate
         }
@@ -278,7 +293,6 @@ final class MicrophoneCapture {
         }
     }
 
-    static func defaultInputName() -> String? { TestSources.read { TestSources.microphoneName } }
 }
 
 struct AudioProcess {
