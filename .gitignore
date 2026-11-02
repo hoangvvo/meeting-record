@@ -17,3 +17,5 @@ node_modules/
 *.log
 *.f32
 .DS_Store
+
+INTERNALS.md
