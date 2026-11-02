@@ -13,11 +13,11 @@ For AI meeting notes, try [Fireflies.ai](https://fireflies.ai/?utm_source=github
 
 ## Requirements
 
-| Platform             | Minimum version                              | Architectures |
-| -------------------- | -------------------------------------------- | ------------- |
-| macOS                | 14.2                                         | arm64, x86-64 |
-| Windows              | 11 / Server 2022                             | arm64, x86-64 |
-| Linux (experimental) | PulseAudio or PipeWire with `pipewire-pulse` | arm64, x86-64 |
+| Platform | Minimum version                              | Architectures |
+| -------- | -------------------------------------------- | ------------- |
+| macOS    | 14.2                                         | arm64, x86-64 |
+| Windows  | 11 / Server 2022                             | arm64, x86-64 |
+| Linux    | PulseAudio or PipeWire with `pipewire-pulse` | arm64, x86-64 |
 
 - Requires Node.js 22.13+ (22.x) or 24+.
 - On macOS, use a signed GUI app with `NSAudioCaptureUsageDescription` in `Info.plist`. Add `NSMicrophoneUsageDescription` when capturing the microphone.

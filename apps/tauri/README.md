@@ -1,6 +1,6 @@
 # mrec-tauri
 
-Rust binding test app. macOS 14.2+ (arm64), Windows 11 / Server 2022+, or Linux (experimental; see the root requirements).
+Rust binding test app. macOS 14.2+ (arm64), Windows 11 / Server 2022+, or Linux (see the root requirements).
 
 Build the core first:
 
