@@ -42,14 +42,22 @@ before(async () => {
     join(root, "node/test/fixtures/native-backend.cc"),
     join(directory, "native-backend.cc"),
   );
+  await copyFile(
+    join(root, "native/common/meeting-catalog.c"),
+    join(directory, "meeting-catalog.c"),
+  );
   await writeFile(
     join(directory, "binding.gyp"),
     JSON.stringify({
       targets: [
         {
           target_name: "meeting_record_test",
-          sources: ["binding.cc", "native-backend.cc"],
-          include_dirs: [dirname(require.resolve("node-addon-api")), join(root, "native/include")],
+          sources: ["binding.cc", "native-backend.cc", "meeting-catalog.c"],
+          include_dirs: [
+            dirname(require.resolve("node-addon-api")),
+            join(root, "native/include"),
+            join(root, "native/common"),
+          ],
           defines: ["NAPI_DISABLE_CPP_EXCEPTIONS", "NAPI_VERSION=8"],
           cflags_cc: ["-std=c++17"],
           xcode_settings: {
@@ -171,6 +179,21 @@ test("enumeration failures stay distinguishable from an empty source list", asyn
   await assert.rejects(api.meetings.scan(), api.InternalError);
   assert.throws(() => api.meetings.audioProcesses(), api.InternalError);
   assert.throws(() => api.meetings.audioApps(), api.InternalError);
+});
+
+test("every native platform survives the binding and matches the public platform identifiers", async () => {
+  native.testConfigure({ scanStatus: 0 });
+  const meetings = await api.meetings.scan();
+  assert.equal(meetings.length, Object.values(api.Platform).length);
+  assert.deepEqual(
+    new Set(meetings.map((meeting) => meeting.platform)),
+    new Set(Object.values(api.Platform)),
+  );
+  for (const meeting of meetings) {
+    assert.equal(meeting.confidence, 95);
+    assert.equal(meeting.shouldRecord, true);
+  }
+  assert.equal(native.testStats().starts, 0);
 });
 
 for (const mono of [true, false]) {

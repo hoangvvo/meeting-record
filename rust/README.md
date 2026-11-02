@@ -1,5 +1,7 @@
 # meeting-record for Rust
 
+[![crates.io](https://img.shields.io/crates/v/meeting-record)](https://crates.io/crates/meeting-record) [![docs.rs](https://img.shields.io/docsrs/meeting-record)](https://docs.rs/meeting-record)
+
 System-audio and microphone capture with meeting detection for macOS, Windows, and Linux.
 
 ## Install
@@ -8,8 +10,8 @@ System-audio and microphone capture with meeting detection for macOS, Windows, a
 cargo add meeting-record
 ```
 
-- See the [platform requirements and permissions](https://github.com/hoangvvo/meeting-record#requirements) for app configuration.
-- The [API reference](https://docs.rs/meeting-record) documents the public types and methods.
+- See the [requirements](https://github.com/hoangvvo/meeting-record#requirements) and [permissions](https://github.com/hoangvvo/meeting-record#permissions) for app configuration.
+- Read the [API reference](https://docs.rs/meeting-record) for public types and methods.
 
 ## Capture
 
@@ -44,10 +46,10 @@ fn main() -> Result<(), Error> {
 | System audio                  | `CaptureTarget::System`            |
 | One app and its audio helpers | `CaptureTarget::Process { pid }`   |
 
-- **App picker:** `meetings::audio_apps()` lists available apps. Use the selected entry's `pid`; no meeting scan is required.
-- **Meeting capture:** a detected meeting's `pid` is also a process target.
-- **Permissions:** `permissions::request_and_wait()` returns a `PermissionStatus`; `permissions::status()` checks the current status without prompting.
-- **Sessions:** one recording at a time per process. Keep the `CaptureSession` alive; dropping it stops capture.
+- `meetings::audio_apps()` lists available apps. Use the selected entry's `pid`; no meeting scan is required.
+- A detected meeting's `pid` is also a process target.
+- `permissions::request_and_wait()` returns a `PermissionStatus`; `permissions::status()` checks the current status without prompting.
+- One recording can run at a time per process. Keep the `CaptureSession` alive; dropping it stops capture.
 
 ### Add a microphone
 
@@ -77,11 +79,11 @@ let recording = capture::start(CaptureTarget::System, options)?;
 | Microphone   | `recording.microphone()`          | `Option<&AudioTrack>`; call `recv()` on the track                  |
 | Mixed audio  | `recording.mixed_audio()`         | `Option<&MixedAudio>`; call `recv()` for `MixedAudioChunk` packets |
 
-- **Raw samples:** `chunk.frames` contains interleaved float32 PCM.
-- **Packet metadata:** `host_time_ns`, `frame_count`, `sample_rate`, `channels`, and `dropped_samples`.
-- **Reading:** `recv()` blocks until a packet arrives or returns `None` when stopped and drained. Read tracks on worker threads while controlling the session elsewhere.
-- **Slow readers:** raw tracks report discarded samples through `dropped_samples` on the track and each packet.
-- See [capture formats and channels](https://github.com/hoangvvo/meeting-record#capture) for sample rates and platform behavior.
+- `chunk.frames` contains interleaved float32 PCM.
+- Each packet includes `host_time_ns`, `frame_count`, `sample_rate`, `channels`, and `dropped_samples`.
+- `recv()` blocks until a packet arrives or returns `None` when stopped and drained. Read tracks on worker threads while controlling the session elsewhere.
+- Raw tracks report discarded samples through `dropped_samples` on the track and each packet.
+- See the supported [audio formats](https://github.com/hoangvvo/meeting-record#capture).
 
 ### Mixed audio
 
@@ -122,10 +124,10 @@ while let Some(chunk) = mixed.recv() {
 | Check source availability | `track.availability()`                                                                   |
 | Cancel start or recording | Pass a `CancellationToken` as `CaptureOptions::cancellation`; call `cancel()` on a clone |
 
-- **Pause:** affects the whole recording; paused time is omitted.
-- **Stop:** keep reading each output until `None` to drain queued audio.
-- **Source loss:** the session stays alive. Track availability is `Live`, `Degraded`, or `Interrupted`.
-- **App exit:** system audio stops when all captured apps exit; the microphone and session stay alive. Start a new session for a relaunched app.
+- Pausing affects the whole recording; paused time is omitted.
+- After stopping, keep reading each output until `None` to drain queued audio.
+- The session stays alive when a source is lost. Track availability is `Live`, `Degraded`, or `Interrupted`.
+- System audio stops when all captured apps exit; the microphone and session stay alive. Start a new session for a relaunched app.
 
 Read source events on a separate worker thread alongside the audio reader:
 
@@ -154,17 +156,15 @@ let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"
 ```
 
 - Use `should_record` to decide whether a meeting is ready to record.
-- The library incorporates call controls and audio signals into `confidence` and `should_record`; no consumer-side call-state logic is required.
 - The watcher reports `Started`, `Updated`, and `Ended` events.
 - Request `Permission::Accessibility` on macOS for call-state checks, browser detection, titles, and URLs; relaunch after granting it.
-- See [supported services and detection behavior](https://github.com/hoangvvo/meeting-record#detection).
+- See the supported [apps and browsers](https://github.com/hoangvvo/meeting-record#detection).
 
 ## Types and errors
 
-- **Types:** capture targets, platforms, permissions, recording states, and source events use enums.
-- **Events:** `TrackEvent` and `InterruptionReason` are non-exhaustive; include a fallback arm when matching them.
-- **Library failures:** capture, permissions, and enumeration return `Result<_, Error>`.
-- **Cancellation:** cancelled operations return `Error::Cancelled`; cancelling an active recording stops capture.
+- `TrackEvent` and `InterruptionReason` are non-exhaustive; include a fallback arm when matching them.
+- Capture, permissions, and enumeration return `Result<_, Error>`.
+- Cancelled operations return `Error::Cancelled`; cancelling an active recording stops capture.
 
 ## License
 

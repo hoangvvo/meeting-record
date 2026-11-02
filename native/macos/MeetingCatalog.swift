@@ -10,6 +10,32 @@ enum MeetingPlatform: Int32 {
     case slack = 5
     case discord = 6
     case genericBrowser = 7
+    case goTo = 8
+    case dialpad = 9
+    case whatsApp = 10
+    case aircall = 11
+    case ringCentral = 12
+    case eightByEight = 13
+    case voov = 14
+    case tuple = 15
+    case gather = 16
+    case lark = 17
+    case roam = 18
+    case clickUp = 19
+    case telemost = 20
+    case telegram = 21
+    case signal = 22
+    case viber = 23
+    case line = 24
+    case weChat = 25
+    case zalo = 26
+    case jitsi = 27
+    case element = 28
+    case mattermost = 29
+    case nextcloudTalk = 30
+    case jami = 31
+    case tencentMeeting = 32
+    case weCom = 33
 }
 
 /// Internal only; the public API reports the library's confidence/recommendation.

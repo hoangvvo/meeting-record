@@ -3,13 +3,41 @@
 
 #include <string.h>
 
+typedef struct {
+  const char *identifier; /* macOS/Windows: lowercased; Linux: exact */
+  mrec_platform platform;
+} Identifier;
+
+static const Identifier kLinuxExecutables[] = {
+    {"zoom", MREC_PLATFORM_ZOOM},
+    {"ZoomLauncher", MREC_PLATFORM_ZOOM},
+    {"slack", MREC_PLATFORM_SLACK},
+    {"Discord", MREC_PLATFORM_DISCORD},
+    {"discord", MREC_PLATFORM_DISCORD},
+    {"DiscordCanary", MREC_PLATFORM_DISCORD},
+    {"DiscordPTB", MREC_PLATFORM_DISCORD},
+    {"webex", MREC_PLATFORM_WEBEX},
+    {"Webex", MREC_PLATFORM_WEBEX},
+    {"tuple", MREC_PLATFORM_TUPLE},
+    {"lark", MREC_PLATFORM_LARK},
+    {"feishu", MREC_PLATFORM_LARK},
+    {"Telegram", MREC_PLATFORM_TELEGRAM},
+    {"signal-desktop", MREC_PLATFORM_SIGNAL},
+    {"Viber", MREC_PLATFORM_VIBER},
+    {"wechat", MREC_PLATFORM_WECHAT},
+    {"jitsi-meet", MREC_PLATFORM_JITSI},
+    {"element-desktop", MREC_PLATFORM_ELEMENT},
+    {"element-desktop-nightly", MREC_PLATFORM_ELEMENT},
+    {"com.Mattermost.Desktop", MREC_PLATFORM_MATTERMOST},
+    {"Nextcloud Talk", MREC_PLATFORM_NEXTCLOUD_TALK},
+    {"jami", MREC_PLATFORM_JAMI},
+    {"wemeetapp", MREC_PLATFORM_TENCENT_MEETING},
+};
+
 int32_t mrec_catalog_linux_platform(const char *name) {
   if (!name) return MREC_PLATFORM_UNKNOWN;
-  if (!strcmp(name, "zoom") || !strcmp(name, "ZoomLauncher")) return MREC_PLATFORM_ZOOM;
-  if (!strcmp(name, "slack")) return MREC_PLATFORM_SLACK;
-  if (!strcmp(name, "Discord") || !strcmp(name, "discord") ||
-      !strcmp(name, "DiscordCanary") || !strcmp(name, "DiscordPTB")) return MREC_PLATFORM_DISCORD;
-  if (!strcmp(name, "webex") || !strcmp(name, "Webex")) return MREC_PLATFORM_WEBEX;
+  for (size_t i = 0; i < sizeof kLinuxExecutables / sizeof kLinuxExecutables[0]; ++i)
+    if (!strcmp(name, kLinuxExecutables[i].identifier)) return kLinuxExecutables[i].platform;
   return MREC_PLATFORM_UNKNOWN;
 }
 
@@ -17,17 +45,12 @@ const char *mrec_catalog_linux_browser(const char *name) {
   static const char *const browsers[] = {
       "chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
       "firefox", "firefox-bin", "brave", "brave-browser", "msedge", "microsoft-edge",
-      "vivaldi-bin", "opera", "zen", "zen-bin"};
+      "vivaldi-bin", "opera", "zen", "zen-bin", "helium", "waterfox", "whale"};
   if (!name) return NULL;
   for (size_t i = 0; i < sizeof browsers / sizeof browsers[0]; ++i)
     if (!strcmp(name, browsers[i])) return browsers[i];
   return NULL;
 }
-
-typedef struct {
-  const char *identifier; /* lowercased */
-  mrec_platform platform;
-} Identifier;
 
 /* macOS bundle-id prefixes. Audio usually plays from a helper with a suffixed id. */
 static const Identifier kBundlePrefixes[] = {
@@ -44,6 +67,45 @@ static const Identifier kBundlePrefixes[] = {
     {"com.webex.meetingmanager", MREC_PLATFORM_WEBEX},
     {"com.tinyspeck.slackmacgap", MREC_PLATFORM_SLACK},
     {"com.hnc.discord", MREC_PLATFORM_DISCORD},
+    {"com.logmein.goto", MREC_PLATFORM_GOTO},
+    {"com.electron.dialpad", MREC_PLATFORM_DIALPAD},
+    {"com.electron.uberconference", MREC_PLATFORM_DIALPAD},
+    {"net.whatsapp.whatsapp", MREC_PLATFORM_WHATSAPP},
+    {"io.aircall.phone", MREC_PLATFORM_AIRCALL},
+    {"io.aircall.workspace", MREC_PLATFORM_AIRCALL},
+    {"com.ringcentral.glip", MREC_PLATFORM_RINGCENTRAL},
+    {"com.electron.8x8---virtual-office", MREC_PLATFORM_8X8},
+    {"com.tencent.tencentmeeting", MREC_PLATFORM_VOOV},
+    {"app.tuple.app", MREC_PLATFORM_TUPLE},
+    {"com.gather.gather", MREC_PLATFORM_GATHER},
+    {"com.gather.gatherv2", MREC_PLATFORM_GATHER},
+    {"com.larksuite.larkapp", MREC_PLATFORM_LARK},
+    {"com.electron.lark", MREC_PLATFORM_LARK},
+    {"com.bytedance.macos.feishu", MREC_PLATFORM_LARK},
+    {"inc.wonder.roam", MREC_PLATFORM_ROAM},
+    {"com.clickup.desktop-app", MREC_PLATFORM_CLICKUP},
+    {"ru.yandex.desktop.telemost", MREC_PLATFORM_TELEMOST},
+    /* Installed Meet PWAs are standalone app windows, not browser tabs. */
+    {"com.google.chrome.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", MREC_PLATFORM_MEET},
+    {"com.google.chrome.beta.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", MREC_PLATFORM_MEET},
+    {"company.thebrowser.dia.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", MREC_PLATFORM_MEET},
+    {"ru.keepcoder.telegram", MREC_PLATFORM_TELEGRAM},
+    {"org.telegram.desktop", MREC_PLATFORM_TELEGRAM},
+    {"com.tdesktop.telegram", MREC_PLATFORM_TELEGRAM},
+    {"org.whispersystems.signal-desktop", MREC_PLATFORM_SIGNAL},
+    {"com.viber.osx", MREC_PLATFORM_VIBER},
+    {"jp.naver.line.mac", MREC_PLATFORM_LINE},
+    {"com.tencent.xinwechat", MREC_PLATFORM_WECHAT},
+    {"com.vng.zalo", MREC_PLATFORM_ZALO},
+    {"org.jitsi.jitsi-meet", MREC_PLATFORM_JITSI},
+    {"im.riot.app", MREC_PLATFORM_ELEMENT},
+    {"im.riot.nightly", MREC_PLATFORM_ELEMENT},
+    {"mattermost.desktop", MREC_PLATFORM_MATTERMOST},
+    {"com.nextcloud.talk.mac", MREC_PLATFORM_NEXTCLOUD_TALK},
+    {"com.savoirfairelinux.ring.macos", MREC_PLATFORM_JAMI},
+    {"cx.ring", MREC_PLATFORM_JAMI},
+    {"com.tencent.meeting", MREC_PLATFORM_TENCENT_MEETING},
+    {"com.tencent.weworkmac", MREC_PLATFORM_WECOM},
 };
 
 /* Windows executable names, including the hosts that carry the audio. */
@@ -62,6 +124,39 @@ static const Identifier kExecutables[] = {
     {"ciscocollabhost.exe", MREC_PLATFORM_WEBEX},
     {"slack.exe", MREC_PLATFORM_SLACK},
     {"discord.exe", MREC_PLATFORM_DISCORD},
+    {"goto.exe", MREC_PLATFORM_GOTO},
+    {"dialpad.exe", MREC_PLATFORM_DIALPAD},
+    {"dialpadmeetings.exe", MREC_PLATFORM_DIALPAD},
+    {"whatsapp.exe", MREC_PLATFORM_WHATSAPP},
+    {"whatsapp.root.exe", MREC_PLATFORM_WHATSAPP},
+    {"aircall.exe", MREC_PLATFORM_AIRCALL},
+    {"aircall workspace.exe", MREC_PLATFORM_AIRCALL},
+    {"aircallworkspace.exe", MREC_PLATFORM_AIRCALL},
+    {"ringcentral.exe", MREC_PLATFORM_RINGCENTRAL},
+    {"8x8 work.exe", MREC_PLATFORM_8X8},
+    {"voovmeetingapp.exe", MREC_PLATFORM_VOOV},
+    {"tuple.exe", MREC_PLATFORM_TUPLE},
+    {"gather.exe", MREC_PLATFORM_GATHER},
+    {"gatherv2.exe", MREC_PLATFORM_GATHER},
+    {"lark.exe", MREC_PLATFORM_LARK},
+    {"roam.exe", MREC_PLATFORM_ROAM},
+    {"clickup.exe", MREC_PLATFORM_CLICKUP},
+    {"yandextelemost.exe", MREC_PLATFORM_TELEMOST},
+    {"telegram.exe", MREC_PLATFORM_TELEGRAM},
+    {"signal.exe", MREC_PLATFORM_SIGNAL},
+    {"viber.exe", MREC_PLATFORM_VIBER},
+    {"line.exe", MREC_PLATFORM_LINE},
+    {"wechat.exe", MREC_PLATFORM_WECHAT},
+    {"weixin.exe", MREC_PLATFORM_WECHAT},
+    {"zalo.exe", MREC_PLATFORM_ZALO},
+    {"jitsi meet.exe", MREC_PLATFORM_JITSI},
+    {"element.exe", MREC_PLATFORM_ELEMENT},
+    {"element nightly.exe", MREC_PLATFORM_ELEMENT},
+    {"mattermost.exe", MREC_PLATFORM_MATTERMOST},
+    {"nextcloud talk.exe", MREC_PLATFORM_NEXTCLOUD_TALK},
+    {"jami.exe", MREC_PLATFORM_JAMI},
+    {"wemeetapp.exe", MREC_PLATFORM_TENCENT_MEETING},
+    {"wxwork.exe", MREC_PLATFORM_WECOM},
 };
 
 /*
@@ -72,12 +167,18 @@ static const char *const kBrowserBundlePrefixes[] = {
     "com.google.chrome",       "org.chromium.chromium",      "com.apple.safari",
     "com.microsoft.edgemac",   "org.mozilla.firefox",        "company.thebrowser.browser",
     "com.brave.browser",       "com.vivaldi.vivaldi",        "com.operasoftware.opera",
-    "ai.perplexity.comet",     "app.zen-browser.zen",
+    "ai.perplexity.comet",     "app.zen-browser.zen",        "company.thebrowser.dia",
+    "com.operasoftware.operagx", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly",
+    "com.operasoftware.operanext", "com.operasoftware.operadeveloper",
+    "com.apple.safaritechnologypreview",
+    "net.imput.helium",        "com.operasoftware.operaair", "net.waterfox.waterfox",
+    "com.kagi.kagimacos",      "com.naver.whale",            "ru.yandex.desktop.yandex-browser",
 };
 
 static const char *const kBrowserExecutables[] = {
     "chrome.exe",  "chromium.exe", "msedge.exe", "firefox.exe", "brave.exe",
     "arc.exe",     "vivaldi.exe",  "opera.exe",  "comet.exe",   "zen.exe",
+    "browser.exe", "waterfox.exe",
 };
 
 /* A Teams home/chat/calendar URL does not identify a call. */
@@ -110,6 +211,15 @@ static const URLPattern kUrlPatterns[] = {
     {"meet.jit.si", "/", 0, MREC_PLATFORM_GENERIC_BROWSER},
     {"app.gather.town", "/app/", 0, MREC_PLATFORM_GENERIC_BROWSER},
     {"around.co", "/", 0, MREC_PLATFORM_GENERIC_BROWSER},
+    {"app.goto.com", "/meeting/", 0, MREC_PLATFORM_GOTO},
+    {"meet.goto.com", "/", 0, MREC_PLATFORM_GOTO},
+    {"global.gotomeeting.com", "/join/", 0, MREC_PLATFORM_GOTO},
+    {"gotomeet.me", "/", 0, MREC_PLATFORM_GOTO},
+    {"meetings.dialpad.com", "/room/", 0, MREC_PLATFORM_DIALPAD},
+    {"v.ringcentral.com", "/join/", 0, MREC_PLATFORM_RINGCENTRAL},
+    {"tuple.app", "/c/", 0, MREC_PLATFORM_TUPLE},
+    {"telemost.yandex.ru", "/j/", 0, MREC_PLATFORM_TELEMOST},
+    {"8x8.vc", "/vpaas-magic-cookie-", 0, MREC_PLATFORM_8X8},
 };
 
 /* A known app is not a meeting on its own. */
@@ -205,6 +315,31 @@ static int HasRoom(const URL *url, const char *path) {
          url->path[length] != '/';
 }
 
+/* GoTo's numeric call routes must not include account/settings pages. */
+static int HasGoToMeetingID(const URL *url, const char *path) {
+  const size_t prefix = strlen(path);
+  const char *id = url->path + prefix;
+  size_t length = url->path_length - prefix;
+  if (length && id[length - 1] == '/') length--;
+  size_t digits = 0;
+  for (size_t i = 0; i < length; i++) {
+    if (id[i] >= '0' && id[i] <= '9') digits++;
+    else if (length != 11 || (i != 3 && i != 7) || id[i] != '-') return 0;
+  }
+  return digits == 9;
+}
+
+/* A JaaS call needs both the complete tenant ID and a room. */
+static int HasJaaSRoom(const URL *url, const char *path) {
+  const size_t prefix = strlen(path);
+  if (url->path_length <= prefix + 33) return 0;
+  for (size_t i = prefix; i < prefix + 32; i++) {
+    const char c = Lower(url->path[i]);
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+  }
+  return url->path[prefix + 32] == '/' && url->path[prefix + 33] != '/';
+}
+
 static int32_t URLPlatform(const URL *url) {
   if (HostMatches(url, "meet.google.com", 0)) {
     const size_t prefix = HasPrefix(url->path, "/meet/") ? 6 : 1;
@@ -222,6 +357,9 @@ static int32_t URLPlatform(const URL *url) {
   for (size_t index = 0; index < COUNT(kUrlPatterns); index++) {
     const URLPattern *pattern = &kUrlPatterns[index];
     if (HostMatches(url, pattern->host, pattern->subdomains) && HasRoom(url, pattern->path)) {
+      if (pattern->platform == MREC_PLATFORM_GOTO && strcmp(pattern->host, "gotomeet.me") != 0 &&
+          !HasGoToMeetingID(url, pattern->path)) continue;
+      if (pattern->platform == MREC_PLATFORM_8X8 && !HasJaaSRoom(url, pattern->path)) continue;
       return pattern->platform;
     }
   }
@@ -468,6 +606,32 @@ const char *mrec_platform_id(mrec_platform platform) {
     case MREC_PLATFORM_SLACK: return "slack";
     case MREC_PLATFORM_DISCORD: return "discord";
     case MREC_PLATFORM_GENERIC_BROWSER: return "browser";
+    case MREC_PLATFORM_GOTO: return "goto";
+    case MREC_PLATFORM_DIALPAD: return "dialpad";
+    case MREC_PLATFORM_WHATSAPP: return "whatsapp";
+    case MREC_PLATFORM_AIRCALL: return "aircall";
+    case MREC_PLATFORM_RINGCENTRAL: return "ringcentral";
+    case MREC_PLATFORM_8X8: return "8x8";
+    case MREC_PLATFORM_VOOV: return "voov";
+    case MREC_PLATFORM_TUPLE: return "tuple";
+    case MREC_PLATFORM_GATHER: return "gather";
+    case MREC_PLATFORM_LARK: return "lark";
+    case MREC_PLATFORM_ROAM: return "roam";
+    case MREC_PLATFORM_CLICKUP: return "clickup";
+    case MREC_PLATFORM_TELEMOST: return "telemost";
+    case MREC_PLATFORM_TELEGRAM: return "telegram";
+    case MREC_PLATFORM_SIGNAL: return "signal";
+    case MREC_PLATFORM_VIBER: return "viber";
+    case MREC_PLATFORM_LINE: return "line";
+    case MREC_PLATFORM_WECHAT: return "wechat";
+    case MREC_PLATFORM_ZALO: return "zalo";
+    case MREC_PLATFORM_JITSI: return "jitsi";
+    case MREC_PLATFORM_ELEMENT: return "element";
+    case MREC_PLATFORM_MATTERMOST: return "mattermost";
+    case MREC_PLATFORM_NEXTCLOUD_TALK: return "nextcloud-talk";
+    case MREC_PLATFORM_JAMI: return "jami";
+    case MREC_PLATFORM_TENCENT_MEETING: return "tencent-meeting";
+    case MREC_PLATFORM_WECOM: return "wecom";
     case MREC_PLATFORM_UNKNOWN: break;
   }
   return "unknown";

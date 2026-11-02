@@ -17,6 +17,7 @@ struct Config {
   int format_status = MREC_OK;
   int microphone_format_status = MREC_OK;
   int initial_event_type = -1;
+  int scan_status = MREC_ERR_INTERNAL;
 };
 Config config;
 mrec_audio_callback audio;
@@ -57,11 +58,23 @@ mrec_status mrec_request_microphone_permission() { return MREC_OK; }
 mrec_status mrec_request_accessibility_permission() { return MREC_OK; }
 mrec_status mrec_list_audio_processes(mrec_process *, size_t, size_t *count) { *count = 0; return MREC_ERR_INTERNAL; }
 mrec_status mrec_list_audio_apps(mrec_process *, size_t, size_t *count) { *count = 0; return MREC_ERR_INTERNAL; }
-mrec_status mrec_scan(mrec_meeting *, size_t, size_t *count) { *count = 0; return MREC_ERR_INTERNAL; }
+mrec_status mrec_scan(mrec_meeting *meetings, size_t capacity, size_t *count) {
+  *count = 0;
+  if (config.scan_status != MREC_OK) return static_cast<mrec_status>(config.scan_status);
+  *count = MREC_PLATFORM_WECOM + 1;
+  if (capacity < *count) return MREC_ERR_BUFFER_TOO_SMALL;
+  for (size_t i = 0; i < *count; i++) {
+    meetings[i] = {};
+    meetings[i].platform = static_cast<mrec_platform>(i);
+    meetings[i].pid = static_cast<uint32_t>(1000 + i);
+    meetings[i].confidence = 95;
+    meetings[i].should_record = 1;
+  }
+  return MREC_OK;
+}
 mrec_status mrec_watch_start(mrec_meeting_callback, void *) { return MREC_OK; }
 mrec_status mrec_watch_stop() { return MREC_OK; }
 int32_t mrec_is_watching() { return 0; }
-const char *mrec_platform_id(mrec_platform) { return "unknown"; }
 int32_t mrec_start_tracks_raw(const uint32_t *pids, size_t pid_count, int32_t global_mixdown,
     int32_t mono, int32_t, int32_t microphone, mrec_audio_callback callback, void *data,
     mrec_audio_callback microphone_callback, void *microphone_user_data,
@@ -133,6 +146,7 @@ void RegisterTestBackend(Napi::Env env, Napi::Object exports) {
     config.format_status = Number(options, "formatStatus", MREC_OK);
     config.microphone_format_status = Number(options, "microphoneFormatStatus", MREC_OK);
     config.initial_event_type = Number(options, "initialEventType", -1);
+    config.scan_status = Number(options, "scanStatus", MREC_ERR_INTERNAL);
     starts = 0;
     stops = 0;
   }));

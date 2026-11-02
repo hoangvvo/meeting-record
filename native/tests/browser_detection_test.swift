@@ -205,11 +205,62 @@ private func tree(_ parents: [pid_t: pid_t]) -> ProcessTree {
             precondition(call.count == 1 && call[0].platform == platform && call[0].confidence == 90)
         }
 
+        // Added browser identities use the shared URL/audio path without new UI rules.
+        for bundle in ["company.thebrowser.dia", "com.operasoftware.OperaGX",
+                       "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly",
+                       "com.operasoftware.operanext", "com.operasoftware.operadeveloper",
+                       "com.apple.SafariTechnologyPreview",
+                       "net.imput.helium", "com.operasoftware.OperaAir", "net.waterfox.waterfox",
+                       "com.kagi.kagimacos", "com.naver.whale", "ru.yandex.desktop.yandex-browser"] {
+            let app = ApplicationProcess(pid: 300, bundleID: bundle, name: "Browser", isRegular: true)
+            for (url, platform) in [("https://meet.goto.com/123456789", MeetingPlatform.goTo),
+                                    ("https://meetings.dialpad.com/room/team", .dialpad),
+                                    ("https://v.ringcentral.com/join/835349594", .ringCentral),
+                                    ("https://tuple.app/c/example-call", .tuple),
+                                    ("https://telemost.yandex.ru/j/1111111111", .telemost),
+                                    ("https://8x8.vc/vpaas-magic-cookie-1d2e6a201d594c8f87a630e3f71826d3/room", .eightByEight)] {
+                func scan(_ audio: [AudioProcess]) -> [DetectedMeeting] {
+                    MeetingDetector.scan(processes: audio, apps: [app], tree: tree([301: 300]),
+                                         recorderPID: 999, browserWindows: { _ in [page(url, controls: [])] },
+                                         windowTitle: { _ in nil })
+                }
+                precondition(scan([process(301, bundle + ".helper")]).isEmpty)
+                let call = scan([process(301, bundle + ".helper", input: true)])
+                precondition(call.count == 1 && call[0].platform == platform && call[0].pid == 300)
+                precondition(call[0].audioPIDs == [301] && call[0].url == url && call[0].confidence == 100)
+            }
+        }
+
         // The same playback rule covers every native client, including audio helpers.
         let nativeApps: [(String, MeetingPlatform)] = [
             ("us.zoom.xos", .zoom), ("com.microsoft.teams2", .teams),
             ("com.cisco.webexmeetingsapp", .webex), ("Cisco-Systems.Spark", .webex),
-            ("com.tinyspeck.slackmacgap", .slack), ("com.hnc.Discord", .discord)
+            ("com.tinyspeck.slackmacgap", .slack), ("com.hnc.Discord", .discord),
+            ("com.logmein.goto", .goTo), ("com.electron.dialpad", .dialpad),
+            ("com.electron.uberconference", .dialpad), ("net.whatsapp.WhatsApp", .whatsApp),
+            ("io.aircall.phone", .aircall), ("io.aircall.workspace", .aircall),
+            ("com.ringcentral.glip", .ringCentral), ("com.electron.8x8---virtual-office", .eightByEight),
+            ("com.tencent.tencentmeeting", .voov), ("app.tuple.app", .tuple),
+            ("com.gather.Gather", .gather), ("com.gather.GatherV2", .gather),
+            ("com.electron.lark", .lark), ("com.bytedance.macos.feishu", .lark),
+            ("com.larksuite.larkApp", .lark), ("inc.wonder.roam", .roam),
+            ("com.clickup.desktop-app", .clickUp), ("ru.yandex.desktop.telemost", .telemost),
+            ("com.google.Chrome.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", .meet),
+            ("com.google.Chrome.beta.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", .meet),
+            ("company.thebrowser.dia.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", .meet),
+            ("ru.keepcoder.telegram", .telegram),
+            ("org.whispersystems.signal-desktop", .signal),
+            ("com.viber.osx", .viber),
+            ("jp.naver.line.mac", .line),
+            ("com.tencent.xinwechat", .weChat),
+            ("com.vng.zalo", .zalo),
+            ("org.jitsi.jitsi-meet", .jitsi),
+            ("im.riot.app", .element),
+            ("mattermost.desktop", .mattermost),
+            ("com.nextcloud.talk.mac", .nextcloudTalk),
+            ("com.savoirfairelinux.ring.macos", .jami), ("cx.ring", .jami),
+            ("com.tencent.meeting", .tencentMeeting),
+            ("com.tencent.weworkmac", .weCom),
         ]
         for (bundle, platform) in nativeApps {
             let app = ApplicationProcess(pid: 300, bundleID: bundle, name: "Native", isRegular: true)
@@ -220,6 +271,8 @@ private func tree(_ parents: [pid_t: pid_t]) -> ProcessTree {
             }
             precondition(scan([process(301, bundle + ".helper")]).isEmpty)
             precondition(scan([process(301, bundle + ".helper", output: false)]).isEmpty)
+            let micOnly = scan([process(302, bundle + ".helper", output: false, input: true)])
+            precondition(micOnly.count == 1 && micOnly[0].confidence < MeetingCatalog.recordThreshold)
             let call = scan([process(301, bundle + ".helper"),
                              process(302, bundle + ".helper", output: false, input: true)])
             precondition(call.count == 1 && call[0].platform == platform && call[0].pid == 300)

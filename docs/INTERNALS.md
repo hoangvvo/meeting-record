@@ -13,7 +13,7 @@ Linux: Ubuntu 24.04 x86-64 under WSL2; real PulseAudio/PipeWire servers, Chrome 
 
 - No virtual audio drivers. No ScreenCaptureKit.
 - Linux requires the current user's PulseAudio-compatible server, local `/proc` process identity, and AT-SPI for UI evidence. The same code serves distributions with those interfaces; direct ALSA/JACK and sandboxed hosts are outside the supported boundary.
-- Linux API references: [per-stream monitoring](https://freedesktop.org/software/pulseaudio/doxygen/stream_8h.html), [PipeWire's PulseAudio replacement](https://docs.pipewire.org/page_man_pipewire-pulse_1.html), and [AT-SPI](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/). [Recall's OS matrix](https://docs.recall.ai/docs/dsdk-supported-platforms) does not list Linux; the [community Granola port](https://github.com/tirtha4/Granola-for-Linux) reports limited system audio.
+- Linux API references: [per-stream monitoring](https://freedesktop.org/software/pulseaudio/doxygen/stream_8h.html), [PipeWire's PulseAudio replacement](https://docs.pipewire.org/page_man_pipewire-pulse_1.html), and [AT-SPI](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/).
 - macOS TCC state (`auth_value` 2 = allowed, 0 = denied):
 
 ```sql

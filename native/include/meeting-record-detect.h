@@ -49,6 +49,33 @@ typedef enum {
   MREC_PLATFORM_SLACK,
   MREC_PLATFORM_DISCORD,
   MREC_PLATFORM_GENERIC_BROWSER, /* another recognised browser call service */
+  /* Append only: existing numeric values are part of the C ABI. */
+  MREC_PLATFORM_GOTO,
+  MREC_PLATFORM_DIALPAD,
+  MREC_PLATFORM_WHATSAPP,
+  MREC_PLATFORM_AIRCALL,
+  MREC_PLATFORM_RINGCENTRAL,
+  MREC_PLATFORM_8X8,
+  MREC_PLATFORM_VOOV,
+  MREC_PLATFORM_TUPLE,
+  MREC_PLATFORM_GATHER,
+  MREC_PLATFORM_LARK,
+  MREC_PLATFORM_ROAM,
+  MREC_PLATFORM_CLICKUP,
+  MREC_PLATFORM_TELEMOST,
+  MREC_PLATFORM_TELEGRAM,
+  MREC_PLATFORM_SIGNAL,
+  MREC_PLATFORM_VIBER,
+  MREC_PLATFORM_LINE,
+  MREC_PLATFORM_WECHAT,
+  MREC_PLATFORM_ZALO,
+  MREC_PLATFORM_JITSI,
+  MREC_PLATFORM_ELEMENT,
+  MREC_PLATFORM_MATTERMOST,
+  MREC_PLATFORM_NEXTCLOUD_TALK,
+  MREC_PLATFORM_JAMI,
+  MREC_PLATFORM_TENCENT_MEETING,
+  MREC_PLATFORM_WECOM,
 } mrec_platform;
 
 #define MREC_MAX_AUDIO_PIDS 16
@@ -142,8 +169,7 @@ mrec_permission mrec_accessibility_permission_status(void);
 mrec_status mrec_request_accessibility_permission(void);
 
 /*
- * Stable identifier: "zoom", "teams", "meet", "webex", "slack", "discord",
- * "browser", "unknown". The values never change. No human-readable labels are
+ * Stable platform identifier. Values never change. Human-readable labels are not
  * provided; presentation and localisation are the caller's concern.
  *
  * Returns static storage owned by the library; do not free.

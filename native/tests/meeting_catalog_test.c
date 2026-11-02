@@ -27,6 +27,16 @@ static void BrowserMatches(void) {
       {"https://meet.jit.si/room", MREC_PLATFORM_GENERIC_BROWSER},
       {"https://app.gather.town/app/office", MREC_PLATFORM_GENERIC_BROWSER},
       {"https://around.co/room", MREC_PLATFORM_GENERIC_BROWSER},
+      {"https://app.goto.com/meeting/123456789?audio=voip", MREC_PLATFORM_GOTO},
+      {"https://meet.goto.com/123456789", MREC_PLATFORM_GOTO},
+      {"https://meet.goto.com/123-456-789/?source=invite", MREC_PLATFORM_GOTO},
+      {"https://global.gotomeeting.com/join/123456789", MREC_PLATFORM_GOTO},
+      {"https://gotomeet.me/team", MREC_PLATFORM_GOTO},
+      {"https://meetings.dialpad.com/room/team/unique-id", MREC_PLATFORM_DIALPAD},
+      {"https://v.ringcentral.com/join/835349594?pw=test", MREC_PLATFORM_RINGCENTRAL},
+      {"https://tuple.app/c/example-call", MREC_PLATFORM_TUPLE},
+      {"https://telemost.yandex.ru/j/1111111111", MREC_PLATFORM_TELEMOST},
+      {"https://8x8.vc/vpaas-magic-cookie-1d2e6a201d594c8f87a630e3f71826d3/room", MREC_PLATFORM_8X8},
   };
   const char *tabs[] = {"Inbox", "Meet - abc-defg-hij - Audio playing",
                          "https://teams.microsoft.com/l/meetup-join/123"};
@@ -106,6 +116,32 @@ static void NonMeetingURLs(void) {
       "https://example.org/#https://meet.google.com/abc-defg-hij",
       "https://zoom.us@evil.test/j/123", "https://evil.test@zoom.us/j/123",
       "file://zoom.us/j/123", "Chat | Debt | Microsoft Teams",
+      "https://app.goto.com/", "https://app.goto.com/meeting",
+      "https://app.goto.com/meeting/", "https://app.goto.com/settings/audio",
+      "https://app.goto.com/meeting/settings", "https://meet.goto.com/login",
+      "https://meet.goto.com/settings", "https://meet.goto.com/12345678",
+      "https://meet.goto.com/123456789abc", "https://meet.goto.com/123456789/other",
+      "https://meet.goto.com/", "https://global.gotomeeting.com/join/",
+      "https://gotomeet.me/", "https://meetings.dialpad.com/",
+      "https://meetings.dialpad.com/room/", "https://meetings.dialpad.com/settings",
+      "https://meetings.dialpad.com/share", "https://meetings.dialpad.com/conferencetvs",
+      "https://notmeet.goto.com/123456789", "https://meet.goto.com.evil.test/123456789",
+      "https://app.goto.com.evil.test/meeting/123456789",
+      "https://meetings.dialpad.com.evil.test/room/team",
+      "https://example.com/?next=https://meet.goto.com/123456789",
+      "https://web.whatsapp.com/", "https://phone.aircall.io/",
+      "https://v.ringcentral.com/", "https://v.ringcentral.com/join/",
+      "https://app.ringcentral.com/chat/team", "https://v.ringcentral.com.evil.test/join/123",
+      "https://tuple.app/", "https://tuple.app/c/", "https://tuple.app/login",
+      "https://tuple.app.evil.test/c/room", "https://example.com/?next=https://tuple.app/c/room",
+      "https://telemost.yandex.ru/", "https://telemost.yandex.ru/j/",
+      "https://telemost.yandex.ru.evil.test/j/123",
+      "https://8x8.vc/", "https://8x8.vc/account", "https://8x8.vc/v1/_jaas/jaccess",
+      "https://8x8.vc/vpaas-magic-cookie-", "https://8x8.vc/vpaas-magic-cookie-short/room",
+      "https://8x8.vc/vpaas-magic-cookie-1d2e6a201d594c8f87a630e3f71826d3/",
+      "https://8x8.vc/vpaas-magic-cookie-1d2e6a201d594c8f87a630e3f71826d3//room",
+      "https://8x8.vc/vpaas-magic-cookie-1d2e6a201d594c8f87a630e3f71826dz/room",
+      "https://8x8.vc.evil.test/vpaas-magic-cookie-1d2e6a201d594c8f87a630e3f71826d3/room",
   };
   for (size_t index = 0; index < sizeof urls / sizeof urls[0]; index++) {
     assert(mrec_catalog_url_platform(urls[index]) == MREC_PLATFORM_UNKNOWN);
@@ -200,7 +236,155 @@ static void CallStateEvidence(void) {
   assert(mrec_catalog_context_platform(NULL, NULL) == MREC_PLATFORM_UNKNOWN);
 }
 
+static void ExpandedApps(void) {
+  const struct {
+    const char *bundle;
+    const char *executable;
+    mrec_platform platform;
+    const char *id;
+  } apps[] = {
+      {"com.logmein.goto", "GoTo.exe", MREC_PLATFORM_GOTO, "goto"},
+      {"com.electron.dialpad", "Dialpad.exe", MREC_PLATFORM_DIALPAD, "dialpad"},
+      {"net.whatsapp.WhatsApp", "WhatsApp.exe", MREC_PLATFORM_WHATSAPP, "whatsapp"},
+      {"io.aircall.phone", "Aircall.exe", MREC_PLATFORM_AIRCALL, "aircall"},
+      {"com.ringcentral.glip", "RingCentral.exe", MREC_PLATFORM_RINGCENTRAL, "ringcentral"},
+      {"com.electron.8x8---virtual-office", "8x8 Work.exe", MREC_PLATFORM_8X8, "8x8"},
+      {"com.tencent.tencentmeeting", "VoovMeetingApp.exe", MREC_PLATFORM_VOOV, "voov"},
+      {"app.tuple.app", "Tuple.exe", MREC_PLATFORM_TUPLE, "tuple"},
+      {"com.gather.Gather", "Gather.exe", MREC_PLATFORM_GATHER, "gather"},
+      {"com.larksuite.larkApp", "Lark.exe", MREC_PLATFORM_LARK, "lark"},
+      {"inc.wonder.roam", "Roam.exe", MREC_PLATFORM_ROAM, "roam"},
+      {"com.clickup.desktop-app", "ClickUp.exe", MREC_PLATFORM_CLICKUP, "clickup"},
+      {"ru.yandex.desktop.telemost", "YandexTelemost.exe", MREC_PLATFORM_TELEMOST, "telemost"},
+      {"ru.keepcoder.telegram", "telegram.exe", MREC_PLATFORM_TELEGRAM, "telegram"},
+      {"org.whispersystems.signal-desktop", "signal.exe", MREC_PLATFORM_SIGNAL, "signal"},
+      {"com.viber.osx", "viber.exe", MREC_PLATFORM_VIBER, "viber"},
+      {"jp.naver.line.mac", "line.exe", MREC_PLATFORM_LINE, "line"},
+      {"com.tencent.xinwechat", "wechat.exe", MREC_PLATFORM_WECHAT, "wechat"},
+      {"com.vng.zalo", "zalo.exe", MREC_PLATFORM_ZALO, "zalo"},
+      {"org.jitsi.jitsi-meet", "jitsi meet.exe", MREC_PLATFORM_JITSI, "jitsi"},
+      {"im.riot.app", "element.exe", MREC_PLATFORM_ELEMENT, "element"},
+      {"mattermost.desktop", "mattermost.exe", MREC_PLATFORM_MATTERMOST, "mattermost"},
+      {"com.nextcloud.talk.mac", "nextcloud talk.exe", MREC_PLATFORM_NEXTCLOUD_TALK, "nextcloud-talk"},
+      {"com.savoirfairelinux.ring.macos", "jami.exe", MREC_PLATFORM_JAMI, "jami"},
+      {"com.tencent.meeting", "wemeetapp.exe", MREC_PLATFORM_TENCENT_MEETING, "tencent-meeting"},
+      {"com.tencent.weworkmac", "wxwork.exe", MREC_PLATFORM_WECOM, "wecom"},
+  };
+  for (size_t i = 0; i < sizeof apps / sizeof apps[0]; i++) {
+    char identifier[256];
+    assert(mrec_catalog_bundle_platform(apps[i].bundle) == (int32_t)apps[i].platform);
+    snprintf(identifier, sizeof identifier, "%s.helper.Renderer", apps[i].bundle);
+    assert(mrec_catalog_bundle_platform(identifier) == (int32_t)apps[i].platform);
+    snprintf(identifier, sizeof identifier, "%slookalike", apps[i].bundle);
+    assert(mrec_catalog_bundle_platform(identifier) == MREC_PLATFORM_UNKNOWN);
+    assert(mrec_catalog_executable_platform(apps[i].executable) == (int32_t)apps[i].platform);
+    snprintf(identifier, sizeof identifier, "%s.bak", apps[i].executable);
+    assert(mrec_catalog_executable_platform(identifier) == MREC_PLATFORM_UNKNOWN);
+    assert(strcmp(mrec_platform_id(apps[i].platform), apps[i].id) == 0);
+    /* Identity alone must not confirm an active call. */
+    assert(mrec_catalog_call_control(apps[i].platform, MREC_CONTROL_BUTTON, "", "Leave call") == 0);
+    assert(mrec_catalog_call_confidence(0, 0, 0, apps[i].platform, MREC_CALL_UNKNOWN) == 0);
+    assert(mrec_catalog_call_confidence(0, 1, 0, apps[i].platform, MREC_CALL_UNKNOWN) == 0);
+    assert(mrec_catalog_call_confidence(0, 0, 1, apps[i].platform, MREC_CALL_UNKNOWN) <
+           MREC_CATALOG_RECORD_THRESHOLD);
+    assert(mrec_catalog_call_confidence(0, 1, 1, apps[i].platform, MREC_CALL_UNKNOWN) == 95);
+  }
+  const struct { const char *name; mrec_platform platform; } linux_apps[] = {
+      {"tuple", MREC_PLATFORM_TUPLE},
+      {"lark", MREC_PLATFORM_LARK},
+      {"feishu", MREC_PLATFORM_LARK},
+      {"Telegram", MREC_PLATFORM_TELEGRAM},
+      {"signal-desktop", MREC_PLATFORM_SIGNAL},
+      {"Viber", MREC_PLATFORM_VIBER},
+      {"wechat", MREC_PLATFORM_WECHAT},
+      {"jitsi-meet", MREC_PLATFORM_JITSI},
+      {"element-desktop", MREC_PLATFORM_ELEMENT},
+      {"element-desktop-nightly", MREC_PLATFORM_ELEMENT},
+      {"com.Mattermost.Desktop", MREC_PLATFORM_MATTERMOST},
+      {"Nextcloud Talk", MREC_PLATFORM_NEXTCLOUD_TALK},
+      {"jami", MREC_PLATFORM_JAMI},
+      {"wemeetapp", MREC_PLATFORM_TENCENT_MEETING},
+  };
+  for (size_t i = 0; i < sizeof linux_apps / sizeof linux_apps[0]; i++) {
+    char lookalike[128];
+    assert(mrec_catalog_linux_platform(linux_apps[i].name) == (int32_t)linux_apps[i].platform);
+    snprintf(lookalike, sizeof lookalike, "%s-helper-lookalike", linux_apps[i].name);
+    assert(mrec_catalog_linux_platform(lookalike) == MREC_PLATFORM_UNKNOWN);
+    assert(mrec_catalog_confidence(0, 1, 1, linux_apps[i].platform) == 95);
+  }
+  assert(MREC_PLATFORM_GENERIC_BROWSER == 7);
+  assert(MREC_PLATFORM_GOTO == 8);
+  assert(mrec_catalog_bundle_platform("com.electron.uberconference.helper") == MREC_PLATFORM_DIALPAD);
+  assert(mrec_catalog_executable_platform("DialpadMeetings.exe") == MREC_PLATFORM_DIALPAD);
+  assert(mrec_catalog_executable_platform("WhatsApp.Root.exe") == MREC_PLATFORM_WHATSAPP);
+  assert(mrec_catalog_bundle_platform("io.aircall.workspace.helper") == MREC_PLATFORM_AIRCALL);
+  assert(mrec_catalog_executable_platform("Aircall Workspace.exe") == MREC_PLATFORM_AIRCALL);
+  assert(mrec_catalog_executable_platform("AircallWorkspace.exe") == MREC_PLATFORM_AIRCALL);
+  assert(mrec_catalog_bundle_platform("com.gather.GatherV2.helper") == MREC_PLATFORM_GATHER);
+  assert(mrec_catalog_executable_platform("GatherV2.exe") == MREC_PLATFORM_GATHER);
+  assert(mrec_catalog_bundle_platform("com.google.Chrome.app.kjgfgldnnfoeklkmfkjfagphfepbbdan") == MREC_PLATFORM_MEET);
+  assert(mrec_catalog_bundle_platform("com.google.Chrome.beta.app.kjgfgldnnfoeklkmfkjfagphfepbbdan") == MREC_PLATFORM_MEET);
+  assert(mrec_catalog_bundle_platform("company.thebrowser.dia.app.kjgfgldnnfoeklkmfkjfagphfepbbdan") == MREC_PLATFORM_MEET);
+  assert(mrec_catalog_bundle_platform("com.google.Chrome.app.unrelated") == MREC_PLATFORM_UNKNOWN);
+  const struct { const char *bundle; mrec_platform platform; } aliases[] = {
+      {"org.telegram.desktop", MREC_PLATFORM_TELEGRAM},
+      {"com.tdesktop.Telegram", MREC_PLATFORM_TELEGRAM},
+      {"im.riot.nightly", MREC_PLATFORM_ELEMENT},
+      {"cx.ring", MREC_PLATFORM_JAMI},
+      {"com.electron.lark", MREC_PLATFORM_LARK},
+      {"com.bytedance.macos.feishu", MREC_PLATFORM_LARK},
+  };
+  for (size_t i = 0; i < sizeof aliases / sizeof aliases[0]; i++) {
+    assert(mrec_catalog_bundle_platform(aliases[i].bundle) == (int32_t)aliases[i].platform);
+  }
+  assert(mrec_catalog_executable_platform("Weixin.exe") == MREC_PLATFORM_WECHAT);
+  assert(mrec_catalog_executable_platform("Element Nightly.exe") == MREC_PLATFORM_ELEMENT);
+  assert(mrec_catalog_linux_platform("telegram") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_linux_platform("viber") == MREC_PLATFORM_UNKNOWN);
+  assert(mrec_catalog_linux_platform("desktop") == MREC_PLATFORM_UNKNOWN);
+}
+
+static void ExpandedBrowsers(void) {
+  const char *browsers[] = {
+      "company.thebrowser.dia", "com.operasoftware.OperaGX",
+      "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly",
+      "com.operasoftware.operanext", "com.operasoftware.operadeveloper",
+      "com.apple.SafariTechnologyPreview",
+      "net.imput.helium", "com.operasoftware.OperaAir", "net.waterfox.waterfox",
+      "com.kagi.kagimacos", "com.naver.whale", "ru.yandex.desktop.yandex-browser",
+  };
+  for (size_t i = 0; i < sizeof browsers / sizeof browsers[0]; i++) {
+    char helper[128];
+    snprintf(helper, sizeof helper, "%s.helper", browsers[i]);
+    assert(mrec_catalog_bundle_browser(browsers[i]) != NULL);
+    assert(mrec_catalog_bundle_browser(helper) == mrec_catalog_bundle_browser(browsers[i]));
+    snprintf(helper, sizeof helper, "%slookalike", browsers[i]);
+    assert(mrec_catalog_bundle_browser(helper) == NULL);
+    assert(mrec_catalog_bundle_platform(browsers[i]) == MREC_PLATFORM_UNKNOWN);
+  }
+  const char *windows[] = {"Chrome.exe", "MSEDGE.EXE", "firefox.exe", "opera.exe", "brave.exe",
+                           "Browser.exe", "Waterfox.exe"};
+  for (size_t i = 0; i < sizeof windows / sizeof windows[0]; i++) {
+    char lookalike[128];
+    assert(mrec_catalog_executable_browser(windows[i]) != NULL);
+    assert(mrec_catalog_executable_platform(windows[i]) == MREC_PLATFORM_UNKNOWN);
+    snprintf(lookalike, sizeof lookalike, "%s.bak", windows[i]);
+    assert(mrec_catalog_executable_browser(lookalike) == NULL);
+  }
+  const char *linux_browsers[] = {"chrome", "firefox", "brave-browser", "opera", "zen",
+                                  "helium", "waterfox", "whale"};
+  for (size_t i = 0; i < sizeof linux_browsers / sizeof linux_browsers[0]; i++) {
+    char lookalike[128];
+    assert(mrec_catalog_linux_browser(linux_browsers[i]) != NULL);
+    assert(mrec_catalog_linux_platform(linux_browsers[i]) == MREC_PLATFORM_UNKNOWN);
+    snprintf(lookalike, sizeof lookalike, "%s-lookalike", linux_browsers[i]);
+    assert(mrec_catalog_linux_browser(lookalike) == NULL);
+  }
+}
+
 int main(void) {
+  ExpandedApps();
+  ExpandedBrowsers();
   BrowserMatches();
   NonMeetingURLs();
   CallStateEvidence();
@@ -359,6 +543,10 @@ int main(void) {
   assert(mrec_catalog_linux_browser("chrome") != NULL);
   assert(mrec_catalog_linux_browser("firefox-bin") != NULL);
   assert(mrec_catalog_linux_browser("chromium-browser") != NULL);
+  assert(mrec_catalog_linux_browser("zen") != NULL);
+  assert(mrec_catalog_linux_browser("Zen") == NULL);
+  assert(mrec_catalog_linux_browser("zen.exe") == NULL);
+  assert(mrec_catalog_linux_browser("zen-helper-lookalike") == NULL);
   assert(mrec_catalog_linux_browser("chrome-malware") == NULL);
   assert(mrec_catalog_linux_browser(NULL) == NULL);
   printf("meeting catalog tests passed\n");

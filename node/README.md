@@ -1,5 +1,7 @@
 # meeting-record for Node.js
 
+[![npm](https://img.shields.io/npm/v/meeting-record)](https://www.npmjs.com/package/meeting-record)
+
 System-audio and microphone capture with meeting detection for macOS, Windows, and Linux.
 
 ## Install
@@ -9,7 +11,7 @@ npm install meeting-record
 ```
 
 - Requires Node.js 22.13+ (22.x) or 24+.
-- See the [platform requirements and permissions](https://github.com/hoangvvo/meeting-record#requirements) for app configuration.
+- See the [requirements](https://github.com/hoangvvo/meeting-record#requirements) and [permissions](https://github.com/hoangvvo/meeting-record#permissions) for app configuration.
 
 ## Capture
 
@@ -34,10 +36,10 @@ await stopped;
 | System audio                  | `{ type: "system" }`              |
 | One app and its audio helpers | `{ type: "process", pid }`        |
 
-- **App picker:** `meetings.audioApps()` lists available apps. Use the selected entry's `pid`; no meeting scan is required.
-- **Meeting capture:** a detected meeting's `pid` is also a process target.
-- **Permissions:** `permissions.request()` returns a `PermissionStatus`; `permissions.status()` checks the current status without prompting.
-- **Sessions:** one recording at a time per process.
+- `meetings.audioApps()` lists available apps. Use the selected entry's `pid`; no meeting scan is required.
+- A detected meeting's `pid` is also a process target.
+- `permissions.request()` returns a `PermissionStatus`; `permissions.status()` checks the current status without prompting.
+- One recording can run at a time per process.
 
 ### Add a microphone
 
@@ -68,11 +70,11 @@ const recording = await capture.start(
 | Microphone   | `recording.microphone`  | Same packet type; present when requested                                     |
 | Mixed audio  | `recording.mixedAudio`  | Byte stream of mono signed 16-bit little-endian PCM; present when configured |
 
-- **Raw samples:** `chunk.pcm` contains interleaved float32 PCM.
-- **Packet metadata:** `hostTimeNs`, `frameCount`, `sampleRate`, `channels`, and `droppedSamples`.
-- **Reading:** use `data` listeners or `for await...of` on each raw track. Use each packet's format; it can change during capture.
-- **Slow readers:** raw tracks report discarded samples through `drop` events and `droppedSamples`.
-- See [capture formats and channels](https://github.com/hoangvvo/meeting-record#capture) for sample rates and platform behavior.
+- `chunk.pcm` contains interleaved float32 PCM.
+- Each packet includes `hostTimeNs`, `frameCount`, `sampleRate`, `channels`, and `droppedSamples`.
+- Use `data` listeners or `for await...of` on each raw track. Use each packet's format; it can change during capture.
+- Raw tracks report discarded samples through `drop` events and `droppedSamples`.
+- See the supported [audio formats](https://github.com/hoangvvo/meeting-record#capture).
 
 ### Mixed audio
 
@@ -91,7 +93,7 @@ recording.mixedAudio.on("data", (pcm) => console.log(pcm.byteLength));
 recording.mixedAudio.setMicrophoneMuted(true); // Affects the mix only.
 ```
 
-- Mixed audio is a standard byte stream: it can also be piped to a writable.
+- `mixedAudio` can be piped to a writable.
 - Raw tracks remain available alongside the mix.
 
 ## Controls and events
@@ -104,10 +106,10 @@ recording.mixedAudio.setMicrophoneMuted(true); // Affects the mix only.
 | Check source availability | `track.availability`                                           |
 | Cancel start or recording | Pass an `AbortSignal` as `CaptureOptions.signal`               |
 
-- **Pause:** affects the whole recording; paused time is omitted.
-- **Stop:** keep reading each output until `end` to drain queued audio.
-- **Source loss:** the session stays alive. Track availability is `live`, `degraded`, or `interrupted`.
-- **App exit:** system audio stops when all captured apps exit; the microphone and session stay alive. Start a new session for a relaunched app.
+- Pausing affects the whole recording; paused time is omitted.
+- After stopping, keep reading each output until `end` to drain queued audio.
+- The session stays alive when a source is lost. Track availability is `live`, `degraded`, or `interrupted`.
+- System audio stops when all captured apps exit; the microphone and session stay alive. Start a new session for a relaunched app.
 
 Attach source-event listeners immediately after awaiting `capture.start()`:
 
@@ -134,17 +136,15 @@ meetings.watch();
 ```
 
 - Use `shouldRecord` to decide whether a meeting is ready to record.
-- The library incorporates call controls and audio signals into `confidence` and `shouldRecord`; no consumer-side call-state logic is required.
 - Request `Permission.Accessibility` on macOS for call-state checks, browser detection, titles, and URLs; relaunch after granting it.
-- See [supported services and detection behavior](https://github.com/hoangvvo/meeting-record#detection).
+- See the supported [apps and browsers](https://github.com/hoangvvo/meeting-record#detection).
 
 ## Types and errors
 
-- **Constants:** `Platform`, `Permission`, `PermissionStatus`, `MicrophoneSource`, `CaptureState`, `TrackAvailability`, and `TrackInterruptionReason` have matching union types.
-- **Events:** names and callback arguments are checked by TypeScript, including chained `on`, `once`, and `off` calls.
-- **Library failures:** capture, permissions, and enumeration use `MeetingRecordError` subclasses, with a numeric `code`.
-- **Invalid arguments:** throw `TypeError`.
-- **Cancellation:** aborting rejects pending work with the signal's reason and stops an active recording.
+- `Platform`, `Permission`, `PermissionStatus`, `MicrophoneSource`, `CaptureState`, `TrackAvailability`, and `TrackInterruptionReason` have matching union types.
+- Capture, permissions, and enumeration use `MeetingRecordError` subclasses, with a numeric `code`.
+- Invalid arguments throw `TypeError`.
+- Aborting rejects pending work with the signal's reason and stops an active recording.
 
 ## License
 

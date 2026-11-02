@@ -27,6 +27,42 @@ struct CatalogTests {
     }
 
     static func main() {
+        print("C/Swift platform ABI")
+        let platforms: [(Int32, MeetingPlatform, String)] = [
+            (1, .zoom, "us.zoom.xos"), (2, .teams, "com.microsoft.teams2"),
+            (4, .webex, "com.cisco.webexmeetingsapp"), (5, .slack, "com.tinyspeck.slackmacgap"),
+            (6, .discord, "com.hnc.Discord"), (8, .goTo, "com.logmein.goto"),
+            (9, .dialpad, "com.electron.dialpad"), (10, .whatsApp, "net.whatsapp.WhatsApp"),
+            (11, .aircall, "io.aircall.workspace"), (12, .ringCentral, "com.ringcentral.glip"),
+            (13, .eightByEight, "com.electron.8x8---virtual-office"),
+            (14, .voov, "com.tencent.tencentmeeting"), (15, .tuple, "app.tuple.app"),
+            (16, .gather, "com.gather.GatherV2"), (17, .lark, "com.larksuite.larkApp"),
+            (18, .roam, "inc.wonder.roam"), (19, .clickUp, "com.clickup.desktop-app"),
+            (20, .telemost, "ru.yandex.desktop.telemost"),
+            (21, .telegram, "ru.keepcoder.telegram"),
+            (22, .signal, "org.whispersystems.signal-desktop"),
+            (23, .viber, "com.viber.osx"),
+            (24, .line, "jp.naver.line.mac"),
+            (25, .weChat, "com.tencent.xinwechat"),
+            (26, .zalo, "com.vng.zalo"),
+            (27, .jitsi, "org.jitsi.jitsi-meet"),
+            (28, .element, "im.riot.app"),
+            (29, .mattermost, "mattermost.desktop"),
+            (30, .nextcloudTalk, "com.nextcloud.talk.mac"),
+            (31, .jami, "com.savoirfairelinux.ring.macos"),
+            (32, .tencentMeeting, "com.tencent.meeting"),
+            (33, .weCom, "com.tencent.weworkmac"),
+        ]
+        for (raw, platform, bundle) in platforms {
+            expectEqual(mrec_catalog_bundle_platform(bundle), raw, "C platform value for \(bundle)")
+            expectEqual(platform.rawValue, raw, "Swift ABI value for \(platform)")
+            expectEqual(MeetingCatalog.nativePlatform(forBundleID: bundle), platform,
+                        "C classification survives Swift conversion for \(bundle)")
+        }
+        expectEqual(MeetingPlatform.unknown.rawValue, 0, "unknown ABI value")
+        expectEqual(MeetingPlatform.meet.rawValue, 3, "Meet ABI value")
+        expectEqual(MeetingPlatform.genericBrowser.rawValue, 7, "browser ABI value")
+
         print("native app bundle matching")
         expectEqual(MeetingCatalog.nativePlatform(forBundleID: "us.zoom.xos"), .zoom,
                     "Zoom main process")
@@ -63,6 +99,10 @@ struct CatalogTests {
                     "Zoom is not a browser")
 
         print("\nmeeting URL recognition")
+        expectEqual(MeetingCatalog.platform(forURL: "https://meet.goto.com/123456789"),
+                    .goTo, "GoTo browser call")
+        expectEqual(MeetingCatalog.platform(forURL: "https://meetings.dialpad.com/room/team"),
+                    .dialpad, "Dialpad browser call")
         expectEqual(MeetingCatalog.platform(forURL: "https://meet.google.com/abc-defg-hij"),
                     .meet, "Google Meet URL")
         expectEqual(MeetingCatalog.platform(forURL: "https://acme.zoom.us/j/91234567890"),

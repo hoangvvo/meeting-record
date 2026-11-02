@@ -389,6 +389,32 @@ pub enum Platform {
     Discord,
     /// A browser tab on a call URL we recognise but cannot attribute further.
     Browser,
+    GoTo,
+    Dialpad,
+    WhatsApp,
+    Aircall,
+    RingCentral,
+    EightByEight,
+    VooV,
+    Tuple,
+    Gather,
+    Lark,
+    Roam,
+    ClickUp,
+    Telemost,
+    Telegram,
+    Signal,
+    Viber,
+    Line,
+    WeChat,
+    Zalo,
+    Jitsi,
+    Element,
+    Mattermost,
+    NextcloudTalk,
+    Jami,
+    TencentMeeting,
+    WeCom,
 }
 
 impl From<i32> for Platform {
@@ -401,14 +427,39 @@ impl From<i32> for Platform {
             5 => Platform::Slack,
             6 => Platform::Discord,
             7 => Platform::Browser,
+            8 => Platform::GoTo,
+            9 => Platform::Dialpad,
+            10 => Platform::WhatsApp,
+            11 => Platform::Aircall,
+            12 => Platform::RingCentral,
+            13 => Platform::EightByEight,
+            14 => Platform::VooV,
+            15 => Platform::Tuple,
+            16 => Platform::Gather,
+            17 => Platform::Lark,
+            18 => Platform::Roam,
+            19 => Platform::ClickUp,
+            20 => Platform::Telemost,
+            21 => Platform::Telegram,
+            22 => Platform::Signal,
+            23 => Platform::Viber,
+            24 => Platform::Line,
+            25 => Platform::WeChat,
+            26 => Platform::Zalo,
+            27 => Platform::Jitsi,
+            28 => Platform::Element,
+            29 => Platform::Mattermost,
+            30 => Platform::NextcloudTalk,
+            31 => Platform::Jami,
+            32 => Platform::TencentMeeting,
+            33 => Platform::WeCom,
             _ => Platform::Unknown,
         }
     }
 }
 
 impl Platform {
-    /// Stable identifier: `"zoom"`, `"teams"`, `"meet"`, `"webex"`, `"slack"`,
-    /// `"discord"`, `"browser"`, `"unknown"`.
+    /// Stable platform identifier, suitable for storage and API responses.
     pub const fn as_str(self) -> &'static str {
         match self {
             Platform::Unknown => "unknown",
@@ -419,7 +470,94 @@ impl Platform {
             Platform::Slack => "slack",
             Platform::Discord => "discord",
             Platform::Browser => "browser",
+            Platform::GoTo => "goto",
+            Platform::Dialpad => "dialpad",
+            Platform::WhatsApp => "whatsapp",
+            Platform::Aircall => "aircall",
+            Platform::RingCentral => "ringcentral",
+            Platform::EightByEight => "8x8",
+            Platform::VooV => "voov",
+            Platform::Tuple => "tuple",
+            Platform::Gather => "gather",
+            Platform::Lark => "lark",
+            Platform::Roam => "roam",
+            Platform::ClickUp => "clickup",
+            Platform::Telemost => "telemost",
+            Platform::Telegram => "telegram",
+            Platform::Signal => "signal",
+            Platform::Viber => "viber",
+            Platform::Line => "line",
+            Platform::WeChat => "wechat",
+            Platform::Zalo => "zalo",
+            Platform::Jitsi => "jitsi",
+            Platform::Element => "element",
+            Platform::Mattermost => "mattermost",
+            Platform::NextcloudTalk => "nextcloud-talk",
+            Platform::Jami => "jami",
+            Platform::TencentMeeting => "tencent-meeting",
+            Platform::WeCom => "wecom",
         }
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::{Meeting, Platform, RawMeeting};
+    use std::{ffi::CStr, os::raw::c_char};
+
+    extern "C" {
+        fn mrec_platform_id(platform: i32) -> *const c_char;
+    }
+
+    #[test]
+    fn platforms_match_native_abi_and_ids() {
+        let platforms = [
+            (Platform::Unknown, "unknown"),
+            (Platform::Zoom, "zoom"),
+            (Platform::Teams, "teams"),
+            (Platform::Meet, "meet"),
+            (Platform::Webex, "webex"),
+            (Platform::Slack, "slack"),
+            (Platform::Discord, "discord"),
+            (Platform::Browser, "browser"),
+            (Platform::GoTo, "goto"),
+            (Platform::Dialpad, "dialpad"),
+            (Platform::WhatsApp, "whatsapp"),
+            (Platform::Aircall, "aircall"),
+            (Platform::RingCentral, "ringcentral"),
+            (Platform::EightByEight, "8x8"),
+            (Platform::VooV, "voov"),
+            (Platform::Tuple, "tuple"),
+            (Platform::Gather, "gather"),
+            (Platform::Lark, "lark"),
+            (Platform::Roam, "roam"),
+            (Platform::ClickUp, "clickup"),
+            (Platform::Telemost, "telemost"),
+            (Platform::Telegram, "telegram"),
+            (Platform::Signal, "signal"),
+            (Platform::Viber, "viber"),
+            (Platform::Line, "line"),
+            (Platform::WeChat, "wechat"),
+            (Platform::Zalo, "zalo"),
+            (Platform::Jitsi, "jitsi"),
+            (Platform::Element, "element"),
+            (Platform::Mattermost, "mattermost"),
+            (Platform::NextcloudTalk, "nextcloud-talk"),
+            (Platform::Jami, "jami"),
+            (Platform::TencentMeeting, "tencent-meeting"),
+            (Platform::WeCom, "wecom"),
+        ];
+        for (raw, (platform, id)) in platforms.into_iter().enumerate() {
+            assert_eq!(Platform::from(raw as i32), platform);
+            assert_eq!(platform.as_str(), id);
+            let native_id = unsafe { CStr::from_ptr(mrec_platform_id(raw as i32)) };
+            assert_eq!(native_id.to_str().unwrap(), id);
+            let mut meeting: RawMeeting = unsafe { std::mem::zeroed() };
+            meeting.platform = raw as i32;
+            assert_eq!(Meeting::from(&meeting).platform, platform);
+        }
+        assert_eq!(Platform::from(-1), Platform::Unknown);
+        assert_eq!(Platform::from(i32::MAX), Platform::Unknown);
     }
 }
 
