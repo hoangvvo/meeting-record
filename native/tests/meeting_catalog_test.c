@@ -162,6 +162,7 @@ static void CallStateEvidence(void) {
       {MREC_PLATFORM_TEAMS, MREC_CONTROL_BUTTON, "hangup-button", "Localized leave label"},
       {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, "", "Leave call"},
       {MREC_PLATFORM_ZOOM, MREC_CONTROL_MENU_ITEM, "", "Leave Meeting"},
+      {MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, "", "Leave"},
       {MREC_PLATFORM_WEBEX, MREC_CONTROL_BUTTON, "", "Leave meeting"},
       {MREC_PLATFORM_SLACK, MREC_CONTROL_BUTTON, "", "Leave huddle"},
       {MREC_PLATFORM_GENERIC_BROWSER, MREC_CONTROL_BUTTON, "", "Leave call"},
@@ -189,6 +190,8 @@ static void CallStateEvidence(void) {
       {MREC_PLATFORM_MEET, "", "Switch here"},
       {MREC_PLATFORM_MEET, "", "Switch here without camera"},
       {MREC_PLATFORM_ZOOM, "", "Join meeting"},
+      {MREC_PLATFORM_ZOOM, "", "Join"},
+      {MREC_PLATFORM_ZOOM, "", "Sign in to join"},
       {MREC_PLATFORM_WEBEX, "", "Join meeting"},
       {MREC_PLATFORM_SLACK, "", "Join huddle"},
       {MREC_PLATFORM_DISCORD, "", "Join voice"},
@@ -200,6 +203,8 @@ static void CallStateEvidence(void) {
     assert(state == MREC_CALL_NOT_JOINED);
     assert(mrec_catalog_call_confidence(0, 1, 1, previews[index].platform, state) == 0);
     assert(mrec_catalog_call_confidence(1, 1, 1, previews[index].platform, state) == 0);
+    assert(mrec_catalog_call_control(previews[index].platform, MREC_CONTROL_TEXT,
+                                      previews[index].identifier, previews[index].label) == 0);
   }
 
   /* Discord's generic Disconnect control alone can belong to account settings. */
