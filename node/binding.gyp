@@ -54,7 +54,7 @@
             "../native/windows/MeetingDetector.cpp"
           ],
           "include_dirs": ["../native/common"],
-          "libraries": ["advapi32.lib", "ole32.lib", "oleaut32.lib", "mmdevapi.lib", "user32.lib"],
+          "libraries": ["advapi32.lib", "avrt.lib", "ole32.lib", "oleaut32.lib", "mmdevapi.lib", "user32.lib"],
           "msvs_settings": {
             "VCCLCompilerTool": { "ExceptionHandling": 1, "AdditionalOptions": ["/std:c++17"] }
           }

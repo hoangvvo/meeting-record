@@ -1,6 +1,7 @@
 /* Meeting detection from audio sessions, windows, and browser accessibility. */
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
+#include "AudioSessionNotifications.h"
 #include "meeting-catalog.h"
 
 #include <audiopolicy.h>
@@ -633,7 +634,8 @@ public:
     const uint64_t generation =
         generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
     try {
-      thread_ = std::thread([this, generation] { Loop(generation); });
+      signal_ = std::make_shared<meeting_record::RescanSignal>();
+      thread_ = std::thread([this, generation, signal = signal_] { Loop(generation, signal); });
     } catch (...) {
       running_ = false;
       callback_ = nullptr;
@@ -649,6 +651,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       if (!running_) return MREC_ERR_NOT_RUNNING;
       stop_ = true;
+      if (signal_) signal_->Notify();
       generation_.fetch_add(1, std::memory_order_acq_rel);
       stopping_from_callback =
           thread_.joinable() && thread_.get_id() == std::this_thread::get_id();
@@ -675,18 +678,36 @@ public:
   }
 
 private:
-  /* Poll because session notifications do not report inactive-to-active changes. */
   bool ShouldStop(uint64_t generation) const {
     return stop_.load(std::memory_order_acquire) ||
            generation_.load(std::memory_order_acquire) != generation;
   }
 
-  void Loop(uint64_t generation) {
+  void Loop(uint64_t generation, const std::shared_ptr<meeting_record::RescanSignal> &signal) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    while (!ShouldStop(generation)) {
-      Rescan(generation);
-      for (int i = 0; i < 20 && !ShouldStop(generation); i++) {
-        Sleep(100);
+    {
+      meeting_record::AudioSessionNotifications notifications(signal);
+      auto revision = signal->Revision();
+      auto deadline = std::chrono::steady_clock::now();
+      while (!ShouldStop(generation)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          notifications.Refresh();
+          Rescan(generation);
+          if (ShouldStop(generation)) break;
+          deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+          const uint64_t now = MonotonicTimeNs();
+          for (const auto &[pid, entry] : tracked_) {
+            const uint64_t transition = !entry.started ? entry.first_seen_ns + kStartDelayNs :
+                entry.last_seen_ns < scan_time_ns_ ? entry.last_seen_ns + kEndDelayNs : 0;
+            if (transition) deadline = (std::min)(deadline, std::chrono::steady_clock::now() +
+                std::chrono::nanoseconds(transition > now ? transition - now : 0));
+          }
+        }
+        const auto changed = signal->Wait(deadline, revision);
+        if (changed != revision) {
+          revision = changed;
+          deadline = (std::min)(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(400));
+        }
       }
     }
     CoUninitialize();
@@ -703,6 +724,8 @@ private:
     if (ShouldStop(generation)) return;
     const auto found = Scan();
     const uint64_t now = MonotonicTimeNs();
+
+    scan_time_ns_ = now;
 
     mrec_meeting payload;
     for (const auto &entry : found) {
@@ -722,6 +745,7 @@ private:
         Fill(&payload, entry);
         callback_(&payload, MREC_MEETING_UPDATED, user_data_);
       }
+      if (ShouldStop(generation)) return;
     }
     for (auto it = tracked_.begin(); it != tracked_.end();) {
       if (ShouldStop(generation)) return;
@@ -754,6 +778,8 @@ private:
   std::atomic<bool> stop_{false};
   std::atomic<uint64_t> generation_{0};
   std::thread thread_;
+  std::shared_ptr<meeting_record::RescanSignal> signal_;
+  uint64_t scan_time_ns_ = 0;
   std::map<DWORD, Tracked> tracked_;
   mrec_meeting_callback callback_ = nullptr;
   void *user_data_ = nullptr;

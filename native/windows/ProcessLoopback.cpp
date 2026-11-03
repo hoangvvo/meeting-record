@@ -2,6 +2,7 @@
 #include "meeting-record.h"
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
+#include "AudioThreadScheduling.h"
 #include "CaptureRoots.h"
 #include "CapturePump.h"
 #include "TimelineMixer.h"
@@ -819,7 +820,7 @@ private:
   void Drain(size_t index) {
     /* Each drain thread needs its own COM apartment. */
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    meeting_record::AudioThreadScheduling scheduling;
     LoopbackStream &stream = Stream(index);
 
     while (!stop_requested_.load(std::memory_order_relaxed) &&
@@ -842,7 +843,7 @@ private:
 
   void DrainMicrophone() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    meeting_record::AudioThreadScheduling scheduling;
     uint64_t next_device_check = 0;
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {

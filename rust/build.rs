@@ -133,6 +133,8 @@ fn build_windows(native: &Path) {
         "include/meeting-record-events.h",
         "windows/ProcessLoopback.cpp",
         "windows/AudioAppProcess.h",
+        "windows/AudioThreadScheduling.h",
+        "windows/AudioSessionNotifications.h",
         "windows/CaptureRoots.h",
         "windows/CapturePump.h",
         "windows/MeetingDetector.cpp",
@@ -150,7 +152,9 @@ fn build_windows(native: &Path) {
         .file(native.join("windows/MeetingDetector.cpp"))
         .compile("meetingrecord_win");
 
-    for library in ["advapi32", "ole32", "oleaut32", "mmdevapi", "user32"] {
+    for library in [
+        "advapi32", "avrt", "ole32", "oleaut32", "mmdevapi", "user32",
+    ] {
         println!("cargo:rustc-link-lib=dylib={library}");
     }
     build_common(native);
