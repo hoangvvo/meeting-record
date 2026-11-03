@@ -10,8 +10,10 @@ use std::{
 
 use crate::{mixer::PcmMixer, Error, QueuedChunk, TrackQueue, STATE_PAUSED};
 
+/// Format of the optional mono s16le mixed output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MixedAudioOptions {
+    /// Output rate in Hz; must be nonzero.
     pub sample_rate: u32,
 }
 
@@ -73,10 +75,12 @@ impl MixedAudio {
         })
     }
 
+    /// Output sample rate in Hz.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
+    /// Output channel count; always one (mono).
     pub fn channels(&self) -> u32 {
         1
     }

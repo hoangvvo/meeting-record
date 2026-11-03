@@ -3,10 +3,12 @@ import type { AudioChunk } from "./index.js";
 import type { ReadableEvents, TypedReadable } from "./typed-readable.js";
 
 export interface MixedAudioEvents extends ReadableEvents<Buffer> {
+  /** RMS of the encoded PCM, from zero to one. */
   level: (level: number) => void;
 }
 
 export interface MixedAudioOptions {
+  /** Output rate in Hz; must be a positive integer. */
   sampleRate: number;
 }
 

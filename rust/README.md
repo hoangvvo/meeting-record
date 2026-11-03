@@ -3,17 +3,15 @@
 [![crates.io](https://img.shields.io/crates/v/meeting-record)](https://crates.io/crates/meeting-record) [![docs.rs](https://img.shields.io/docsrs/meeting-record)](https://docs.rs/meeting-record)
 
 System-audio and microphone capture with meeting detection for macOS, Windows, and Linux.
-
-## Install
+See the [project README](https://github.com/hoangvvo/meeting-record#readme) for requirements, permissions, and supported apps, and the [API reference](https://docs.rs/meeting-record) for types and methods.
 
 ```sh
 cargo add meeting-record
 ```
 
-- See the [requirements](https://github.com/hoangvvo/meeting-record#requirements) and [permissions](https://github.com/hoangvvo/meeting-record#permissions) for app configuration.
-- Read the [API reference](https://docs.rs/meeting-record) for public types and methods.
+## Usage
 
-## Capture
+Capture system audio for ten seconds.
 
 ```rust
 use std::{thread, time::Duration};
@@ -25,146 +23,64 @@ fn main() -> Result<(), Error> {
 
     thread::scope(|scope| {
         scope.spawn(|| {
-            while let Some(chunk) = recording.system_audio().recv() {
-                // Raw float32 PCM, with the format and capture time of this packet.
-                println!(
-                    "{} samples at {} ns, {} Hz, {} channels",
-                    chunk.frames.len(), chunk.host_time_ns, chunk.sample_rate, chunk.channels,
-                );
-            }
+            thread::sleep(Duration::from_secs(10));
+            recording.stop();
         });
-
-        thread::sleep(Duration::from_secs(10));
-        recording.stop(); // The reader drains queued audio before the scope ends.
+        while let Some(chunk) = recording.system_audio().recv() {
+            println!("{} samples at {} Hz", chunk.frames.len(), chunk.sample_rate);
+        }
     });
     Ok(())
 }
 ```
 
-| Target                        | Value passed to `capture::start()` |
-| ----------------------------- | ---------------------------------- |
-| System audio                  | `CaptureTarget::System`            |
-| One app and its audio helpers | `CaptureTarget::Process { pid }`   |
-
-- `meetings::audio_apps()` lists available apps. Use the selected entry's `pid`; no meeting scan is required.
-- A detected meeting's `pid` is also a process target.
-- `permissions::request_and_wait()` returns a `PermissionStatus`; `permissions::status()` checks the current status without prompting.
-- One recording can run at a time per process. Keep the `CaptureSession` alive; dropping it stops capture.
-
-### Add a microphone
-
-Request microphone permission, then pass `microphone` in the capture options:
+Select an app and include its microphone and a 24 kHz mix.
 
 ```rust
-use meeting_record::MicrophoneSource;
+use meeting_record::{meetings, MicrophoneSource, MixedAudioOptions};
 
 permissions::request_and_wait(Permission::Microphone, Duration::from_secs(60), None)?;
-let options = CaptureOptions {
-    mono: false, // Stereo system audio; defaults to mono. The mic stays mono.
-    microphone: Some(MicrophoneSource::Default),
-    ..CaptureOptions::default()
-};
-let recording = capture::start(CaptureTarget::System, options)?;
+let app = meetings::audio_apps()?.into_iter().next().expect("No audio apps");
+
+let app_recording = capture::start(
+    CaptureTarget::Process { pid: app.pid },
+    CaptureOptions {
+        microphone: Some(MicrophoneSource::Auto),
+        mix: Some(MixedAudioOptions { sample_rate: 24_000 }),
+        ..CaptureOptions::default()
+    },
+)?;
 ```
 
-- `MicrophoneSource::Default` follows the OS input device.
-- `MicrophoneSource::Auto` prefers the captured app's mic, then the default (communications default on Windows). On macOS, unavailable or ambiguous app inputs use the default.
-- Without `microphone`, only system audio is captured.
-
-## Audio output
-
-| Output       | Access                            | Data                                                               |
-| ------------ | --------------------------------- | ------------------------------------------------------------------ |
-| System audio | `recording.system_audio().recv()` | `Option<AudioChunk>`                                               |
-| Microphone   | `recording.microphone()`          | `Option<&AudioTrack>`; call `recv()` on the track                  |
-| Mixed audio  | `recording.mixed_audio()`         | `Option<&MixedAudio>`; call `recv()` for `MixedAudioChunk` packets |
-
-- `chunk.frames` contains interleaved float32 PCM.
-- Each packet includes `host_time_ns`, `frame_count`, `sample_rate`, `channels`, and `dropped_samples`.
-- `recv()` blocks until a packet arrives or returns `None` when stopped and drained. Read tracks on worker threads while controlling the session elsewhere.
-- Raw tracks report discarded samples through `dropped_samples` on the track and each packet.
-- See the supported [audio formats](https://github.com/hoangvvo/meeting-record#capture).
-
-### Mixed audio
-
-After requesting the audio and microphone permissions, start with `mix` to add a combined stream:
+Read the mix and pause, resume, or stop the recording.
 
 ```rust
-use meeting_record::MixedAudioOptions;
-
-let options = CaptureOptions {
-    microphone: Some(MicrophoneSource::Default),
-    mix: Some(MixedAudioOptions { sample_rate: 24_000 }), // Combined mono s16le at 24 kHz.
-    ..CaptureOptions::default()
-};
-let recording = capture::start(CaptureTarget::System, options)?;
+thread::scope(|scope| {
+    scope.spawn(|| {
+        let mixed = app_recording.mixed_audio().expect("mix was requested");
+        while let Some(chunk) = mixed.recv() {
+            println!("{} bytes, level {}", chunk.pcm.len(), chunk.level);
+        }
+    });
+    app_recording.pause();
+    app_recording.resume();
+    thread::sleep(Duration::from_secs(10));
+    app_recording.stop();
+});
 ```
 
-In the reader thread from the capture example, read the mix instead of `system_audio()`:
+Scan for meetings or watch for changes.
 
 ```rust
-let mixed = recording.mixed_audio().expect("mix was requested");
-mixed.set_microphone_muted(true); // Affects the mix only.
-
-while let Some(chunk) = mixed.recv() {
-    println!("{} bytes, level {}", chunk.pcm.len(), chunk.level);
-}
-```
-
-- Mixed packets contain mono signed 16-bit little-endian PCM in `chunk.pcm`.
-- Raw tracks remain available alongside the mix.
-
-## Controls and events
-
-| Action                    | API                                                                                      |
-| ------------------------- | ---------------------------------------------------------------------------------------- |
-| Pause / resume            | `recording.pause()` / `recording.resume()`                                               |
-| Stop                      | `recording.stop()`; safe to call more than once                                          |
-| Check recording state     | `recording.state()`                                                                      |
-| Check source availability | `track.availability()`                                                                   |
-| Cancel start or recording | Pass a `CancellationToken` as `CaptureOptions::cancellation`; call `cancel()` on a clone |
-
-- Pausing affects the whole recording; paused time is omitted.
-- After stopping, keep reading each output until `None` to drain queued audio.
-- The session stays alive when a source is lost. Track availability is `Live`, `Degraded`, or `Interrupted`.
-- System audio stops when all captured apps exit; the microphone and session stay alive. Start a new session for a relaunched app.
-
-Read source events on a separate worker thread alongside the audio reader:
-
-```rust
-while let Some(event) = recording.recv_event() {
-    println!("{event:?}");
-}
-```
-
-- `TrackEvent` reports `Interrupted`, `Degraded`, `Resumed`, and `DeviceChanged`.
-- Use `try_recv_event()` to poll without blocking.
-
-## Meetings
-
-```rust
-use meeting_record::meetings;
-
 let active: Vec<_> = meetings::scan()?
     .into_iter()
     .filter(|meeting| meeting.should_record)
     .collect();
 
 let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"))?;
-
-// Keep the watcher alive; drop it later to stop watching.
+thread::sleep(Duration::from_secs(10));
+drop(watcher);
 ```
-
-- Use `should_record` to decide whether a meeting is ready to record.
-- The watcher reports `Started`, `Updated`, and `Ended` events.
-- Request `Permission::Accessibility` on macOS for call-state checks, browser detection, titles, and URLs; relaunch after granting it.
-- See the supported [apps and browsers](https://github.com/hoangvvo/meeting-record#detection).
-
-## Types and errors
-
-- `TrackEvent` and `InterruptionReason` are non-exhaustive; include a fallback arm when matching them.
-- Capture, permissions, and enumeration return `Result<_, Error>`.
-- Cancelled operations return `Error::Cancelled`; cancelling an active recording stops capture.
 
 ## License
 

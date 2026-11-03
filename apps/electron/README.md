@@ -2,19 +2,17 @@
 
 Node binding test app. macOS 14.2+ (arm64), Windows 11 / Server 2022+, or Linux (see the root requirements).
 
-Build the core first, from the repo root:
+Run from the repository root:
 
 ```sh
 npm run build
 ```
 
-Dev:
-
 ```sh
 npm start --workspace meeting-record-electron
 ```
 
-Build and run the real thing:
+## Package for macOS
 
 ```sh
 MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')" \
@@ -22,8 +20,7 @@ MREC_IDENTITY="$(security find-identity -v -p codesigning | awk '/Apple Developm
 open out/mrec-electron-darwin-arm64/mrec-electron.app
 ```
 
-Notes:
-
-- macOS dev mode: detection only; no permission prompts, no recording.
-- Windows/Linux dev mode: detection and recording.
-- Windows build: needs Python and the Visual Studio C++ build tools.
+| Platform        | Development mode        |
+| --------------- | ----------------------- |
+| macOS           | Detection only          |
+| Windows / Linux | Detection and recording |

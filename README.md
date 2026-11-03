@@ -119,9 +119,13 @@ Browser calls are recognised for 8x8, Around, Dialpad Meetings, Discord, Gather,
 | Problem                        | Action                                                                      |
 | ------------------------------ | --------------------------------------------------------------------------- |
 | Capture cannot start           | Check permissions and select a running app. On macOS, use a signed GUI app. |
-| Microphone unavailable         | Enable an input device or capture without the microphone.                   |
+| Microphone unavailable         | Connect or enable an input device.                                          |
 | Browser meetings are missing   | Enable Accessibility on macOS or desktop/browser accessibility on Linux.    |
 | Linux audio server unavailable | Start PulseAudio or `pipewire-pulse` in the current user session.           |
+
+## Testing
+
+See [TESTING.md](./TESTING.md).
 
 ## License
 

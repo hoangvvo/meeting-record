@@ -120,17 +120,20 @@ export const MicrophoneSource = {
 } as const;
 export type MicrophoneSource = (typeof MicrophoneSource)[keyof typeof MicrophoneSource];
 
+/** Optional microphone effects for input rates from 8 to 192 kHz. All default off. */
 export interface MicrophoneProcessing {
   /** Cancel echo using the captured system track as the playback reference. */
   echoCancellation?: boolean;
+  /** Suppress background noise in the microphone track. */
   noiseSuppression?: boolean;
+  /** Adjust microphone gain automatically. */
   autoGainControl?: boolean;
 }
 
 export interface CaptureOptions {
   /** Mono mixdown for system audio only; the microphone keeps its format. Default true. */
   mono?: boolean;
-  /** Capture a microphone as a separate track. Default off. */
+  /** Capture a separate microphone track. Default off; unavailable devices recover while system capture continues. */
   microphone?: MicrophoneSource;
   /** Optional microphone effects. All default off; requires microphone. */
   microphoneProcessing?: MicrophoneProcessing;
@@ -140,9 +143,11 @@ export interface CaptureOptions {
   signal?: AbortSignal;
 }
 
+/** Base class for library errors with a native status code. */
 export class MeetingRecordError extends Error {
   constructor(
     message: string,
+    /** Native status code. */
     readonly code: number,
   ) {
     super(message);
@@ -150,10 +155,15 @@ export class MeetingRecordError extends Error {
   }
 }
 
+/** The OS, architecture, or OS version is unsupported. */
 export class UnsupportedOsError extends MeetingRecordError {}
+/** Required system-audio or microphone access has not been granted. */
 export class PermissionError extends MeetingRecordError {}
+/** A process-wide recording or watcher is already active. */
 export class AlreadyRunningError extends MeetingRecordError {}
+/** An audio capture operation failed. */
 export class CaptureError extends MeetingRecordError {}
+/** Native initialization or another internal operation failed. */
 export class InternalError extends MeetingRecordError {}
 
 interface NativeFormat {
@@ -237,6 +247,11 @@ function asLibraryError(error: unknown): Error {
 }
 
 export const permissions = {
+  /**
+   * Check the current permission without prompting.
+   * @throws {TypeError} If the permission is unknown.
+   * @throws {UnsupportedOsError} If the platform is unsupported.
+   */
   status(permission: Permission): PermissionStatus {
     if (
       permission !== Permission.SystemAudio &&
@@ -256,6 +271,10 @@ export const permissions = {
    *
    * Accessibility opens System Settings and needs an app relaunch, so it resolves
    * as soon as Settings is open.
+   * Returns the current status if the timeout expires.
+   * @throws {TypeError} If the permission is unknown.
+   * @throws {MeetingRecordError} If the platform cannot start the permission request.
+   * @throws If the request is aborted.
    */
   async request(
     permission: Permission,
@@ -300,7 +319,10 @@ export interface MeetingEvents extends EmitterEvents {
 class Meetings extends EventEmitter<{
   [Event in keyof MeetingEvents]: Parameters<MeetingEvents[Event]>;
 }> {
-  /** Point-in-time scan, highest confidence first. */
+  /**
+   * Point-in-time scan, highest confidence first. Use `shouldRecord` to select calls.
+   * @throws {MeetingRecordError} If the platform or audio service cannot be queried.
+   */
   async scan(): Promise<Meeting[]> {
     try {
       return await getNative().scan();
@@ -309,7 +331,10 @@ class Meetings extends EventEmitter<{
     }
   }
 
-  /** Begin emitting `started` / `updated` / `ended`. */
+  /**
+   * Begin emitting `started` / `updated` / `ended`. Repeated calls are harmless.
+   * @throws {MeetingRecordError} If the watcher cannot start.
+   */
   watch(): void {
     const native = getNative();
     if (native.isWatching()) return;
@@ -319,16 +344,21 @@ class Meetings extends EventEmitter<{
     if (status !== 0) throw errorFromStatus("failed to start watching", status);
   }
 
+  /** Stop meeting events; safe to call when already stopped. */
   unwatch(): void {
     const native = getNative();
     if (native.isWatching()) native.watchStop();
   }
 
+  /** Whether meeting events are currently being watched. */
   get watching(): boolean {
     return getNative().isWatching();
   }
 
-  /** Every process doing audio IO. */
+  /**
+   * Every process doing audio IO.
+   * @throws {MeetingRecordError} If audio processes cannot be enumerated.
+   */
   audioProcesses(): AudioProcess[] {
     try {
       return getNative().listAudioProcesses();
@@ -340,6 +370,7 @@ class Meetings extends EventEmitter<{
   /**
    * Applications doing audio IO, grouped by owning PID, including helpers.
    * Pass `pid` as a process target; no meeting scan or Accessibility grant is needed.
+   * @throws {MeetingRecordError} If audio applications cannot be enumerated.
    */
   audioApps(): AudioProcess[] {
     try {
@@ -381,10 +412,14 @@ export interface AudioFormat {
 export interface AudioChunk {
   /** Interleaved float32 PCM. Packet boundaries and metadata survive iteration. */
   readonly pcm: Buffer;
+  /** First frame's monotonic timestamp in nanoseconds, shared across tracks. */
   readonly hostTimeNs: bigint;
+  /** Number of frames per channel in this packet. */
   readonly frameCount: number;
+  /** This packet's rate; it may change after device recovery. */
   readonly sampleRate: number;
   readonly channels: number;
+  /** Interleaved samples lost before this packet because the input queue was full. */
   readonly droppedSamples: number;
 }
 
@@ -429,8 +464,15 @@ export interface CaptureSession {
   readonly microphone?: AudioTrack;
   readonly mixedAudio?: MixedAudio;
   readonly state: CaptureState;
+  /** Pause all tracks. Paused time is omitted from mixed output. */
   pauseRecording(): void;
+  /** Resume all tracks after a pause. */
   resumeRecording(): void;
+  /**
+   * Stop once, then read outputs until `end` to drain their final audio.
+   * Repeated calls share the same promise.
+   * @throws {Error} If native capture teardown fails.
+   */
   stopRecording(): Promise<void>;
 }
 
@@ -652,11 +694,30 @@ interface NativeTrackEvent {
   message: string;
 }
 
-/** Attach source-event listeners immediately after awaiting start; startup notifications are delivered on the next turn. */
+/**
+ * Start a process-wide recording. Attach source-event listeners after awaiting startup.
+ * @throws {TypeError} If the target or capture options are invalid.
+ * @throws {AlreadyRunningError} If another recording is active or starting.
+ * @throws {PermissionError} If required capture permissions are missing.
+ * @throws {CaptureError} If the target or system audio cannot be opened.
+ * @throws {UnsupportedOsError} If the platform is unsupported.
+ * @throws {InternalError} If native initialization fails.
+ * @throws The signal's reason if startup is aborted.
+ */
 function startCapture(
   target: CaptureTarget,
   options: CaptureOptions & { mix: MixedAudioOptions },
 ): Promise<MixedCaptureSession>;
+/**
+ * Start a process-wide recording. Attach source-event listeners after awaiting startup.
+ * @throws {TypeError} If the target or capture options are invalid.
+ * @throws {AlreadyRunningError} If another recording is active or starting.
+ * @throws {PermissionError} If required capture permissions are missing.
+ * @throws {CaptureError} If the target or system audio cannot be opened.
+ * @throws {UnsupportedOsError} If the platform is unsupported.
+ * @throws {InternalError} If native initialization fails.
+ * @throws The signal's reason if startup is aborted.
+ */
 function startCapture(target: CaptureTarget, options?: CaptureOptions): Promise<CaptureSession>;
 async function startCapture(
   target: CaptureTarget,
@@ -807,6 +868,7 @@ async function startCapture(
 
 export const capture = {
   start: startCapture,
+  /** Whether a recording is starting or active, including while paused. */
   get running(): boolean {
     return captureStarting || getNative().isRunning();
   },

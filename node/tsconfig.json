@@ -20,7 +20,8 @@
     "noFallthroughCasesInSwitch": true,
 
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }

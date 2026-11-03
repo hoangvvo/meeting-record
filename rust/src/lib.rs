@@ -1,5 +1,5 @@
-//! System-audio and microphone capture with meeting detection for macOS and
-//! Windows.
+//! System-audio and microphone capture with meeting detection for macOS,
+//! Windows, and Linux.
 //!
 //! ```no_run
 //! use meeting_record::{meetings, Error, MeetingEvent, Platform};
@@ -46,13 +46,20 @@ use std::{
 
 use sys::{AudioCallback as RawAudioCallback, Meeting as RawMeeting, Process as RawProcess};
 
+/// Failure from a permission, detection, or capture operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    /// The current OS version does not support the requested operation.
     UnsupportedOs,
+    /// Required system-audio or microphone access has not been granted.
     Permission(String),
+    /// A process-wide recording or watcher is already active.
     AlreadyRunning,
+    /// Capture options, the target process, or an audio device are unavailable or invalid.
     Capture(String),
+    /// Native initialization or another internal operation failed.
     Internal(String),
+    /// Capture startup or a permission wait was cancelled.
     Cancelled,
 }
 
@@ -156,10 +163,13 @@ impl std::fmt::Debug for CancellationToken {
 }
 
 impl CancellationToken {
+    /// Create an uncancelled token. Clones share its cancellation state.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Cancel waiting operations and stop the associated recording.
+    /// Repeated calls are harmless.
     pub fn cancel(&self) {
         let capture = {
             let mut data = self
@@ -176,6 +186,7 @@ impl CancellationToken {
         }
     }
 
+    /// Whether cancellation has been requested through this token or a clone.
     pub fn is_cancelled(&self) -> bool {
         self.inner
             .data
@@ -258,6 +269,7 @@ pub mod permissions {
 
     use super::{sys, CancellationToken, Error, Permission, PermissionStatus};
 
+    /// Check the current permission without prompting.
     pub fn status(permission: Permission) -> PermissionStatus {
         match permission {
             Permission::SystemAudio => unsafe { sys::mrec_audio_permission_status() }.into(),
@@ -273,6 +285,9 @@ pub mod permissions {
     /// Audio requests return immediately; poll [`status`] for the answer.
     /// Accessibility opens System Settings and takes effect after an app
     /// relaunch.
+    ///
+    /// # Errors
+    /// Returns a platform or permission error if the OS request cannot be started.
     pub fn request(permission: Permission) -> Result<(), Error> {
         let status = match permission {
             Permission::SystemAudio => unsafe { sys::mrec_request_audio_permission() },
@@ -284,6 +299,9 @@ pub mod permissions {
 
     /// Request and wait for the answer, returning the current status on timeout.
     /// Accessibility returns immediately; its grant requires an app relaunch.
+    ///
+    /// # Errors
+    /// Returns [`Error::Cancelled`] if cancelled, or an error from [`request`].
     pub fn request_and_wait(
         permission: Permission,
         timeout: Duration,
@@ -731,11 +749,14 @@ pub enum MicrophoneSource {
     Auto,
 }
 
-/// Optional microphone effects. Echo cancellation references captured system audio.
+/// Optional microphone effects for input rates from 8 to 192 kHz. All default off.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MicrophoneProcessing {
+    /// Cancel echo using the captured system track as the playback reference.
     pub echo_cancellation: bool,
+    /// Suppress background noise in the microphone track.
     pub noise_suppression: bool,
+    /// Adjust microphone gain automatically.
     pub auto_gain_control: bool,
 }
 
@@ -751,7 +772,8 @@ impl MicrophoneProcessing {
 pub struct CaptureOptions {
     /// Mono mixdown for system audio only. The microphone keeps its format. Defaults to true.
     pub mono: bool,
-    /// Optional microphone track. Defaults to none.
+    /// Optional microphone track. Defaults to none. Unavailable devices recover
+    /// while system capture continues.
     pub microphone: Option<MicrophoneSource>,
     /// Microphone effects, all off by default. Requires a microphone source.
     pub microphone_processing: MicrophoneProcessing,
@@ -959,12 +981,14 @@ unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_
 pub struct AudioChunk {
     /// Interleaved float32 PCM.
     pub frames: Vec<f32>,
-    /// Capture time of the first frame on the host's monotonic clock.
+    /// First frame's monotonic timestamp in nanoseconds, shared across tracks.
     pub host_time_ns: u64,
+    /// Number of frames per channel in this packet.
     pub frame_count: u32,
     pub channels: u32,
+    /// This packet's rate in Hz; it may change after device recovery.
     pub sample_rate: f64,
-    /// Samples discarded since the previous delivered chunk.
+    /// Interleaved samples discarded since the previous delivered chunk.
     pub dropped_samples: usize,
 }
 
@@ -1233,7 +1257,8 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
-    /// Initial negotiated rate, or zero while the microphone is unavailable. A recovered device may change it; each
+    /// Initial negotiated rate, or zero while the microphone is unavailable.
+    /// A recovered device may change it; each
     /// [`AudioChunk::sample_rate`] is authoritative.
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
@@ -1251,7 +1276,9 @@ impl AudioTrack {
         self.queue.dropped.load(Ordering::Relaxed)
     }
 
-    /// Wait for the next chunk, or return `None` after the recording stops.
+    /// Wait for the next chunk, or return `None` after capture stops and the
+    /// queued audio has been drained. Read on a worker thread while controlling
+    /// the session elsewhere.
     pub fn recv(&self) -> Option<AudioChunk> {
         self.queue.recv()
     }
@@ -1261,6 +1288,7 @@ impl AudioTrack {
         self.availability() == TrackAvailability::Interrupted
     }
 
+    /// Current source availability, independent of pause and stop.
     pub fn availability(&self) -> TrackAvailability {
         match self.status.availability.load(Ordering::Acquire) {
             1 => TrackAvailability::Degraded,
@@ -1410,16 +1438,20 @@ pub struct CaptureSession {
 }
 
 impl CaptureSession {
+    /// The system-audio track.
     pub fn system_audio(&self) -> &AudioTrack {
         &self.system_audio
     }
+    /// The microphone track, if requested in [`CaptureOptions`].
     pub fn microphone(&self) -> Option<&AudioTrack> {
         self.microphone.as_ref()
     }
+    /// The mono s16le mixed output, if configured in [`CaptureOptions`].
     pub fn mixed_audio(&self) -> Option<&MixedAudio> {
         self.mixed_audio.as_ref()
     }
 
+    /// Current recording state, independent of individual source availability.
     pub fn state(&self) -> CaptureState {
         match self.control.phase() {
             STATE_PAUSED => CaptureState::Paused,
@@ -1442,6 +1474,7 @@ impl CaptureSession {
     pub fn pause(&self) {
         self.control.pause();
     }
+    /// Resume all tracks after a pause.
     pub fn resume(&self) {
         self.control.resume();
     }
@@ -1645,17 +1678,27 @@ pub mod meetings {
     use super::{AudioProcess, Error, Meeting, MeetingEvent, Watcher};
 
     /// Every live process doing audio IO.
+    ///
+    /// # Errors
+    /// Returns a platform or audio-service error if enumeration fails.
     pub fn audio_processes() -> Result<Vec<AudioProcess>, Error> {
         super::list_audio_processes()
     }
 
     /// Applications doing audio IO, grouped by owning PID, including helpers.
     /// Pass `pid` to capture the app; no meeting scan or Accessibility grant is needed.
+    ///
+    /// # Errors
+    /// Returns a platform or audio-service error if enumeration fails.
     pub fn audio_apps() -> Result<Vec<AudioProcess>, Error> {
         super::list_audio_apps()
     }
 
     /// Point-in-time scan, highest confidence first.
+    /// Use [`Meeting::should_record`] to select calls.
+    ///
+    /// # Errors
+    /// Returns a platform or audio-service error if scanning fails.
     pub fn scan() -> Result<Vec<Meeting>, Error> {
         super::scan_meetings()
     }
@@ -1664,6 +1707,10 @@ pub mod meetings {
     ///
     /// The handler runs on an internal serial queue, so it may allocate and
     /// block.
+    ///
+    /// # Errors
+    /// Returns [`Error::AlreadyRunning`] if a watcher is active, or a platform
+    /// or initialization error if the watcher cannot start.
     pub fn watch<F>(handler: F) -> Result<Watcher, Error>
     where
         F: FnMut(MeetingEvent, &Meeting) + Send + 'static,
@@ -1671,6 +1718,7 @@ pub mod meetings {
         super::watch_meetings(handler)
     }
 
+    /// Whether the process-wide meeting watcher is active.
     pub fn watching() -> bool {
         super::meetings_watching()
     }
@@ -1683,10 +1731,18 @@ pub mod capture {
     ///
     /// Native initialization may block for six seconds. Cancellation during
     /// initialization is returned after that attempt has been cleaned up.
+    ///
+    /// # Errors
+    /// Returns [`Error::AlreadyRunning`] if another recording is active,
+    /// [`Error::Permission`] if access is denied, [`Error::Capture`] for invalid
+    /// options or unavailable system audio, or [`Error::Cancelled`] if startup
+    /// is cancelled. Platform and initialization failures return
+    /// [`Error::UnsupportedOs`] or [`Error::Internal`].
     pub fn start(target: CaptureTarget, options: CaptureOptions) -> Result<CaptureSession, Error> {
         super::start_capture(target, options)
     }
 
+    /// Whether capture is active, including while paused or a source is interrupted.
     pub fn running() -> bool {
         super::capture_running()
     }
