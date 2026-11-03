@@ -161,7 +161,13 @@ foreach ($name in $variableNames) {
 }
 
 function Set-HarnessVariable([string]$Name, $Value) {
-    [Environment]::SetEnvironmentVariable($Name, $(if ($null -eq $Value) { $null } else { "$Value" }), "Process")
+    # PowerShell 7 can bind $null to an empty string; optional harness variables
+    # must be absent so numeric parsers use their defaults.
+    if ($null -eq $Value) {
+        [Environment]::SetEnvironmentVariable($Name, [NullString]::Value, "Process")
+    } else {
+        [Environment]::SetEnvironmentVariable($Name, "$Value", "Process")
+    }
 }
 
 # Windows PowerShell 5.1 turns redirected native stderr, such as cargo progress,
@@ -386,8 +392,7 @@ finally {
         & $deviceScript -Output -Device $originalOutput | Out-Null
     }
     foreach ($name in $variableNames) {
-        [Environment]::SetEnvironmentVariable(
-            $name, $originalEnvironment[$name], "Process")
+        Set-HarnessVariable $name $originalEnvironment[$name]
     }
     Pop-Location
 }
