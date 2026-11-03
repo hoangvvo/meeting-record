@@ -1,0 +1,44 @@
+#pragma once
+#define FLOATING_POINT 1
+#define USE_KISS_FFT 1
+#define EXPORT
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#define filterbank_compute_bank mrec_filterbank_compute_bank
+#define filterbank_compute_bank32 mrec_filterbank_compute_bank32
+#define filterbank_compute_psd mrec_filterbank_compute_psd
+#define filterbank_compute_psd16 mrec_filterbank_compute_psd16
+#define filterbank_destroy mrec_filterbank_destroy
+#define filterbank_new mrec_filterbank_new
+#define filterbank_psy_smooth mrec_filterbank_psy_smooth
+#define kiss_fft mrec_kiss_fft
+#define kiss_fft_alloc mrec_kiss_fft_alloc
+#define kiss_fft_stride mrec_kiss_fft_stride
+#define kiss_fftr mrec_kiss_fftr
+#define kiss_fftr2 mrec_kiss_fftr2
+#define kiss_fftr_alloc mrec_kiss_fftr_alloc
+#define kiss_fftri mrec_kiss_fftri
+#define kiss_fftri2 mrec_kiss_fftri2
+#define speex_echo_cancel mrec_speex_echo_cancel
+#define speex_echo_cancellation mrec_speex_echo_cancellation
+#define speex_echo_capture mrec_speex_echo_capture
+#define speex_echo_ctl mrec_speex_echo_ctl
+#define speex_echo_get_residual mrec_speex_echo_get_residual
+#define speex_echo_playback mrec_speex_echo_playback
+#define speex_echo_state_destroy mrec_speex_echo_state_destroy
+#define speex_echo_state_init mrec_speex_echo_state_init
+#define speex_echo_state_init_mc mrec_speex_echo_state_init_mc
+#define speex_echo_state_reset mrec_speex_echo_state_reset
+#define speex_preprocess mrec_speex_preprocess
+#define speex_preprocess_ctl mrec_speex_preprocess_ctl
+#define speex_preprocess_estimate_update mrec_speex_preprocess_estimate_update
+#define speex_preprocess_run mrec_speex_preprocess_run
+#define speex_preprocess_state_destroy mrec_speex_preprocess_state_destroy
+#define speex_preprocess_state_init mrec_speex_preprocess_state_init
+#define spx_fft mrec_spx_fft
+#define spx_fft_destroy mrec_spx_fft_destroy
+#define spx_fft_float mrec_spx_fft_float
+#define spx_fft_init mrec_spx_fft_init
+#define spx_ifft mrec_spx_ifft
+#define spx_ifft_float mrec_spx_ifft_float
