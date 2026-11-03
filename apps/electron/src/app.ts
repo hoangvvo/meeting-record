@@ -255,6 +255,11 @@ function onMeetingEvent({ kind, meeting }: MeetingEvent): void {
   else meetings.set(meeting.id, meeting);
   renderMeetings();
 
+  if (kind === "ended") {
+    log(`ended ${label(meeting)} (${meeting.id})`);
+    return;
+  }
+
   const recordingHint = meeting.shouldRecord ? " (should record)" : "";
   log(
     `${kind} ${label(meeting)}: ${meeting.appName}, confidence ${meeting.confidence}${recordingHint}`,

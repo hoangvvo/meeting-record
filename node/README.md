@@ -59,12 +59,14 @@ const active = (await meetings.scan()).filter((meeting) => meeting.shouldRecord)
 
 meetings.on("started", (meeting) => console.log("Started:", meeting));
 meetings.on("updated", (meeting) => console.log("Updated:", meeting));
-meetings.on("ended", (meeting) => console.log("Ended:", meeting));
+meetings.on("ended", ({ platform, pid }) => console.log("Ended:", platform, pid));
 meetings.watch();
 
 await delay(10_000);
 meetings.unwatch();
 ```
+
+On `ended`, use `platform` and `pid` to remove the meeting. Other payload fields, including `shouldRecord`, may contain the last active observation. Meeting events do not stop capture; call `stopRecording()` and drain the tracks when you want the recording to end.
 
 ## License
 

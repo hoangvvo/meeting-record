@@ -634,6 +634,8 @@ fn scan_meetings() -> Result<Vec<Meeting>, Error> {
 pub enum MeetingEvent {
     Started,
     Updated,
+    /// The meeting is no longer detected. Only platform and pid are meaningful
+    /// in its payload; other fields may be stale. Does not stop capture.
     Ended,
 }
 
