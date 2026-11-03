@@ -17,7 +17,7 @@ fi
 "${CXX:-g++}" "${flags[@]}" -std=c++17 -Wall -Wextra -Werror \
   native/tests/pcm_mixer_test.cpp "$BUILD/pcm-mixer.o" -o "$BUILD/pcm_mixer_test"
 "$BUILD/pcm_mixer_test"
-"${CC:-cc}" "${flags[@]}" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -fPIC -Inative/include -Inative/common -c native/common/tracks.c -o "$BUILD/tracks.o" -pthread
+"${CC:-cc}" "${flags[@]}" -std=c11 -Wall -Wextra -Werror -fPIC -Inative/include -Inative/common -c native/common/tracks.c -o "$BUILD/tracks.o" -pthread
 "${CC:-cc}" "${flags[@]}" -std=c11 -Wall -Wextra -Werror -fPIC -Inative/include -Inative/common -c native/common/meeting-catalog.c -o "$BUILD/catalog.o"
 for name in tracks meeting_catalog; do
   "${CC:-cc}" "${flags[@]}" -std=c11 -D_POSIX_C_SOURCE=200809L -Inative/include -Inative/common "native/tests/${name}_test.c" "$BUILD/tracks.o" "$BUILD/catalog.o" -pthread -o "$BUILD/$name"
