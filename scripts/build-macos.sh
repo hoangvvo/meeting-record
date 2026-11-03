@@ -78,6 +78,21 @@ for source in meeting-catalog tracks; do
     -c -o "$BUILD/$source.o" "$ROOT/native/common/$source.c"
 done
 
+echo "==> native voice processing"
+bash "$ROOT/scripts/build-voice.sh" "$BUILD/voice" "$SWIFT_TARGET"
+echo "==> voice processing tests"
+clang++ -O2 -std=c++17 -Wall -Wextra -Werror -target "$SWIFT_TARGET" \
+  "$ROOT/native/tests/voice_processing_test.cpp" "$BUILD/voice/libmeetingrecord_voice.a" \
+  -o "$BUILD/voice_processing_test"
+"$BUILD/voice_processing_test"
+
+echo "==> shared PCM mixer tests"
+clang++ -O2 -std=c++17 -Wall -Wextra -Werror -target "$SWIFT_TARGET" \
+  -c "$ROOT/native/common/pcm-mixer.cpp" -o "$BUILD/pcm-mixer.o"
+clang++ -O2 -std=c++17 -Wall -Wextra -Werror -target "$SWIFT_TARGET" \
+  "$ROOT/native/tests/pcm_mixer_test.cpp" "$BUILD/pcm-mixer.o" -o "$BUILD/pcm_mixer_test"
+"$BUILD/pcm_mixer_test"
+
 echo "==> swiftc: libmeetingrecord_macos.a"
 swiftc -O \
   -parse-as-library \
@@ -86,7 +101,7 @@ swiftc -O \
   -import-objc-header "$BRIDGING_HEADER" \
   -o "$BUILD/libmeetingrecord_macos.a" \
   "$ROOT"/native/macos/*.swift
-ar rs "$BUILD/libmeetingrecord_macos.a" "$BUILD/meeting-catalog.o" "$BUILD/tracks.o"
+ar rs "$BUILD/libmeetingrecord_macos.a" "$BUILD/meeting-catalog.o" "$BUILD/tracks.o" "$BUILD/pcm-mixer.o" "$BUILD"/voice/*.o
 
 echo "    $(du -h "$BUILD/libmeetingrecord_macos.a" | cut -f1) $BUILD/libmeetingrecord_macos.a"
 
@@ -147,7 +162,7 @@ swiftc -O -parse-as-library -target "$SWIFT_TARGET" -import-objc-header "$BRIDGI
   -o "$BUILD/capture_lifecycle_test" \
   "$ROOT/native/tests/capture_test_support.swift" \
   "$ROOT/native/tests/capture_lifecycle_test.swift" \
-  "$ROOT/native/macos/Exports.swift" "$BUILD/tracks.o"
+  "$ROOT/native/macos/Exports.swift" "$BUILD/tracks.o" "$BUILD/voice/libmeetingrecord_voice.a" -lc++
 "$BUILD/capture_lifecycle_test"
 
 echo "==> meetingtest"
@@ -159,7 +174,7 @@ clang -O2 \
   -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
   -framework Foundation -framework AppKit -framework ApplicationServices \
   -L"$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
-  -lswiftCore -lm
+  -lswiftCore -lc++ -lm
 echo "    built $BUILD/meetingtest"
 
 [[ "${1:-}" == "selftest" ]] || exit 0
@@ -179,7 +194,7 @@ clang -O2 \
   -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
   -framework Foundation -framework AppKit \
   -L"$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
-  -lswiftCore -lm
+  -lswiftCore -lc++ -lm
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

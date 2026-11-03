@@ -17,6 +17,8 @@ struct Config {
   int format_status = MREC_OK;
   int microphone_format_status = MREC_OK;
   int initial_event_type = -1;
+  int initial_event_track = MREC_TRACK_SYSTEM_AUDIO;
+  int microphone_rate = 44100;
   int scan_status = MREC_ERR_INTERNAL;
 };
 Config config;
@@ -99,7 +101,7 @@ int32_t mrec_start_tracks_raw(const uint32_t *pids, size_t pid_count, int32_t gl
   }
   if (config.initial_event_type >= 0) {
     mrec_track_event event{};
-    event.track = MREC_TRACK_SYSTEM_AUDIO;
+    event.track = static_cast<mrec_track>(config.initial_event_track);
     event.type = static_cast<mrec_track_event_type>(config.initial_event_type);
     event.reason = MREC_TRACK_REASON_SERVICE_RESET;
     track_event(&event, event_data);
@@ -112,13 +114,13 @@ mrec_status mrec_current_format(double *rate, uint32_t *channels) {
   return static_cast<mrec_status>(config.format_status);
 }
 mrec_status mrec_current_microphone_format(double *rate, uint32_t *channels) {
-  *rate = 44100;
-  *channels = 2;
+  *rate = config.microphone_rate;
+  *channels = config.microphone_rate ? 2 : 1;
   return microphone_audio ? static_cast<mrec_status>(config.microphone_format_status) : MREC_ERR_NOT_RUNNING;
 }
 mrec_status mrec_current_microphone_name(char *name, size_t capacity) {
   if (!microphone_audio) return MREC_ERR_NOT_RUNNING;
-  std::snprintf(name, capacity, "%s", "Fixture microphone");
+  std::snprintf(name, capacity, "%s", config.microphone_rate ? "Fixture microphone" : "");
   return MREC_OK;
 }
 int32_t mrec_is_running() { return running ? 1 : 0; }
@@ -146,6 +148,8 @@ void RegisterTestBackend(Napi::Env env, Napi::Object exports) {
     config.format_status = Number(options, "formatStatus", MREC_OK);
     config.microphone_format_status = Number(options, "microphoneFormatStatus", MREC_OK);
     config.initial_event_type = Number(options, "initialEventType", -1);
+    config.initial_event_track = Number(options, "initialEventTrack", MREC_TRACK_SYSTEM_AUDIO);
+    config.microphone_rate = Number(options, "microphoneRate", 44100);
     config.scan_status = Number(options, "scanStatus", MREC_ERR_INTERNAL);
     starts = 0;
     stops = 0;

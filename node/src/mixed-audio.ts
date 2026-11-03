@@ -1,6 +1,5 @@
 import { Readable } from "node:stream";
 import type { AudioChunk } from "./index.js";
-import { getLevel, PcmMixer } from "./pcm-mixer.js";
 import type { ReadableEvents, TypedReadable } from "./typed-readable.js";
 
 export interface MixedAudioEvents extends ReadableEvents<Buffer> {
@@ -25,14 +24,22 @@ export interface MixSource {
   resume(): unknown;
 }
 
+export interface NativePcmMixer {
+  write(source: number, chunk: AudioChunk): void;
+  read(): { pcm: Buffer; level: number } | null;
+  setMuted(source: number, muted: boolean): void;
+  finishSegment(): void;
+  restart(): void;
+  close(): void;
+}
+
 export class MixedAudioImpl extends Readable implements MixedAudio {
   readonly sampleRate: number;
   readonly channels = 1;
   readonly #sources: MixSource[];
-  readonly #microphone: MixSource | undefined;
-  readonly #mixer: PcmMixer;
+  readonly #mixer: NativePcmMixer;
   readonly #timer: NodeJS.Timeout;
-  #startup: Map<MixSource, AudioChunk[]> | undefined = new Map();
+  #startup: Map<number, AudioChunk[]> | undefined = new Map();
   #startupDeadline = 0;
   #startupTimer?: NodeJS.Timeout;
   #blocked = false;
@@ -40,14 +47,24 @@ export class MixedAudioImpl extends Readable implements MixedAudio {
   #paused = false;
   #finished = false;
 
-  constructor(sampleRate: number, systemAudio: MixSource, microphone?: MixSource) {
+  constructor(
+    sampleRate: number,
+    systemAudio: MixSource,
+    microphone: MixSource | undefined,
+    mixer: NativePcmMixer,
+  ) {
     super({ highWaterMark: sampleRate * 2 });
     this.sampleRate = sampleRate;
     this.#sources = microphone ? [systemAudio, microphone] : [systemAudio];
-    this.#microphone = microphone;
-    this.#mixer = new PcmMixer(sampleRate, this.#sources);
-    for (const source of this.#sources) {
-      source.setMixConsumer((chunk) => this.#write(source, chunk));
+    this.#mixer = mixer;
+    for (const [index, source] of this.#sources.entries()) {
+      source.setMixConsumer((chunk) => {
+        try {
+          this.#write(index, chunk);
+        } catch (error) {
+          this.destroy(error as Error);
+        }
+      });
       source.resume();
     }
     this.#timer = setInterval(() => this.#pump(), 100);
@@ -66,6 +83,7 @@ export class MixedAudioImpl extends Readable implements MixedAudio {
     clearInterval(this.#timer);
     clearTimeout(this.#startupTimer);
     this.#startup?.clear();
+    this.#mixer.close();
     for (const source of this.#sources) {
       source.setMixConsumer(undefined);
       source.setMixReady(true);
@@ -74,7 +92,7 @@ export class MixedAudioImpl extends Readable implements MixedAudio {
   }
 
   setMicrophoneMuted(muted: boolean): void {
-    if (this.#microphone) this.#mixer.setMuted(this.#microphone, muted);
+    if (!this.destroyed && this.#sources.length > 1) this.#mixer.setMuted(1, muted);
   }
 
   pauseCapture(): void {
@@ -101,7 +119,7 @@ export class MixedAudioImpl extends Readable implements MixedAudio {
     this.#pump();
   }
 
-  #write(source: MixSource, chunk: AudioChunk): void {
+  #write(source: number, chunk: AudioChunk): void {
     if (!this.#startup) {
       this.#mixer.write(source, chunk);
       return;
@@ -144,19 +162,24 @@ export class MixedAudioImpl extends Readable implements MixedAudio {
   #pump(): void {
     if (this.#pumping || this.destroyed) return;
     this.#pumping = true;
-    this.#flushStartup();
-    while (!this.#blocked) {
-      const chunk = this.#mixer.read();
-      if (!chunk) {
-        if (this.#finished) this.push(null);
-        break;
+    try {
+      this.#flushStartup();
+      while (!this.#blocked && !this.destroyed) {
+        const chunk = this.#mixer.read();
+        if (!chunk) {
+          if (this.#finished) this.push(null);
+          break;
+        }
+        if (!this.push(chunk.pcm)) {
+          this.#blocked = true;
+          for (const source of this.#sources) source.setMixReady(false);
+        }
+        this.emit("level", chunk.level);
       }
-      if (!this.push(chunk)) {
-        this.#blocked = true;
-        for (const source of this.#sources) source.setMixReady(false);
-      }
-      this.emit("level", getLevel(chunk));
+    } catch (error) {
+      this.destroy(error as Error);
+    } finally {
+      this.#pumping = false;
     }
-    this.#pumping = false;
   }
 }

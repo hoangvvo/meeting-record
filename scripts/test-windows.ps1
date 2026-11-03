@@ -40,7 +40,19 @@ function Test-Native {
 
 Push-Location $build
 try {
+  $vendor = Join-Path $root "native/third_party/speexdsp"
+  foreach ($source in @("mdf", "preprocess", "filterbank", "fftwrap", "kiss_fft", "kiss_fftr")) {
+    & cl.exe /nologo /std:c11 /O2 /DHAVE_CONFIG_H "/I$vendor" "/I$vendor/include" /c "$vendor/libspeexdsp/$source.c"
+    if ($LASTEXITCODE -ne 0) { throw "voice DSP compilation failed: $source" }
+  }
+  & cl.exe /nologo /std:c++17 /EHsc /W4 "/I$vendor" "/I$vendor/include" `
+    "$root/native/tests/voice_processing_test.cpp" "$root/native/common/voice-processing.cpp" `
+    mdf.obj preprocess.obj filterbank.obj fftwrap.obj kiss_fft.obj kiss_fftr.obj /Fe:voice_processing_test.exe
+  if ($LASTEXITCODE -ne 0) { throw "voice processor compilation failed" }
+  & .\voice_processing_test.exe
+  if ($LASTEXITCODE -ne 0) { throw "voice processing tests failed" }
   Test-Native layout_check @("$root/native/tests/layout_check.c")
+  Test-Native pcm_mixer_test @("$root/native/tests/pcm_mixer_test.cpp", "$root/native/common/pcm-mixer.cpp") -Cxx
   Test-Native meeting_catalog_test @(
     "$root/native/tests/meeting_catalog_test.c", "$root/native/common/meeting-catalog.c"
   )

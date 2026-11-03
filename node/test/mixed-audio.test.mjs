@@ -3,6 +3,16 @@ import { once } from "node:events";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { MixedAudioImpl } from "../dist/mixed-audio.js";
+import { createMixer } from "./helpers/native-mixer.mjs";
+
+function mixedAudio(sampleRate, systemAudio, microphone) {
+  return new MixedAudioImpl(
+    sampleRate,
+    systemAudio,
+    microphone,
+    createMixer(sampleRate, microphone ? 2 : 1),
+  );
+}
 
 class Source {
   ready = true;
@@ -36,10 +46,36 @@ function collect(mix) {
   return chunks;
 }
 
+void test("destroying from a data listener releases the native mixer once", async () => {
+  const system = new Source();
+  const microphone = new Source();
+  const mix = mixedAudio(100, system, microphone);
+  const closed = once(mix, "close");
+  mix.on("data", () => mix.destroy());
+  system.send(100, 0.25, 100, 0n);
+  microphone.send(100, 0.25, 100, 0n);
+  mix.finishCapture();
+  await closed;
+  assert.equal(system.consumer, undefined);
+  assert.equal(microphone.consumer, undefined);
+  assert.doesNotThrow(() => mix.setMicrophoneMuted(true));
+});
+
+void test("native mixer errors close the stream and release its consumers", async () => {
+  const system = new Source();
+  const mix = mixedAudio(100, system);
+  const error = once(mix, "error");
+  system.send(10, 0.25, 0, 0n);
+  mix.finishCapture();
+  assert.match((await error)[0].message, /mixer operation failed/);
+  assert.equal(mix.destroyed, true);
+  assert.equal(system.consumer, undefined);
+});
+
 void test("mix timestamp-aligned rates, mute microphone, and exclude paused time", async () => {
   const system = new Source();
   const microphone = new Source();
-  const mix = new MixedAudioImpl(24000, system, microphone);
+  const mix = mixedAudio(24000, system, microphone);
   const chunks = collect(mix);
   const ended = once(mix, "end");
   microphone.send(240, 0.5, 24000, 0n);
@@ -61,7 +97,7 @@ void test("mix timestamp-aligned rates, mute microphone, and exclude paused time
 
 void test("apply backpressure and preserve the final tail while stopping", async () => {
   const system = new Source();
-  const mix = new MixedAudioImpl(24000, system);
+  const mix = mixedAudio(24000, system);
   system.send(48000, 0.1, 24000, 0n);
   mix.read(0);
   assert.equal(system.ready, false);
@@ -74,7 +110,7 @@ void test("apply backpressure and preserve the final tail while stopping", async
 
 void test("flush upsampling interpolation at the final capture boundary", async () => {
   const system = new Source();
-  const mix = new MixedAudioImpl(24000, system);
+  const mix = mixedAudio(24000, system);
   const chunks = collect(mix);
   const ended = once(mix, "end");
   system.send(80, 0.25, 8000, 0n);
@@ -88,7 +124,7 @@ void test("flush upsampling interpolation at the final capture boundary", async 
 void test("retain an earlier microphone prefix regardless of first packet order in each segment", async () => {
   const system = new Source();
   const microphone = new Source();
-  const mix = new MixedAudioImpl(100, system, microphone);
+  const mix = mixedAudio(100, system, microphone);
   const chunks = collect(mix);
   const ended = once(mix, "end");
   for (const origin of [0n, 60_000_000_000n]) {
@@ -114,7 +150,7 @@ void test("retain an earlier microphone prefix regardless of first packet order 
 
 void test("a missing source delays startup briefly without blocking indefinitely", async () => {
   const system = new Source();
-  const mix = new MixedAudioImpl(100, system, new Source());
+  const mix = mixedAudio(100, system, new Source());
   system.send(10, 0.25, 100, 0n);
   assert.equal(mix.read(), null);
   await delay(150);
@@ -125,7 +161,7 @@ void test("a missing source delays startup briefly without blocking indefinitely
 
 void test("pause and stop flush startup packets without waiting for a missing source", async () => {
   const system = new Source();
-  const mix = new MixedAudioImpl(100, system, new Source());
+  const mix = mixedAudio(100, system, new Source());
   system.send(10, 0.25, 100, 0n);
   mix.pauseCapture();
   assert.equal(mix.read()?.length, 20);
@@ -139,7 +175,7 @@ void test("pause and stop flush startup packets without waiting for a missing so
 void test("long gaps in every source do not backfill silence on recovery", async () => {
   const system = new Source();
   const microphone = new Source();
-  const mix = new MixedAudioImpl(100, system, microphone);
+  const mix = mixedAudio(100, system, microphone);
   const chunks = collect(mix);
   const ended = once(mix, "end");
   system.send(10, 0.25, 100, 0n);
@@ -154,7 +190,7 @@ void test("long gaps in every source do not backfill silence on recovery", async
 void test("a missing source retains silence while another source keeps recording", async () => {
   const system = new Source();
   const microphone = new Source();
-  const mix = new MixedAudioImpl(100, system, microphone);
+  const mix = mixedAudio(100, system, microphone);
   const chunks = collect(mix);
   const ended = once(mix, "end");
   system.send(10, 0.25, 100, 0n);

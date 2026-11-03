@@ -8,6 +8,7 @@
 #include "TimelineMixer.h"
 #include "meeting-catalog.h"
 #include "tracks.h"
+#include "voice-processing.h"
 
 #include <audioclient.h>
 #include <audioclientactivationparams.h>
@@ -555,10 +556,16 @@ public:
       }
     }
 
-    if (microphone != MREC_MICROPHONE_NONE && microphone != MREC_MICROPHONE_DEFAULT &&
-        microphone != MREC_MICROPHONE_AUTO) {
-      SetLastErrorMessage("unknown microphone source");
+    if (!mrec_microphone_configuration_valid(microphone)) {
+      SetLastErrorMessage("unknown microphone configuration");
       return MREC_ERR_INTERNAL;
+    }
+    const int32_t microphone_source = mrec_microphone_source_value(microphone);
+    const int32_t microphone_processing = mrec_microphone_processing_value(microphone);
+    if (microphone_source != MREC_MICROPHONE_NONE &&
+        mrec_microphone_permission_status() == MREC_PERM_DENIED) {
+      SetLastErrorMessage("microphone permission is not granted");
+      return MREC_ERR_PERMISSION;
     }
 
     mta_usage_.emplace();
@@ -601,22 +608,40 @@ public:
     if (!global_mixdown) {
       for (uint32_t pid : targets) targets_.push_back({pid, ProcessCreationTime(pid)});
     }
-    microphone_source_ = microphone;
-    if (microphone != MREC_MICROPHONE_NONE) {
+    microphone_source_ = microphone_source;
+    if (microphone_source != MREC_MICROPHONE_NONE) {
       mrec_status failure = MREC_ERR_DEVICE_FAILED;
       auto stream = ActivateMicrophone(PreferredMicrophoneId(targets, microphone_source_), failure);
-      if (!stream) {
+      if (!stream && failure != MREC_ERR_DEVICE_FAILED) {
         streams_.clear();
         targets_.clear();
         mta_usage_.reset();
         return failure;
       }
-      microphone_ = std::move(*stream);
-      microphone_enabled_ = true;
+      if (stream) microphone_ = std::move(*stream);
+    }
+    microphone_enabled_ = microphone_source != MREC_MICROPHONE_NONE;
+
+    if (microphone_processing) {
+      voice_.reset(mrec_voice_create(microphone_processing,
+          system_callback, system_user_data, microphone_callback, microphone_user_data));
+      if (!voice_) {
+        microphone_.reset();
+        streams_.clear();
+        targets_.clear();
+        mta_usage_.reset();
+        microphone_enabled_ = false;
+        SetLastErrorMessage("could not initialize microphone processing");
+        return MREC_ERR_INTERNAL;
+      }
+      callback_ = mrec_voice_system;
+      user_data_ = voice_.get();
+      microphone_callback_ = mrec_voice_microphone;
+      microphone_user_data_ = voice_.get();
     }
 
     system_mixer_.Reset(streams_.size(), channels_, callback_, user_data_);
-    if (microphone_) {
+    if (microphone_enabled_) {
       microphone_mixer_.Reset(1, 1, microphone_callback_, microphone_user_data_);
     }
     running_ = true;
@@ -624,8 +649,8 @@ public:
     system_exited_ = false;
     track_session_ = mrec_tracks_open(event_callback, event_user_data);
     if (!mrec_track_started(track_session_, MREC_TRACK_SYSTEM_AUDIO, streams_.size(), nullptr) ||
-        (microphone_ && !mrec_track_started(track_session_, MREC_TRACK_MICROPHONE, 1,
-                                             microphone_->name.c_str()))) {
+        (microphone_enabled_ && !mrec_track_started(track_session_, MREC_TRACK_MICROPHONE, 1,
+                                             microphone_ ? microphone_->name.c_str() : ""))) {
       StopLocked();
       SetLastErrorMessage("could not allocate track state");
       return MREC_ERR_INTERNAL;
@@ -640,14 +665,21 @@ public:
       workers_.emplace_back([this, i] { Drain(i); });
     }
     if (!targets_.empty()) targets_worker_ = std::thread([this] { WatchTargets(); });
-    if (microphone_) {
+    if (microphone_enabled_) {
       ListenForDevices();
-      HRESULT hr = microphone_->client->Start();
-      if (FAILED(hr)) {
-        SetLastErrorMessage(HResultMessage("microphone IAudioClient::Start", hr));
-        StopLocked();
-        return MREC_ERR_IOPROC_FAILED;
+      if (microphone_) {
+        HRESULT hr = microphone_->client->Start();
+        if (FAILED(hr)) {
+          SetLastErrorMessage(HResultMessage("microphone IAudioClient::Start", hr));
+          if (hr == E_ACCESSDENIED) {
+            StopLocked();
+            return MREC_ERR_PERMISSION;
+          }
+          microphone_.reset();
+        }
       }
+      if (!microphone_) mrec_track_interrupted(track_session_, MREC_TRACK_MICROPHONE, 0,
+          MREC_TRACK_REASON_DEVICE_REMOVED, "microphone unavailable at startup");
       microphone_worker_ = std::thread([this] { DrainMicrophone(); });
     }
     SetLastErrorMessage("no error");
@@ -847,7 +879,10 @@ private:
     uint64_t next_device_check = 0;
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {
-      if (!microphone_) break;
+      if (!microphone_) {
+        RecoverMicrophone(MREC_TRACK_REASON_DEVICE_REMOVED, "microphone unavailable");
+        continue;
+      }
       const uint64_t now = MonotonicTimeNs();
       /* A notification rechecks at once; the poll catches anything it misses. */
       if (now >= next_device_check || devices_changed_.exchange(false)) {
@@ -1036,6 +1071,9 @@ private:
 
   void RecoverMicrophone(mrec_track_reason reason, const std::string &detail) {
     if (microphone_ && microphone_->client) microphone_->client->Stop();
+    microphone_mixer_.Flush();
+    if (voice_) mrec_voice_reset_microphone(voice_.get());
+    microphone_mixer_.Reset(1, 1, microphone_callback_, microphone_user_data_);
     const std::string message = "microphone interrupted: " + detail;
     SetLastErrorMessage(message);
     Recovery recovery{this, 0};
@@ -1056,7 +1094,11 @@ private:
     workers_.clear();
     if (microphone_worker_.joinable()) microphone_worker_.join();
     system_mixer_.Flush();
-    if (microphone_) microphone_mixer_.Flush();
+    if (microphone_enabled_) microphone_mixer_.Flush();
+    if (voice_) {
+      mrec_voice_flush(voice_.get());
+      voice_.reset();
+    }
     for (auto &stream : streams_) {
       if (stream->client) stream->client->Stop();
     }
@@ -1098,6 +1140,7 @@ private:
   std::thread targets_worker_;
   TimelineMixer system_mixer_;
   TimelineMixer microphone_mixer_;
+  std::unique_ptr<mrec_voice_processor, decltype(&mrec_voice_destroy)> voice_{nullptr, mrec_voice_destroy};
   mrec_audio_callback callback_ = nullptr;
   void *user_data_ = nullptr;
   mrec_audio_callback microphone_callback_ = nullptr;

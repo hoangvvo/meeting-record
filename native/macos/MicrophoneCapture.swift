@@ -34,21 +34,30 @@ final class MicrophoneCapture {
             throw CaptureError.microphonePermission
         }
 
+        let liveTargets = Self.targetPIDs(source: source, pids: pids)
+        liveTargetPIDs = liveTargets
+        let resolver = MicrophoneDeviceResolver.system
+        guard let selected = resolver.resolve(source: source, pids: liveTargets()) else {
+            throw CaptureError.microphoneFailed("no microphone is available")
+        }
+        try startEngine(selected: selected, resolver: resolver, source: source, liveTargets: liveTargets)
+    }
+
+    static func targetPIDs(source: Int32, pids: [pid_t]) -> () -> [pid_t] {
         let targets = source == 2 ? pids : []
         let identities = Dictionary(uniqueKeysWithValues: targets.compactMap { pid in
             ProcessTree.identity(of: pid).map { (pid, $0) }
         })
-        let resolver = MicrophoneDeviceResolver.system
-        let liveTargets = {
+        return {
             targets.filter { pid in
                 guard let original = identities[pid] else { return false }
                 return ProcessTree.identity(of: pid) == original
             }
         }
-        liveTargetPIDs = liveTargets
-        guard let selected = resolver.resolve(source: source, pids: liveTargets()) else {
-            throw CaptureError.microphoneFailed("no microphone is available")
-        }
+    }
+
+    private func startEngine(selected: MicrophoneDevice, resolver: MicrophoneDeviceResolver,
+                             source: Int32, liveTargets: @escaping () -> [pid_t]) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         guard let unit = input.audioUnit else {

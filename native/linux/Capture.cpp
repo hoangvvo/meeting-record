@@ -2,6 +2,7 @@
 #include "Pulse.h"
 #include "TimelineMixer.h"
 #include "tracks.h"
+#include "voice-processing.h"
 
 #include <atomic>
 #include <chrono>
@@ -51,8 +52,8 @@ public:
       return Fail(MREC_ERR_ALREADY_RUNNING, "capture is already running");
     stop_ = false;
     if ((count && !pids) || (!count && !global) || !system_cb ||
-        microphone < MREC_MICROPHONE_NONE ||
-        microphone > MREC_MICROPHONE_AUTO || (microphone && !mic_cb))
+        !mrec_microphone_configuration_valid(microphone) ||
+        (mrec_microphone_source_value(microphone) != MREC_MICROPHONE_NONE && !mic_cb))
       return Fail(MREC_ERR_INTERNAL, "invalid capture configuration");
     roots_.clear();
     for (size_t i = 0; i < count; ++i) {
@@ -93,7 +94,7 @@ public:
       return Fail(MREC_ERR_DEVICE_FAILED, "no audio output is available");
     }
     channels_ = mono ? 1 : 2;
-    microphone_ = microphone;
+    microphone_ = mrec_microphone_source_value(microphone);
     terminal_exit_ = false;
     terminal_flushed_ = false;
     // Pulse servers can batch fragments from independent sinks. Keep 200ms of
@@ -101,13 +102,21 @@ public:
     // arrives.
     system_output_ = {system_cb, system_data};
     mic_output_ = {mic_cb, mic_data};
+    const int32_t processing = mrec_microphone_processing_value(microphone);
+    if (processing) {
+      voice_.reset(mrec_voice_create(processing, system_cb, system_data, mic_cb, mic_data));
+      if (!voice_) {
+        pulse_.reset();
+        return Fail(MREC_ERR_INTERNAL, "failed to initialize microphone processing");
+      }
+      // Match the system mixer's 200 ms alignment window before giving up on a reference.
+      mrec_voice_set_reference_wait(voice_.get(), 250);
+      system_output_ = {mrec_voice_system, voice_.get()};
+      mic_output_ = {mrec_voice_microphone, voice_.get()};
+    }
     system_.Reset(1, channels_, Publish, &system_output_,
                   20); // slot 0 drives idle silence
     mic_mixer_.Reset(1, 1, Publish, &mic_output_);
-    if (microphone && !FindMicrophone(snapshot)) {
-      pulse_.reset();
-      return Fail(MREC_ERR_DEVICE_FAILED, "no default microphone is available");
-    }
     track_session_ = mrec_tracks_open(event_cb, event_data);
     const auto sources = roots_.empty() ? 1 : roots_.size();
     mrec_track_started(track_session_, MREC_TRACK_SYSTEM_AUDIO, sources * 2,
@@ -123,9 +132,9 @@ public:
       return Fail(MREC_ERR_NO_PROCESSES,
                   "requested apps exited during capture startup");
     }
-    // Startup must report failure rather than silently recording only one
-    // track.
-    if ((microphone && !mic_) || monitors_.size() != wanted_) {
+    // A missing input recovers independently; permission errors still fail startup.
+    if ((microphone && !mic_ && pulse_->FailureStatus() == MREC_ERR_PERMISSION) ||
+        monitors_.size() != wanted_) {
       const auto error = pulse_->Error();
       const auto status = pulse_->FailureStatus();
       Cleanup();
@@ -157,6 +166,16 @@ public:
   bool HasMic() const { return microphone_ != 0; }
 
 private:
+  void ResetMicrophoneProcessing() {
+    if (!voice_)
+      return;
+    // The old producer has stopped. Deliver its native tail through the old
+    // adaptation before reopening a device with an empty mixer and fresh DSP.
+    mic_mixer_.Flush();
+    mrec_voice_reset_microphone(voice_.get());
+    mic_mixer_.Reset(1, 1, Publish, &mic_output_);
+  }
+
   bool RootAlive(const Process &root) const {
     const auto current = ReadProcess(root.pid);
     return current.pid && current.birth == root.birth;
@@ -380,7 +399,10 @@ private:
       }
       if (!source || !mic_ || mic_->name != source->name ||
           pa_stream_get_state(mic_->stream) != PA_STREAM_READY) {
+        const bool had_microphone = bool(mic_);
         mic_.reset();
+        if (had_microphone)
+          ResetMicrophoneProcessing();
         if (source)
           mic_ = Attach(source->name, PA_INVALID_INDEX, source->index, 0, true);
         if (mic_) {
@@ -398,7 +420,10 @@ private:
     while (!stop_) {
       if (!pulse_->Good()) {
         monitors_.clear();
+        const bool had_microphone = bool(mic_);
         mic_.reset();
+        if (had_microphone)
+          ResetMicrophoneProcessing();
         mrec_track_interrupted(
             track_session_, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_WHOLE,
             MREC_TRACK_REASON_SERVICE_RESET, "audio server disconnected");
@@ -465,6 +490,11 @@ private:
     mic_.reset();
     system_.Flush();
     mic_mixer_.Flush();
+    if (voice_)
+      mrec_voice_flush(voice_.get());
+    voice_.reset();
+    system_output_ = {};
+    mic_output_ = {};
     pulse_.reset();
     mrec_tracks_close();
   }
@@ -477,6 +507,8 @@ private:
   std::map<uint32_t, std::unique_ptr<Monitor>> monitors_;
   std::unique_ptr<Monitor> mic_;
   meeting_record::TimelineMixer system_, mic_mixer_;
+  std::unique_ptr<mrec_voice_processor, decltype(&mrec_voice_destroy)> voice_{
+      nullptr, mrec_voice_destroy};
   uint32_t channels_ = 1;
   int microphone_ = 0;
   bool terminal_exit_ = false;

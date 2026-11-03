@@ -19,6 +19,7 @@ import {
   type Meeting,
   type MeetingEvent,
   type MixedAudio,
+  type MicrophoneProcessing,
 } from "meeting-record";
 
 declare function expectType<Type>(value: Type): void;
@@ -33,6 +34,13 @@ expectType<Platform>(Platform.Zoom);
 expectType<Permission>(Permission.SystemAudio);
 expectType<PermissionStatus>(PermissionStatus.Granted);
 expectType<MicrophoneSource>(MicrophoneSource.Auto);
+expectType<MicrophoneProcessing>({
+  echoCancellation: true,
+  noiseSuppression: false,
+  autoGainControl: true,
+});
+// @ts-expect-error Effect settings are boolean flags.
+expectType<MicrophoneProcessing>({ noiseSuppression: "yes" });
 expectType<CaptureState>(CaptureState.Recording);
 expectType<TrackAvailability>(TrackAvailability.Live);
 expectType<TrackInterruptionReason>(TrackInterruptionReason.DeviceRemoved);

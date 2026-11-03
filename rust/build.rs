@@ -213,8 +213,35 @@ fn build_linux(native: &Path) {
     println!("cargo:rustc-link-lib=pthread");
 }
 
-/// Meeting classification and source recovery shared by both backends.
+/// Shared capture state, classification, and audio processing.
 fn build_common(native: &Path) {
+    for source in ["include/meeting-record-mix.h", "common/pcm-mixer.cpp"] {
+        println!("cargo:rerun-if-changed={}", native.join(source).display());
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        native.join("include/meeting-record-processing.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native.join("common/voice-processing.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native.join("common/voice-processing.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native.join("third_party/speexdsp").display()
+    );
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        .include(native.join("third_party/speexdsp"))
+        .include(native.join("third_party/speexdsp/include"))
+        .file(native.join("common/voice-processing.cpp"))
+        .file(native.join("common/pcm-mixer.cpp"))
+        .compile("meetingrecord_dsp");
     for source in [
         "common/meeting-catalog.h",
         "common/meeting-catalog.c",
@@ -223,9 +250,24 @@ fn build_common(native: &Path) {
     ] {
         println!("cargo:rerun-if-changed={}", native.join(source).display());
     }
-    cc::Build::new()
+    let mut common = cc::Build::new();
+    common
+        .std("c11")
         .include(native.join("include"))
+        .include(native.join("third_party/speexdsp"))
+        .include(native.join("third_party/speexdsp/include"))
+        .define("HAVE_CONFIG_H", None)
         .file(native.join("common/meeting-catalog.c"))
-        .file(native.join("common/tracks.c"))
-        .compile("meetingrecord_common");
+        .file(native.join("common/tracks.c"));
+    for source in [
+        "mdf",
+        "preprocess",
+        "filterbank",
+        "fftwrap",
+        "kiss_fft",
+        "kiss_fftr",
+    ] {
+        common.file(native.join(format!("third_party/speexdsp/libspeexdsp/{source}.c")));
+    }
+    common.compile("meetingrecord_common");
 }

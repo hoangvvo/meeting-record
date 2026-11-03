@@ -731,12 +731,30 @@ pub enum MicrophoneSource {
     Auto,
 }
 
+/// Optional microphone effects. Echo cancellation references captured system audio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MicrophoneProcessing {
+    pub echo_cancellation: bool,
+    pub noise_suppression: bool,
+    pub auto_gain_control: bool,
+}
+
+impl MicrophoneProcessing {
+    fn flags(self) -> i32 {
+        (if self.echo_cancellation { 0x100 } else { 0 })
+            | (if self.noise_suppression { 0x200 } else { 0 })
+            | (if self.auto_gain_control { 0x400 } else { 0 })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureOptions {
     /// Mono mixdown for system audio only. The microphone keeps its format. Defaults to true.
     pub mono: bool,
     /// Optional microphone track. Defaults to none.
     pub microphone: Option<MicrophoneSource>,
+    /// Microphone effects, all off by default. Requires a microphone source.
+    pub microphone_processing: MicrophoneProcessing,
     /// Additional timestamp-aligned mono s16le output.
     pub mix: Option<MixedAudioOptions>,
     /// Cancellation stops capture, including a pending start.
@@ -748,6 +766,7 @@ impl Default for CaptureOptions {
         Self {
             mono: true,
             microphone: None,
+            microphone_processing: MicrophoneProcessing::default(),
             mix: None,
             cancellation: None,
         }
@@ -1214,7 +1233,7 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
-    /// Initial negotiated rate. A recovered device may change it; each
+    /// Initial negotiated rate, or zero while the microphone is unavailable. A recovered device may change it; each
     /// [`AudioChunk::sample_rate`] is authoritative.
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
@@ -1448,6 +1467,12 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
             "mix sample rate must be non-zero".to_owned(),
         ));
     }
+    let processing = options.microphone_processing.flags();
+    if processing != 0 && options.microphone.is_none() {
+        return Err(Error::Capture(
+            "microphone processing requires a microphone source".to_owned(),
+        ));
+    }
     if unsafe { sys::mrec_is_running() } != 0 {
         return Err(Error::AlreadyRunning);
     }
@@ -1534,11 +1559,12 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
                 system_wide as i32,
                 options.mono as i32,
                 0,
-                match options.microphone {
-                    Some(MicrophoneSource::Default) => 1,
-                    Some(MicrophoneSource::Auto) => 2,
-                    None => 0,
-                },
+                processing
+                    | match options.microphone {
+                        Some(MicrophoneSource::Default) => 1,
+                        Some(MicrophoneSource::Auto) => 2,
+                        None => 0,
+                    },
                 Some(audio_trampoline),
                 system_context,
                 options
@@ -2456,6 +2482,32 @@ mod capture_tests {
                 CaptureOptions {
                     mix: Some(MixedAudioOptions { sample_rate: 0 }),
                     ..CaptureOptions::default()
+                }
+            ),
+            Err(Error::Capture(_))
+        ));
+    }
+
+    #[test]
+    fn microphone_effects_are_independent_and_require_a_microphone() {
+        use super::{capture, CaptureOptions, CaptureTarget, Error, MicrophoneProcessing};
+        for mask in 0..8 {
+            let settings = MicrophoneProcessing {
+                echo_cancellation: mask & 1 != 0,
+                noise_suppression: mask & 2 != 0,
+                auto_gain_control: mask & 4 != 0,
+            };
+            assert_eq!(settings.flags(), mask << 8);
+        }
+        assert!(matches!(
+            capture::start(
+                CaptureTarget::System,
+                CaptureOptions {
+                    microphone_processing: MicrophoneProcessing {
+                        echo_cancellation: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
                 }
             ),
             Err(Error::Capture(_))

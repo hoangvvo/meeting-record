@@ -44,6 +44,11 @@ pub type TrackEventCallback =
     unsafe extern "C" fn(event: *const TrackEvent, user_data: *mut c_void);
 
 #[repr(C)]
+pub struct PcmMixer {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TrackEvent {
     pub track: i32,
@@ -82,6 +87,26 @@ pub struct Meeting {
 }
 
 extern "C" {
+    pub fn mrec_pcm_mixer_create(sample_rate: u32, source_count: u32) -> *mut PcmMixer;
+    pub fn mrec_pcm_mixer_destroy(mixer: *mut PcmMixer);
+    pub fn mrec_pcm_mixer_write(
+        mixer: *mut PcmMixer,
+        source: u32,
+        samples: *const f32,
+        frames: u32,
+        channels: u32,
+        sample_rate: f64,
+        host_time_ns: u64,
+    ) -> i32;
+    pub fn mrec_pcm_mixer_set_muted(mixer: *mut PcmMixer, source: u32, muted: i32) -> i32;
+    pub fn mrec_pcm_mixer_finish_segment(mixer: *mut PcmMixer) -> i32;
+    pub fn mrec_pcm_mixer_restart(mixer: *mut PcmMixer) -> i32;
+    pub fn mrec_pcm_mixer_read(
+        mixer: *mut PcmMixer,
+        pcm: *mut *const u8,
+        bytes: *mut usize,
+        level: *mut f32,
+    ) -> i32;
     pub fn mrec_audio_permission_status() -> c_int;
     pub fn mrec_request_audio_permission() -> c_int;
     pub fn mrec_microphone_permission_status() -> c_int;

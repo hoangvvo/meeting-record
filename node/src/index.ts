@@ -5,7 +5,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { MixedAudioImpl, type MixedAudio, type MixedAudioOptions } from "./mixed-audio.js";
+import {
+  MixedAudioImpl,
+  type MixedAudio,
+  type MixedAudioOptions,
+  type NativePcmMixer,
+} from "./mixed-audio.js";
 import type { EmitterEvents, ReadableEvents, TypedReadable } from "./typed-readable.js";
 export type { MixedAudio, MixedAudioEvents, MixedAudioOptions } from "./mixed-audio.js";
 
@@ -115,11 +120,20 @@ export const MicrophoneSource = {
 } as const;
 export type MicrophoneSource = (typeof MicrophoneSource)[keyof typeof MicrophoneSource];
 
+export interface MicrophoneProcessing {
+  /** Cancel echo using the captured system track as the playback reference. */
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+}
+
 export interface CaptureOptions {
   /** Mono mixdown for system audio only; the microphone keeps its format. Default true. */
   mono?: boolean;
   /** Capture a microphone as a separate track. Default off. */
   microphone?: MicrophoneSource;
+  /** Optional microphone effects. All default off; requires microphone. */
+  microphoneProcessing?: MicrophoneProcessing;
   /** Additional mono s16le output, aligned and resampled to the requested rate. */
   mix?: MixedAudioOptions;
   /** Aborting stops capture, including a pending start. */
@@ -148,6 +162,7 @@ interface NativeFormat {
   deviceName?: string;
 }
 interface NativeBinding {
+  PcmMixer: new (sampleRate: number, sourceCount: number) => NativePcmMixer;
   audioPermissionStatus(): PermissionStatus;
   microphonePermissionStatus(): PermissionStatus;
   accessibilityPermissionStatus(): PermissionStatus;
@@ -357,6 +372,7 @@ export type TrackInterruptionReason =
   (typeof TrackInterruptionReason)[keyof typeof TrackInterruptionReason];
 
 export interface AudioFormat {
+  /** May be zero while the requested microphone has no available device. */
   readonly sampleRate: number;
   readonly channels: number;
 }
@@ -558,7 +574,14 @@ class CaptureSessionImpl implements CaptureSession {
     this.#microphone = microphone;
     this.#signal = signal;
     signal?.addEventListener("abort", this.#onAbort, { once: true });
-    this.mixedAudio = mix ? new MixedAudioImpl(mix.sampleRate, systemAudio, microphone) : undefined;
+    this.mixedAudio = mix
+      ? new MixedAudioImpl(
+          mix.sampleRate,
+          systemAudio,
+          microphone,
+          new (getNative().PcmMixer)(mix.sampleRate, microphone ? 2 : 1),
+        )
+      : undefined;
   }
 
   get systemAudio(): AudioTrackImpl {
@@ -667,6 +690,23 @@ async function startCapture(
   ) {
     throw new TypeError("mix sampleRate must be a positive integer");
   }
+  let processing = 0;
+  if (options.microphoneProcessing !== undefined) {
+    const settings = options.microphoneProcessing;
+    if (!settings || typeof settings !== "object")
+      throw new TypeError("microphoneProcessing must be an object");
+    for (const [key, bit] of [
+      ["echoCancellation", 0x100],
+      ["noiseSuppression", 0x200],
+      ["autoGainControl", 0x400],
+    ] as const) {
+      if (settings[key] !== undefined && typeof settings[key] !== "boolean")
+        throw new TypeError(`${key} must be a boolean`);
+      if (settings[key]) processing |= bit;
+    }
+    if (processing && !options.microphone)
+      throw new TypeError("microphoneProcessing requires microphone");
+  }
 
   const native = getNative();
   if (captureStarting || native.isRunning()) {
@@ -713,11 +753,12 @@ async function startCapture(
         ...nativeTarget,
         mono: options.mono ?? true,
         microphone:
-          options.microphone === MicrophoneSource.Auto
+          processing |
+          (options.microphone === MicrophoneSource.Auto
             ? 2
             : options.microphone === MicrophoneSource.Default
               ? 1
-              : 0,
+              : 0),
       },
       onSystemAudio,
       onMicrophone,

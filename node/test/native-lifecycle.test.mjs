@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test, { before, after, beforeEach, afterEach } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -52,19 +52,29 @@ before(async () => {
       targets: [
         {
           target_name: "meeting_record_test",
-          sources: ["binding.cc", "native-backend.cc", "meeting-catalog.c"],
+          sources: [
+            "binding.cc",
+            "native-backend.cc",
+            "meeting-catalog.c",
+            relative(directory, join(root, "native/common/pcm-mixer.cpp")).replaceAll("\\", "/"),
+          ],
           include_dirs: [
             dirname(require.resolve("node-addon-api")),
             join(root, "native/include"),
             join(root, "native/common"),
+            join(root, "node/src/native"),
           ],
           defines: ["NAPI_DISABLE_CPP_EXCEPTIONS", "NAPI_VERSION=8"],
           cflags_cc: ["-std=c++17"],
+          "cflags_cc!": ["-fno-exceptions"],
           xcode_settings: {
             CLANG_CXX_LANGUAGE_STANDARD: "c++17",
             MACOSX_DEPLOYMENT_TARGET: "14.2",
+            GCC_ENABLE_CPP_EXCEPTIONS: "YES",
           },
-          msvs_settings: { VCCLCompilerTool: { AdditionalOptions: ["/std:c++17"] } },
+          msvs_settings: {
+            VCCLCompilerTool: { ExceptionHandling: 1, AdditionalOptions: ["/std:c++17"] },
+          },
         },
       ],
     }),
@@ -120,6 +130,33 @@ test("domain constants configure capture and match native permission and track s
     await recording.stopRecording();
   }
   assert.equal(recording.state, api.CaptureState.Stopped);
+});
+
+test("microphone effects are opt-in and encode independently", async () => {
+  for (let mask = 0; mask < 8; mask++) {
+    native.testConfigure({ initialPackets: 0, tailPackets: 0 });
+    const recording = await start(undefined, {
+      microphone: api.MicrophoneSource.Auto,
+      microphoneProcessing: {
+        echoCancellation: !!(mask & 1),
+        noiseSuppression: !!(mask & 2),
+        autoGainControl: !!(mask & 4),
+      },
+    });
+    assert.equal(native.testStats().microphoneSource, 2 | (mask << 8));
+    await recording.stopRecording();
+  }
+  await assert.rejects(
+    api.capture.start({ type: "system" }, { microphoneProcessing: { echoCancellation: true } }),
+    TypeError,
+  );
+  await assert.rejects(
+    api.capture.start(
+      { type: "system" },
+      { microphone: api.MicrophoneSource.Auto, microphoneProcessing: { noiseSuppression: "yes" } },
+    ),
+    TypeError,
+  );
 });
 
 test("standard async iteration retains packet metadata and the native stop tail", async () => {
@@ -486,6 +523,33 @@ test("an interruption during initialization remains visible after start", async 
   assert.equal(recording.microphone.availability, api.TrackAvailability.Live);
   assert.equal(recording.state, api.CaptureState.Recording);
   assert.equal(api.capture.running, true);
+});
+
+test("an initially unavailable microphone retains system capture and accepts its first format", async () => {
+  native.testConfigure({
+    initialPackets: 0,
+    tailPackets: 0,
+    initialEventType: 0,
+    initialEventTrack: 1,
+    microphoneRate: 0,
+  });
+  const recording = await start(undefined, { microphone: api.MicrophoneSource.Auto });
+  await until(() => recording.microphone.interrupted);
+  assert.equal(recording.microphone.sampleRate, 0);
+  assert.equal(recording.systemAudio.availability, api.TrackAvailability.Live);
+  const system = [];
+  const microphone = [];
+  recording.systemAudio.on("data", (packet) => system.push(packet));
+  recording.microphone.on("data", (packet) => microphone.push(packet));
+  native.testAudio({ track: "systemAudio" });
+  await until(() => system.length === 1);
+  native.testEvent({ track: "microphone", type: 2, deviceName: "Connected headset" });
+  native.testEvent({ track: "microphone", type: 1 });
+  native.testAudio({ track: "microphone", sampleRate: 48000, channels: 1 });
+  await until(() => microphone.length === 1 && !recording.microphone.interrupted);
+  assert.equal(recording.microphone.sampleRate, 48000);
+  assert.equal(recording.microphone.deviceName, "Connected headset");
+  assert.equal(native.testStats().starts, 1);
 });
 
 test("startup source events reach listeners attached after awaiting start, in order", async () => {

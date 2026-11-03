@@ -73,17 +73,34 @@ with tempfile.TemporaryDirectory(prefix="mrec-recovery-") as runtime:
         assert start(0) == -7
         assert lib.mrec_is_running() == 0
         process = server(False)
-        assert start(1) == -7, "missing microphone must fail startup"
-        assert lib.mrec_is_running() == 0
+        assert start(1) == 0, "missing microphone must retain system capture"
+        until(lambda: frames[0] > 4800 and (1, 0, 1) in events,
+              "system capture and microphone interruption at startup")
+        assert frames[1] == 0
+        assert lib.mrec_stop() == 0
+        stopped = (list(frames), list(events))
+        time.sleep(0.2)
+        assert stopped == (frames, events), "callback arrived after stopping microphone recovery"
+        assert start(1) == 0
+        events.clear()
+        subprocess.run(["pactl", "load-module", "module-remap-source",
+                        "master=mrec_output.monitor", "source_name=mrec_input"], check=True,
+                       stdout=subprocess.DEVNULL)
+        subprocess.run(["pactl", "set-default-source", "mrec_input"], check=True)
+        until(lambda: frames[1] > 4800 and (1, 1, 0) in events,
+              "initially missing microphone resumes after connection")
+        assert lib.mrec_stop() == 0
         for _ in range(3):
+            previous = frames[0]
             assert start(0) == 0, "failed startup retained the singleton"
-            until(lambda: frames[0] > 0, "idle system silence")
+            until(lambda: frames[0] > previous, "idle system silence")
             assert lib.mrec_stop() == 0
         process.terminate()
         process.wait(timeout=5)
         process = server(True)
+        previous = frames[1]
         assert start(1) == 0
-        until(lambda: frames[1] > 4800, "initial microphone capture")
+        until(lambda: frames[1] > previous + 4800, "initial microphone capture")
         events.clear()
         process.terminate()
         process.wait(timeout=5)

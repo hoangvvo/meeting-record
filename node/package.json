@@ -15,6 +15,7 @@
   },
   "files": [
     "dist",
+    "THIRD_PARTY_NOTICES",
     "prebuilds"
   ],
   "type": "module",

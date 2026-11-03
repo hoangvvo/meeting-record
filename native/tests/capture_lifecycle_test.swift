@@ -79,6 +79,8 @@ private func run(_ body: () -> Void) {
 @main struct CaptureLifecycleTests {
     static func main() {
         startupFailures()
+        unavailableMicrophoneAtStartup()
+        optionalMicrophoneProcessing()
         independentTracks()
         systemRecovery()
         microphoneRecovery()
@@ -142,7 +144,6 @@ private func run(_ body: () -> Void) {
             (-2, { TestSources.preparationTimesOut = true }),
             (-6, { TestSources.tapPrepareFailures = 1 }),
             (-8, { TestSources.tapStartFailures = 1 }),
-            (-7, { TestSources.microphoneStartFailures = 1 }),
         ]
         for (status, fault) in faults {
             run {
@@ -166,6 +167,70 @@ private func run(_ body: () -> Void) {
                 precondition(mrec_stop() == -4)
                 precondition(start(microphone: 0) == 0)
                 precondition(mrec_current_microphone_format(nil, nil) == -4)
+            }
+        }
+    }
+
+    static func unavailableMicrophoneAtStartup() {
+        run {
+            TestSources.read { TestSources.microphoneAvailable = false }
+            precondition(start(pids: [123], microphone: 2) == 0)
+            precondition(mrec_is_running() == 1)
+            precondition(format(microphone: true).0 == 0)
+            precondition(events(MREC_TRACK_MICROPHONE).map(\.type) == [MREC_TRACK_INTERRUPTED])
+            let tap = TestSources.read { TestSources.tap! }
+            tap.emit()
+            precondition(TestSources.read { !TestSources.systemPackets.isEmpty })
+            waitUntil("initial microphone did not retry") {
+                TestSources.read { TestSources.microphoneAttempts >= 2 }
+            }
+            TestSources.read {
+                TestSources.microphoneAvailable = true
+                TestSources.microphoneName = "Connected headset"
+            }
+            TestSources.deviceChanged(kAudioHardwarePropertyDefaultInputDevice)
+            waitUntil("initially missing microphone did not recover") {
+                events(MREC_TRACK_MICROPHONE).contains { $0.type == MREC_TRACK_RESUMED }
+            }
+            precondition(name() == "Connected headset")
+            precondition(format(microphone: true).0 > 0)
+            precondition(TestSources.read { TestSources.tap?.identifier == tap.identifier })
+            precondition(TestSources.read { TestSources.microphones[TestSources.microphone!.identifier]?.pids == [123] })
+        }
+        run {
+            TestSources.read { TestSources.microphoneStartFailures = 1 }
+            precondition(start() == 0)
+            waitUntil("transient microphone startup failure did not recover") {
+                events(MREC_TRACK_MICROPHONE).contains { $0.type == MREC_TRACK_RESUMED }
+            }
+        }
+        run {
+            TestSources.read { TestSources.microphoneAvailable = false }
+            precondition(start() == 0)
+            waitUntil("missing microphone worker did not start") {
+                TestSources.read { TestSources.microphoneAttempts >= 2 }
+            }
+            precondition(mrec_stop() == 0)
+            TestSources.read { TestSources.microphoneAvailable = true }
+            assertStable { TestSources.read { TestSources.microphoneAttempts } }
+            precondition(TestSources.read { TestSources.microphone == nil })
+        }
+    }
+
+    static func optionalMicrophoneProcessing() {
+        run {
+            precondition(start(microphone: 0x100) == -9)
+            precondition(start(microphone: 0x801) == -9)
+        }
+        for flags: Int32 in stride(from: 0x100, through: 0x700, by: 0x100) {
+            run {
+                precondition(start(microphone: 1 | flags) == 0)
+                let sources = TestSources.read { (TestSources.tap!, TestSources.microphone!) }
+                sources.0.emit()
+                sources.1.emit()
+                precondition(mrec_stop() == 0)
+                precondition(TestSources.read { TestSources.systemPackets.reduce(0) { $0 + $1.frames } == 2 })
+                precondition(TestSources.read { TestSources.microphonePackets.reduce(0) { $0 + $1.frames } == 2 })
             }
         }
     }

@@ -140,12 +140,17 @@ int32_t mrec_start_raw(const uint32_t *pids, size_t pid_count,
  * microphone, else the default (communications default on Windows). On macOS,
  * AUTO uses the default when the app's input is unavailable or ambiguous.
  * Both policies follow device changes.
+ * If the requested microphone is unavailable, system capture starts and the mic
+ * track reports INTERRUPTED until it recovers. Permission errors fail startup.
  */
 typedef enum {
   MREC_MICROPHONE_NONE = 0,
   MREC_MICROPHONE_DEFAULT = 1,
   MREC_MICROPHONE_AUTO = 2,
 } mrec_microphone_source;
+
+#include "meeting-record-processing.h"
+#include "meeting-record-mix.h"
 
 /*
  * Extended entry point used by the Rust and Node bindings. System audio and the
@@ -186,7 +191,9 @@ int32_t mrec_is_running(void);
 /* The microphone in use, which may change mid-session; NOT_RUNNING without one. */
 mrec_status mrec_current_microphone_name(char *name, size_t capacity);
 
-/* Initial negotiated format, valid once running. A recovery may renegotiate it. */
+/* Initial negotiated format, valid once running. A recovery may renegotiate it.
+ * An unavailable microphone may report sample_rate = 0 until its first device.
+ * Each audio callback carries the authoritative format. */
 mrec_status mrec_current_format(double *sample_rate, uint32_t *channels);
 mrec_status mrec_current_microphone_format(double *sample_rate,
                                                uint32_t *channels);

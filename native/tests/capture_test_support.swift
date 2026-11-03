@@ -254,6 +254,16 @@ final class MicrophoneCapture {
 
     deinit { stop() }
 
+    static func targetPIDs(source: Int32, pids: [pid_t]) -> () -> [pid_t] {
+        let lifetimes = TestSources.read { TestSources.processLifetimes }
+        return {
+            TestSources.read {
+                source == 2 ? pids.filter { TestSources.alive.contains($0)
+                    && lifetimes[$0] == TestSources.processLifetimes[$0] } : []
+            }
+        }
+    }
+
     func start(source: Int32, pids: [pid_t]) throws {
         let rate = try TestSources.read {
             let lifetimes = TestSources.processLifetimes
@@ -339,6 +349,7 @@ enum Permissions {
 }
 
 enum CaptureError: Error {
+    case microphoneFailed(String)
     case noProcesses
     case tapUnavailable
     case startFailed
@@ -349,6 +360,7 @@ enum CaptureError: Error {
         case .tapUnavailable: return "system audio unavailable"
         case .startFailed: return "system audio start failed"
         case .microphoneUnavailable: return "microphone unavailable"
+        case .microphoneFailed(let message): return message
         }
     }
     var status: Int32 {
@@ -357,6 +369,7 @@ enum CaptureError: Error {
         case .tapUnavailable: return -6
         case .startFailed: return -8
         case .microphoneUnavailable: return -7
+        case .microphoneFailed: return -7
         }
     }
 }

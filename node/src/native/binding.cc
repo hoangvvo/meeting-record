@@ -1,5 +1,6 @@
 /* Audio callbacks write to bounded rings; the JS thread drains them into packets. */
 #include <napi.h>
+#include "pcm-mixer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -738,6 +739,7 @@ Napi::Value ListAudioApps(const Napi::CallbackInfo &info) {
 } // namespace
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
+  NativePcmMixer::Register(env, exports);
   exports.Set("audioPermissionStatus", Napi::Function::New(env, AudioPermissionStatus));
   exports.Set("requestAudioPermission", Napi::Function::New(env, RequestAudioPermission));
   exports.Set("microphonePermissionStatus",
