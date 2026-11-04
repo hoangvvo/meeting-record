@@ -62,6 +62,7 @@ try {
   Test-Native audio_app_process_test @("$root/native/tests/audio_app_process_test.cpp") -Cxx
   Test-Native timeline_mixer_test @("$root/native/tests/timeline_mixer_test.cpp") -Cxx
   Test-Native capture_roots_test @("$root/native/tests/capture_roots_test.cpp") -Cxx
+  Test-Native windows_capture_policy_test @("$root/native/tests/windows_capture_policy_test.cpp", "meeting-catalog.obj") -Cxx
   Test-Native audio_session_notifications_test @(
     "$root/native/tests/audio_session_notifications_test.cpp", "ole32.lib", "avrt.lib"
   ) -Cxx

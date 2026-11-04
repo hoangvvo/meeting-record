@@ -118,7 +118,10 @@ typedef struct {
 
   /*
    * Capture all application output except the recorder's process tree.
-   * Ignored when pid_count > 0.
+   * MREC_CAPTURE_SYSTEM selects this scope. OR with
+   * MREC_CAPTURE_ALLOW_SYSTEM_FALLBACK to permit Windows endpoint capture,
+   * which includes the recorder and follows output volume/mute.
+   * The SYSTEM bit is ignored when pid_count > 0; the fallback bit still applies.
    */
   int32_t global_mixdown;
 

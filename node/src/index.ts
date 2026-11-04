@@ -108,7 +108,7 @@ export type CaptureTarget =
       pid: number;
     }
   | {
-      /** All application output except the recorder's process tree. */
+      /** All application output. */
       type: "system";
     };
 
@@ -131,6 +131,11 @@ export interface MicrophoneProcessing {
 }
 
 export interface CaptureOptions {
+  /** Windows: allow whole-output capture for known process-loopback incompatibilities.
+   * With a system target, capture output devices directly. Default true.
+   * Includes other apps and recorder playback; volume/mute may affect audio.
+   * Inspect captureInfo and capturechange. Other platforms keep their normal path. */
+  allowSystemAudioFallback?: boolean;
   /** Mono mixdown for system audio only; the microphone keeps its format. Default true. */
   mono?: boolean;
   /** Capture a separate microphone track. Default off; unavailable devices recover while system capture continues. */
@@ -187,11 +192,21 @@ interface NativeBinding {
   isWatching(): boolean;
   isRunning(): boolean;
   captureStart(
-    options: { pid?: number; systemWide?: true; mono: boolean; microphone: number },
+    options: {
+      pid?: number;
+      systemWide?: true;
+      mono: boolean;
+      microphone: number;
+      allowSystemAudioFallback?: boolean;
+    },
     systemAudio: (pcm: Buffer, info: NativeAudioInfo) => void,
     microphone: (pcm: Buffer, info: NativeAudioInfo) => void,
     event: (event: NativeTrackEvent) => void,
-  ): Promise<{ systemAudio: NativeFormat; microphone?: NativeFormat }>;
+  ): Promise<{
+    systemAudio: NativeFormat;
+    microphone?: NativeFormat;
+    captureInfo?: CaptureInfo;
+  }>;
   captureStop(): Promise<void>;
   capturePause(): void;
   captureResume(): void;
@@ -432,6 +447,8 @@ export const TrackAvailability = {
 export type TrackAvailability = (typeof TrackAvailability)[keyof typeof TrackAvailability];
 
 export interface AudioTrackEvents extends ReadableEvents<AudioChunk> {
+  /** Initial capture scope/capabilities and subsequent changes. System track only. */
+  capturechange: (info: CaptureInfo) => void;
   drop: (droppedSamples: number) => void;
   /** Emitted before the first chunk in a newly negotiated device format. */
   format: (format: AudioFormat) => void;
@@ -446,6 +463,8 @@ export interface AudioTrackEvents extends ReadableEvents<AudioChunk> {
 
 /** Interleaved float32 PCM. Slow consumers lose samples, reported by `drop`. */
 export interface AudioTrack extends TypedReadable<AudioTrackEvents> {
+  /** Actual playback capture scope/capabilities. Present on systemAudio after start; absent on microphone. */
+  readonly captureInfo?: CaptureInfo;
   readonly availability: TrackAvailability;
   [Symbol.asyncIterator](): NodeJS.AsyncIterator<AudioChunk>;
   /** Current negotiated format; a `format` event announces changes. */
@@ -457,6 +476,36 @@ export interface AudioTrack extends TypedReadable<AudioTrackEvents> {
   readonly interrupted: boolean;
   /** The microphone in use; undefined for system audio. */
   readonly deviceName?: string;
+}
+
+/** Actual capture scope and capabilities, reported by the native backend. */
+export interface CaptureInfo {
+  /** Target requested by the caller. Process targets include their PID. */
+  readonly requestedTarget: Readonly<CaptureTarget>;
+  /** Target actually recorded; system-wide only when fallback is permitted or requested. */
+  readonly actualTarget: Readonly<CaptureTarget>;
+  /** Present when a permitted alternative capture path was selected. */
+  readonly fallback?: CaptureFallback;
+  /** Output-device volume/mute may affect samples, depending on the capture path
+   * and driver. Does not report the current volume or mute state. */
+  readonly volumeDependent: boolean;
+  /** Whether playback from this recorder and its child processes is included. */
+  readonly includesRecorderAudio: boolean;
+}
+
+/** Why the backend selected a fallback path, independently of recording state. */
+export interface CaptureFallback {
+  /** A known source cannot be captured reliably with process isolation. */
+  readonly reason: "process-capture-incompatible";
+  /** Native compatibility catalog identity that triggered fallback, if known. */
+  readonly appId?: string;
+}
+
+function captureSnapshot(info: CaptureInfo): CaptureInfo {
+  Object.freeze(info.requestedTarget);
+  Object.freeze(info.actualTarget);
+  if (info.fallback) Object.freeze(info.fallback);
+  return Object.freeze(info);
 }
 
 /** A lost source interrupts its track; the session records until stopped. */
@@ -492,13 +541,21 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   #finished = false;
   #availability: TrackAvailability = TrackAvailability.Live;
   #deviceName?: string;
+  #captureInfo?: CaptureInfo;
 
-  constructor(sampleRate: number, channels: number, microphone: boolean, deviceName?: string) {
+  constructor(
+    sampleRate: number,
+    channels: number,
+    microphone: boolean,
+    deviceName?: string,
+    captureInfo?: CaptureInfo,
+  ) {
     super({ objectMode: true, highWaterMark: 32 });
     this.#sampleRate = sampleRate;
     this.#channels = channels;
     this.#microphone = microphone;
     this.#deviceName = deviceName;
+    this.#captureInfo = captureInfo && captureSnapshot(captureInfo);
   }
 
   /** Required by Readable; data arrives from the native side, not on demand. */
@@ -521,6 +578,10 @@ class AudioTrackImpl extends Readable implements AudioTrack {
 
   get sampleRate(): number {
     return this.#sampleRate;
+  }
+
+  get captureInfo(): CaptureInfo | undefined {
+    return this.#captureInfo;
   }
 
   get channels(): number {
@@ -574,7 +635,12 @@ class AudioTrackImpl extends Readable implements AudioTrack {
 
   pushEvent(event: NativeTrackEvent): void {
     if (this.#finished) return;
-    if (event.type === "interrupted") {
+    if (event.type === "capturechange") {
+      if (event.captureInfo && !this.#microphone) {
+        this.#captureInfo = captureSnapshot(event.captureInfo);
+        this.emit("capturechange", this.#captureInfo);
+      }
+    } else if (event.type === "interrupted") {
       this.#availability = TrackAvailability.Interrupted;
       this.emit("interrupted", event.reason, event.message);
     } else if (event.type === "resumed") {
@@ -625,6 +691,11 @@ class CaptureSessionImpl implements CaptureSession {
           new (getNative().PcmMixer)(mix.sampleRate, microphone ? 2 : 1),
         )
       : undefined;
+  }
+
+  pushEvent(event: NativeTrackEvent): void {
+    if (this.#state === CaptureState.Stopped) return;
+    this[event.track]?.pushEvent(event);
   }
 
   get systemAudio(): AudioTrackImpl {
@@ -689,7 +760,8 @@ interface NativeAudioInfo {
 
 interface NativeTrackEvent {
   track: "systemAudio" | "microphone";
-  type: "interrupted" | "resumed" | "devicechange" | "degraded";
+  type: "interrupted" | "resumed" | "devicechange" | "degraded" | "capturechange";
+  captureInfo?: CaptureInfo;
   reason: TrackInterruptionReason;
   deviceName: string;
   message: string;
@@ -771,6 +843,12 @@ async function startCapture(
   }
 
   const native = getNative();
+  if (
+    options.allowSystemAudioFallback !== undefined &&
+    typeof options.allowSystemAudioFallback !== "boolean"
+  ) {
+    throw new TypeError("allowSystemAudioFallback must be a boolean");
+  }
   if (captureStarting || native.isRunning()) {
     throw new AlreadyRunningError("capture already running", -3);
   }
@@ -806,13 +884,14 @@ async function startCapture(
       pendingEvents.push(event);
       return;
     }
-    session[event.track]?.pushEvent(event);
+    session.pushEvent(event);
   };
 
   try {
     const formats = await native.captureStart(
       {
         ...nativeTarget,
+        allowSystemAudioFallback: options.allowSystemAudioFallback ?? true,
         mono: options.mono ?? true,
         microphone:
           processing |
@@ -834,6 +913,8 @@ async function startCapture(
       formats.systemAudio.sampleRate,
       formats.systemAudio.channels,
       false,
+      undefined,
+      formats.captureInfo,
     );
     const microphone = formats.microphone
       ? new AudioTrackImpl(
@@ -854,7 +935,7 @@ async function startCapture(
     pendingSystemAudio.length = 0;
     pendingMicrophone.length = 0;
     setImmediate(() => {
-      for (const event of pendingEvents) recording[event.track]?.pushEvent(event);
+      for (const event of pendingEvents) recording.pushEvent(event);
       pendingEvents.length = 0;
       eventsReady = true;
     });

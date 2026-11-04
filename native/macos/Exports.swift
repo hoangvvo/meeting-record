@@ -452,7 +452,7 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
             pids.append(pid)
         }
     }
-    let global = globalMixdown != 0 && pids.isEmpty
+    let global = (globalMixdown & 1) != 0 && pids.isEmpty
 
     // With no explicit pids and no global request, capture every process currently
     // rendering audio, which keeps working while output is muted.
@@ -604,6 +604,13 @@ public func mrec_start_tracks_raw(_ pidsPtr: UnsafePointer<UInt32>?,
     if !configuration.globalMixdown {
         session.exitTimer = watchSources(generation: session.generation)
     }
+    var captureInfo = mrec_capture_info()
+    captureInfo.requested_scope = configuration.globalMixdown
+        ? MREC_CAPTURE_SCOPE_SYSTEM : MREC_CAPTURE_SCOPE_PROCESS
+    captureInfo.actual_scope = captureInfo.requested_scope
+    captureInfo.includes_recorder = !configuration.globalMixdown && capturePIDs.contains(getpid()) ? 1 : 0
+    // CoreAudio process taps precede output-device volume.
+    mrec_tracks_capture_changed(session.trackSession, &captureInfo)
     setLastError("no error")
     return 0
 }

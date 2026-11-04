@@ -46,6 +46,14 @@ MREC_TEST_MICROPHONE=1 bash e2e/macos.sh
 powershell -ExecutionPolicy Bypass -File e2e/windows.ps1 -Mode All -Binding All -Microphone
 ```
 
+Test ordinary and communications audio across output devices, capture targets, and both bindings:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File e2e/windows-coverage.ps1 -AllowSystemAudioFallback -CompatibilityTarget
+```
+
+Use `-EndpointReference` to compare endpoint and process capture, or omit `-AllowSystemAudioFallback` to check isolation without fallback. `-SeparateOutput "SECOND OUTPUT"` selects the second device. The script restores the original communications output.
+
 For device changes, replace the names below with devices from the two lists:
 
 ```powershell

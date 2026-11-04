@@ -181,8 +181,9 @@ struct TrackContext {
 };
 
 struct CaptureContext {
-  explicit CaptureContext(bool include_microphone)
+  CaptureContext(uint32_t pid, bool include_microphone)
       : id(next_id.fetch_add(1, std::memory_order_relaxed)),
+        pid(pid),
         system_audio(this, false) {
     if (include_microphone) {
       microphone = std::make_unique<TrackContext>(this, true);
@@ -191,6 +192,7 @@ struct CaptureContext {
 
   static std::atomic<uint64_t> next_id;
   uint64_t id;
+  const uint32_t pid;
   TrackContext system_audio;
   std::unique_ptr<TrackContext> microphone;
   Napi::ThreadSafeFunction events;
@@ -282,8 +284,30 @@ void ScheduleTrackWake(TrackContext *track) {
   }
 }
 
-Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
-  static const char *kTypes[] = {"interrupted", "resumed", "devicechange", "degraded"};
+Napi::Object CaptureTargetToJS(Napi::Env env, mrec_capture_scope scope, uint32_t pid) {
+  Napi::Object out = Napi::Object::New(env);
+  out.Set("type", scope == MREC_CAPTURE_SCOPE_SYSTEM ? "system" : "process");
+  if (scope == MREC_CAPTURE_SCOPE_PROCESS) out.Set("pid", pid);
+  return out;
+}
+
+Napi::Object CaptureInfoToJS(Napi::Env env, const mrec_capture_info &info, uint32_t pid) {
+  Napi::Object out = Napi::Object::New(env);
+  out.Set("requestedTarget", CaptureTargetToJS(env, info.requested_scope, pid));
+  out.Set("actualTarget", CaptureTargetToJS(env, info.actual_scope, pid));
+  out.Set("volumeDependent", info.volume_dependent != 0);
+  out.Set("includesRecorderAudio", info.includes_recorder != 0);
+  if (info.reason == MREC_CAPTURE_COMPATIBILITY_FALLBACK) {
+    Napi::Object fallback = Napi::Object::New(env);
+    fallback.Set("reason", "process-capture-incompatible");
+    if (info.app_id[0]) fallback.Set("appId", info.app_id);
+    out.Set("fallback", fallback);
+  }
+  return out;
+}
+
+Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event, uint32_t pid) {
+  static const char *kTypes[] = {"interrupted", "resumed", "devicechange", "degraded", "capturechange"};
   static const char *kReasons[] = {"unknown",        "device-removed", "device-changed",
                                    "format-changed", "app-exited",     "service-reset"};
   const int type = static_cast<int>(event->type);
@@ -294,6 +318,8 @@ Napi::Object TrackEventToJS(Napi::Env env, const mrec_track_event *event) {
   out.Set("reason", (reason >= 0 && reason <= 5) ? kReasons[reason] : "unknown");
   out.Set("deviceName", event->device_name);
   out.Set("message", event->message);
+  if (event->type == MREC_TRACK_CAPTURE_CHANGED)
+    out.Set("captureInfo", CaptureInfoToJS(env, event->capture_info, pid));
   return out;
 }
 
@@ -302,14 +328,14 @@ void OnTrackEvent(const mrec_track_event *event, void *user_data) {
   auto *capture = static_cast<CaptureContext *>(user_data);
   if (!capture || !event) return;
   if (event->track != MREC_TRACK_SYSTEM_AUDIO && event->track != MREC_TRACK_MICROPHONE) return;
-  if (event->type < MREC_TRACK_INTERRUPTED || event->type > MREC_TRACK_DEGRADED) return;
+  if (event->type < MREC_TRACK_INTERRUPTED || event->type > MREC_TRACK_CAPTURE_CHANGED) return;
   auto *copy = new mrec_track_event(*event);
   const uint64_t capture_id = capture->id;
   const napi_status status = capture->events.NonBlockingCall(
       copy, [capture_id](Napi::Env env, Napi::Function callback, mrec_track_event *e) {
         std::unique_ptr<mrec_track_event> owned(e);
         if (!g_capture || g_capture->id != capture_id) return;
-        callback.Call({TrackEventToJS(env, owned.get())});
+        callback.Call({TrackEventToJS(env, owned.get(), g_capture->pid)});
       });
   if (status != napi_ok) delete copy;
 }
@@ -318,10 +344,10 @@ void OnTrackEvent(const mrec_track_event *event, void *user_data) {
 class StartWorker : public Napi::AsyncWorker {
 public:
   StartWorker(Napi::Env env, uint32_t pid, bool system_wide,
-              bool mono, int32_t microphone)
+              bool mono, int32_t microphone, bool allow_system_fallback)
       : Napi::AsyncWorker(env), deferred_(Napi::Promise::Deferred::New(env)),
         pid_(pid), system_wide_(system_wide), mono_(mono),
-        microphone_(microphone) {}
+        microphone_(microphone), allow_system_fallback_(allow_system_fallback) {}
 
   Napi::Promise Promise() { return deferred_.Promise(); }
 
@@ -335,6 +361,7 @@ public:
       cfg.pids = &pid_;
       cfg.pid_count = 1;
     }
+    if (allow_system_fallback_) cfg.global_mixdown |= MREC_CAPTURE_ALLOW_SYSTEM_FALLBACK;
     status_ = mrec_start_tracks_raw(
         cfg.pids, cfg.pid_count, cfg.global_mixdown, cfg.mono,
         cfg.mute_captured_output,
@@ -371,6 +398,9 @@ public:
 
     Napi::Object result = Napi::Object::New(env);
     result.Set("systemAudio", system_audio);
+    mrec_capture_info capture_info{};
+    if (mrec_current_capture_info(&capture_info) == MREC_OK)
+      result.Set("captureInfo", CaptureInfoToJS(env, capture_info, pid_));
     if (microphone_) {
       double microphone_rate = 0;
       uint32_t microphone_channels = 0;
@@ -411,6 +441,7 @@ private:
   bool system_wide_;
   bool mono_;
   int32_t microphone_;
+  bool allow_system_fallback_;
   int32_t status_ = MREC_OK;
   std::string error_;
 };
@@ -600,7 +631,7 @@ Napi::Value CaptureStart(const Napi::CallbackInfo &info) {
     return env.Undefined();
   }
 
-  g_capture = std::make_unique<CaptureContext>(microphone);
+  g_capture = std::make_unique<CaptureContext>(pid, microphone);
   g_capture->system_audio.tsfn = Napi::ThreadSafeFunction::New(
       env, on_system_audio, "mrec-system-audio", 1, 1);
   g_capture->system_audio.callback = Napi::Persistent(on_system_audio);
@@ -615,7 +646,8 @@ Napi::Value CaptureStart(const Napi::CallbackInfo &info) {
                                                     "mrec-track-events", 0, 1);
 
   auto *worker =
-      new StartWorker(env, pid, system_wide, mono, microphone);
+      new StartWorker(env, pid, system_wide, mono, microphone,
+          !opts.Has("allowSystemAudioFallback") || opts.Get("allowSystemAudioFallback").ToBoolean().Value());
   Napi::Promise promise = worker->Promise();
   worker->Queue();
   return promise;

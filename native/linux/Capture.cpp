@@ -148,6 +148,13 @@ public:
       running_ = false;
       return Fail(MREC_ERR_INTERNAL, "failed to create capture worker");
     }
+    mrec_capture_info capture_info{};
+    capture_info.requested_scope = roots_.empty() ? MREC_CAPTURE_SCOPE_SYSTEM : MREC_CAPTURE_SCOPE_PROCESS;
+    capture_info.actual_scope = capture_info.requested_scope;
+    capture_info.includes_recorder = std::any_of(roots_.begin(), roots_.end(),
+        [](const auto &root) { return Descendant(uint32_t(getpid()), root.pid); });
+    // Direct sink-input monitors are taken before the sink's device-volume mix.
+    mrec_tracks_capture_changed(track_session_, &capture_info);
     return MREC_OK;
   }
   int Stop() {
@@ -579,7 +586,7 @@ int32_t mrec_start_tracks_raw(const uint32_t *pids, size_t count,
                               void *mic_data,
                               mrec_track_event_callback event_cb,
                               void *event_data) {
-  return Current().Start(pids, count, global, mono, microphone, system_cb,
+  return Current().Start(pids, count, (global & MREC_CAPTURE_SYSTEM) != 0, mono, microphone, system_cb,
                          system_data, mic_cb, mic_data, event_cb, event_data);
 }
 int32_t mrec_start_raw(const uint32_t *pids, size_t count, int32_t global,

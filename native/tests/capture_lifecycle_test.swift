@@ -5,7 +5,16 @@ import Foundation
 private func currentMicrophoneName(_ buffer: UnsafeMutablePointer<CChar>?, _ capacity: Int) -> Int32
 
 private let eventCallback: mrec_track_event_callback = { event, _ in
-    if let event { TestSources.read { TestSources.events.append(event.pointee) } }
+    if let event {
+        if event.pointee.type == MREC_TRACK_CAPTURE_CHANGED {
+            // This history tests source availability; validate metadata separately.
+            let info = event.pointee.capture_info
+            precondition(info.requested_scope == info.actual_scope)
+            precondition(info.volume_dependent == 0 && info.includes_recorder == 0)
+        } else {
+            TestSources.read { TestSources.events.append(event.pointee) }
+        }
+    }
 }
 private let audioCallback: MrecAudioCallback = { _, frames, channels, rate, time, data in
     let packet = TestAudioPacket(frames: frames, channels: channels, sampleRate: rate, time: time)

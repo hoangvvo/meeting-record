@@ -35,6 +35,8 @@ uint32_t system_channels = 1;
 int32_t microphone_source = 0;
 uint32_t target_pid = 0;
 bool system_wide = false;
+int32_t capture_flags = 0;
+mrec_capture_info capture_info{};
 
 void Packet(mrec_audio_callback callback, void *data, unsigned index,
             uint32_t channels, double rate = 48000, uint32_t frames = 2,
@@ -93,7 +95,16 @@ int32_t mrec_start_tracks_raw(const uint32_t *pids, size_t pid_count, int32_t gl
   system_channels = mono ? 1 : 2;
   microphone_source = microphone;
   target_pid = pid_count ? pids[0] : 0;
-  system_wide = global_mixdown != 0;
+  system_wide = (global_mixdown & MREC_CAPTURE_SYSTEM) != 0;
+  capture_flags = global_mixdown;
+  capture_info = {};
+  capture_info.requested_scope = pid_count ? MREC_CAPTURE_SCOPE_PROCESS : MREC_CAPTURE_SCOPE_SYSTEM;
+  capture_info.actual_scope = (global_mixdown & MREC_CAPTURE_ALLOW_SYSTEM_FALLBACK)
+      ? MREC_CAPTURE_SCOPE_SYSTEM : capture_info.requested_scope;
+  capture_info.reason = pid_count && (global_mixdown & MREC_CAPTURE_ALLOW_SYSTEM_FALLBACK)
+      ? MREC_CAPTURE_COMPATIBILITY_FALLBACK : MREC_CAPTURE_REQUESTED;
+  capture_info.volume_dependent = capture_info.includes_recorder =
+      (global_mixdown & MREC_CAPTURE_ALLOW_SYSTEM_FALLBACK) != 0;
   running = true;
   for (unsigned index = 0; index < config.initial_packets; index++) {
     Packet(audio, audio_data, index, system_channels);
@@ -104,8 +115,14 @@ int32_t mrec_start_tracks_raw(const uint32_t *pids, size_t pid_count, int32_t gl
     event.track = static_cast<mrec_track>(config.initial_event_track);
     event.type = static_cast<mrec_track_event_type>(config.initial_event_type);
     event.reason = MREC_TRACK_REASON_SERVICE_RESET;
+    event.capture_info = capture_info;
     track_event(&event, event_data);
   }
+  return MREC_OK;
+}
+int32_t mrec_current_capture_info(mrec_capture_info *out) {
+  if (!running) return MREC_ERR_NOT_RUNNING;
+  *out = capture_info;
   return MREC_OK;
 }
 mrec_status mrec_current_format(double *rate, uint32_t *channels) {
@@ -187,6 +204,7 @@ void RegisterTestBackend(Napi::Env env, Napi::Object exports) {
     stats.Set("microphoneSource", microphone_source);
     stats.Set("pid", target_pid);
     stats.Set("systemWide", system_wide);
+    stats.Set("captureFlags", capture_flags);
     return stats;
   }));
 }

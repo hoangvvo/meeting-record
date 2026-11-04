@@ -137,6 +137,9 @@ fn build_windows(native: &Path) {
         "windows/AudioSessionNotifications.h",
         "windows/CaptureRoots.h",
         "windows/CapturePump.h",
+        "windows/EndpointLoopback.h",
+        "common/windows-capture-policy.h",
+        "include/meeting-record-capture.h",
         "windows/MeetingDetector.cpp",
         "windows/TimelineMixer.h",
         "common/TimelineMixer.h",
@@ -215,6 +218,12 @@ fn build_linux(native: &Path) {
 
 /// Shared capture state, classification, and audio processing.
 fn build_common(native: &Path) {
+    for header in [
+        "include/meeting-record-capture.h",
+        "include/meeting-record-events.h",
+    ] {
+        println!("cargo:rerun-if-changed={}", native.join(header).display());
+    }
     for source in ["include/meeting-record-mix.h", "common/pcm-mixer.cpp"] {
         println!("cargo:rerun-if-changed={}", native.join(source).display());
     }

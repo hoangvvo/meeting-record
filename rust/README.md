@@ -52,6 +52,17 @@ let app_recording = capture::start(
 )?;
 ```
 
+Inspect the capture scope and read changes.
+
+```rust
+println!("{:?}", app_recording.system_audio().capture_info());
+while let Some(event) = app_recording.try_recv_event() {
+    println!("{event:?}");
+}
+```
+
+On Windows, calling apps such as Microsoft Teams, WhatsApp and 8x8 Work use system audio when process capture is unreliable. Set `allow_system_audio_fallback: false` to disable this fallback. System audio can include other apps and recorder playback, and output volume/mute may affect the recording.
+
 Read the mix and pause, resume, or stop the recording.
 
 ```rust

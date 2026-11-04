@@ -23,6 +23,9 @@ uint64_t mrec_tracks_open(mrec_track_event_callback callback, void *user_data);
 /* Nothing is published once this returns, and pending retries stop at once. */
 void mrec_tracks_close(void);
 
+/* Store the actual path and publish it through the session-guarded event queue. */
+void mrec_tracks_capture_changed(uint64_t session, const mrec_capture_info *info);
+
 /* A device appeared, disappeared, or became a default: retry every lost source now. */
 void mrec_tracks_wake(uint64_t session);
 

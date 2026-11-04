@@ -738,7 +738,7 @@ where
 pub enum CaptureTarget {
     /// A detected meeting's app pid, or any audio-producing process pid.
     Process { pid: u32 },
-    /// All application output except the recorder's process tree.
+    /// All application output.
     System,
 }
 
@@ -772,6 +772,11 @@ impl MicrophoneProcessing {
 
 #[derive(Debug, Clone)]
 pub struct CaptureOptions {
+    /// Windows: permit whole-output capture for known process-loopback
+    /// incompatibilities. With System, explicitly capture all outputs.
+    /// Defaults to true. Includes other apps/recorder playback; output volume
+    /// and mute may affect samples. Other platforms retain their normal path.
+    pub allow_system_audio_fallback: bool,
     /// Mono mixdown for system audio only. The microphone keeps its format. Defaults to true.
     pub mono: bool,
     /// Optional microphone track. Defaults to none. Unavailable devices recover
@@ -789,6 +794,7 @@ impl Default for CaptureOptions {
     fn default() -> Self {
         Self {
             mono: true,
+            allow_system_audio_fallback: true,
             microphone: None,
             microphone_processing: MicrophoneProcessing::default(),
             mix: None,
@@ -810,6 +816,54 @@ pub enum CaptureState {
 pub enum Track {
     SystemAudio,
     Microphone,
+}
+
+/// Details present only when the backend selects a fallback capture path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureFallback {
+    /// A known source cannot be captured reliably with process isolation.
+    ProcessCaptureIncompatible {
+        /// Native catalog identity that triggered fallback, if known.
+        app_id: Option<String>,
+    },
+}
+
+/// Actual capture scope and capabilities, reported by the native backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureInfo {
+    /// Target requested by the caller, including the PID for a process target.
+    pub requested_target: CaptureTarget,
+    /// Target actually recorded; system-wide only when fallback is permitted or requested.
+    pub actual_target: CaptureTarget,
+    /// Present when a permitted alternative capture path was selected.
+    pub fallback: Option<CaptureFallback>,
+    /// Output-device volume/mute may affect samples. Not a mute-state detector.
+    pub volume_dependent: bool,
+    /// Whether recorder playback and its child processes are included.
+    pub includes_recorder_audio: bool,
+}
+
+impl CaptureInfo {
+    fn from_raw(info: &sys::CaptureInfo, target: CaptureTarget) -> Self {
+        let app = c_string(&info.app_id);
+        Self {
+            requested_target: target,
+            actual_target: if info.actual_scope == 1 {
+                CaptureTarget::System
+            } else {
+                target
+            },
+            fallback: if info.reason == 1 {
+                Some(CaptureFallback::ProcessCaptureIncompatible {
+                    app_id: if app.is_empty() { None } else { Some(app) },
+                })
+            } else {
+                None
+            },
+            volume_dependent: info.volume_dependent != 0,
+            includes_recorder_audio: info.includes_recorder != 0,
+        }
+    }
 }
 
 /// Reason for source loss.
@@ -846,6 +900,8 @@ impl From<i32> for InterruptionReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrackEvent {
+    /// Initial native capture path, or a later change, without source loss.
+    CaptureChanged(CaptureInfo),
     /// No source is available; `Degraded` or `Resumed` reports recovery.
     Interrupted {
         track: Track,
@@ -871,6 +927,7 @@ pub enum TrackEvent {
 /// What a track's events have said so far.
 #[derive(Default)]
 struct TrackStatus {
+    capture_info: Mutex<Option<CaptureInfo>>,
     availability: AtomicUsize,
     device_name: Mutex<Option<String>>,
 }
@@ -929,6 +986,7 @@ impl EventQueue {
 }
 
 struct EventContext {
+    target: CaptureTarget,
     queue: Arc<EventQueue>,
     system_audio: Arc<TrackStatus>,
     microphone: Arc<TrackStatus>,
@@ -946,6 +1004,17 @@ unsafe extern "C" fn track_event_trampoline(event: *const sys::TrackEvent, user_
         _ => return,
     };
     let event = match event.kind {
+        sys::MREC_TRACK_CAPTURE_CHANGED => {
+            if track != Track::SystemAudio {
+                return;
+            }
+            let info = CaptureInfo::from_raw(&event.capture_info, context.target);
+            *status
+                .capture_info
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(info.clone());
+            TrackEvent::CaptureChanged(info)
+        }
         sys::MREC_TRACK_INTERRUPTED => {
             status.availability.store(2, Ordering::Release);
             TrackEvent::Interrupted {
@@ -1259,6 +1328,15 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
+    /// Actual playback capture scope/capabilities. Present on system_audio after
+    /// startup, absent on microphone. Retains its last value after stop.
+    pub fn capture_info(&self) -> Option<CaptureInfo> {
+        self.status
+            .capture_info
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
     /// Initial negotiated rate, or zero while the microphone is unavailable.
     /// A recovered device may change it; each
     /// [`AudioChunk::sample_rate`] is authoritative.
@@ -1551,6 +1629,7 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
             })
         }),
         events: Box::new(EventContext {
+            target,
             queue: Arc::clone(&events),
             system_audio: Arc::clone(&system_status),
             microphone: Arc::clone(&microphone_status),
@@ -1591,7 +1670,12 @@ fn start_capture(target: CaptureTarget, options: CaptureOptions) -> Result<Captu
                     pids.as_ptr()
                 },
                 pids.len(),
-                system_wide as i32,
+                (system_wide as i32)
+                    | if options.allow_system_audio_fallback {
+                        2
+                    } else {
+                        0
+                    },
                 options.mono as i32,
                 0,
                 processing
@@ -1830,6 +1914,7 @@ mod capture_tests {
                     state,
                 },
                 events: super::EventContext {
+                    target: super::CaptureTarget::Process { pid: 123 },
                     queue: events,
                     system_audio: system_status,
                     microphone: microphone_status,
@@ -1867,6 +1952,7 @@ mod capture_tests {
                 host_time_ns: 1_000_000_000,
                 device_name: [0; 256],
                 message: [0; 512],
+                capture_info: unsafe { std::mem::zeroed() },
             };
             for (out, byte) in event.device_name.iter_mut().zip(device.bytes()) {
                 *out = byte as _;
@@ -2218,6 +2304,7 @@ mod capture_tests {
             host_time_ns: 0,
             device_name: [0; 256],
             message: [0; 512],
+            capture_info: unsafe { std::mem::zeroed() },
         };
         unsafe {
             super::track_event_trampoline(
@@ -2464,6 +2551,7 @@ mod capture_tests {
             sync::{atomic::Ordering, Arc},
         };
         let context = EventContext {
+            target: super::CaptureTarget::System,
             queue: Arc::new(EventQueue::default()),
             system_audio: Arc::new(TrackStatus::default()),
             microphone: Arc::new(TrackStatus::default()),
@@ -2500,6 +2588,57 @@ mod capture_tests {
                 track: Track::SystemAudio
             })
         ));
+    }
+
+    #[test]
+    fn capture_path_events_update_state_without_changing_source_availability() {
+        let capture = CaptureHarness::new(1);
+        let mut event: super::sys::TrackEvent = unsafe { std::mem::zeroed() };
+        event.kind = super::sys::MREC_TRACK_CAPTURE_CHANGED;
+        event.capture_info.actual_scope = 1;
+        event.capture_info.reason = 1;
+        event.capture_info.volume_dependent = 1;
+        event.capture_info.includes_recorder = 1;
+        for (out, byte) in event
+            .capture_info
+            .app_id
+            .iter_mut()
+            .zip(b"com.microsoft.teams2")
+        {
+            *out = *byte as _;
+        }
+        unsafe {
+            super::track_event_trampoline(
+                &event,
+                (&capture.events as *const super::EventContext)
+                    .cast_mut()
+                    .cast(),
+            );
+        }
+        let info = capture.session.system_audio().capture_info().unwrap();
+        assert_eq!(info.actual_target, super::CaptureTarget::System);
+        assert_eq!(
+            info.requested_target,
+            super::CaptureTarget::Process { pid: 123 }
+        );
+        assert!(matches!(info.fallback.as_ref(),
+            Some(super::CaptureFallback::ProcessCaptureIncompatible { app_id })
+            if app_id.as_deref() == Some("com.microsoft.teams2")));
+        assert!(info.volume_dependent && info.includes_recorder_audio);
+        assert_eq!(
+            capture.session.try_recv_event(),
+            Some(super::TrackEvent::CaptureChanged(info))
+        );
+        assert_eq!(
+            capture.session.system_audio().availability(),
+            super::TrackAvailability::Live
+        );
+        assert!(capture
+            .session
+            .microphone()
+            .unwrap()
+            .capture_info()
+            .is_none());
     }
 
     #[test]

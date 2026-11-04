@@ -567,6 +567,7 @@ async function main() {
     microphoneFrequencies: frequencies("MREC_MICROPHONE_FREQUENCIES"),
   };
   const options = {
+    allowSystemAudioFallback: enabled("MREC_ALLOW_SYSTEM_AUDIO_FALLBACK"),
     mono: enabled("MREC_MONO"),
     ...(includeMicrophone ? { microphone: "auto" } : {}),
     ...(mixSampleRate === undefined ? {} : { mix: { sampleRate: mixSampleRate } }),
@@ -582,6 +583,25 @@ async function main() {
 
   console.log(`starting ${JSON.stringify(target)} capture for ${durationSeconds}s`);
   const recording = await MeetingRecord.capture.start(target, options);
+  const captureChanges = [];
+  const initialCaptureInfo = recording.systemAudio.captureInfo;
+  const endpointExpected =
+    options.allowSystemAudioFallback &&
+    (target.type === "system" || enabled("MREC_EXPECT_SYSTEM_FALLBACK"));
+  if (
+    !initialCaptureInfo ||
+    initialCaptureInfo.volumeDependent !== endpointExpected ||
+    initialCaptureInfo.includesRecorderAudio !== endpointExpected ||
+    JSON.stringify(initialCaptureInfo.requestedTarget) !== JSON.stringify(target) ||
+    JSON.stringify(initialCaptureInfo.actualTarget) !==
+      JSON.stringify(endpointExpected ? { type: "system" } : target) ||
+    initialCaptureInfo.fallback?.reason !==
+      (endpointExpected && target.type === "process" ? "process-capture-incompatible" : undefined)
+  ) {
+    throw new Error(`unexpected capture info: ${JSON.stringify(initialCaptureInfo)}`);
+  }
+  console.log(`capture info: ${JSON.stringify(initialCaptureInfo)}`);
+  recording.systemAudio.on("capturechange", (info) => captureChanges.push(info));
   const system = new TrackMetrics();
   const microphone = includeMicrophone ? new TrackMetrics() : undefined;
   const mixed = mixSampleRate === undefined ? undefined : new MixMetrics();
@@ -683,6 +703,14 @@ async function main() {
   }
 
   if (interrupted.length > 0) throw new Error("a track was still interrupted at the end");
+  if (
+    captureChanges.length !== 1 ||
+    JSON.stringify(captureChanges[0]) !== JSON.stringify(initialCaptureInfo)
+  ) {
+    throw new Error(
+      `expected exactly one initial capturechange: ${JSON.stringify(captureChanges)}`,
+    );
+  }
   verifyTrackEvents(trackEvents, expectDeviceChange, expectRecovery);
   await verifyRecoveryLatency(microphoneRecoveredAt);
 

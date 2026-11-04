@@ -19,6 +19,7 @@ pub const MREC_TRACK_INTERRUPTED: i32 = 0;
 pub const MREC_TRACK_RESUMED: i32 = 1;
 pub const MREC_TRACK_DEVICE_CHANGED: i32 = 2;
 pub const MREC_TRACK_DEGRADED: i32 = 3;
+pub const MREC_TRACK_CAPTURE_CHANGED: i32 = 4;
 pub const MREC_TRACK_REASON_DEVICE_REMOVED: i32 = 1;
 pub const MREC_TRACK_REASON_DEVICE_CHANGED: i32 = 2;
 pub const MREC_TRACK_REASON_FORMAT_CHANGED: i32 = 3;
@@ -50,6 +51,17 @@ pub struct PcmMixer {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct CaptureInfo {
+    pub requested_scope: i32,
+    pub actual_scope: i32,
+    pub reason: i32,
+    pub volume_dependent: i32,
+    pub includes_recorder: i32,
+    pub app_id: [c_char; 128],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct TrackEvent {
     pub track: i32,
     pub kind: i32,
@@ -57,6 +69,7 @@ pub struct TrackEvent {
     pub host_time_ns: u64,
     pub device_name: [c_char; 256],
     pub message: [c_char; 512],
+    pub capture_info: CaptureInfo,
 }
 
 #[repr(C)]
@@ -196,7 +209,7 @@ mod tests {
     fn track_event_layout_matches_header() {
         assert_eq!(
             mem::size_of::<TrackEvent>(),
-            792,
+            944,
             "sizeof(mrec_track_event)"
         );
         let event = unsafe { mem::zeroed::<TrackEvent>() };
@@ -206,6 +219,8 @@ mod tests {
         assert_eq!(&event.host_time_ns as *const _ as usize - base, 16);
         assert_eq!(&event.device_name as *const _ as usize - base, 24);
         assert_eq!(&event.message as *const _ as usize - base, 280);
+        assert_eq!(&event.capture_info as *const _ as usize - base, 792);
+        assert_eq!(mem::size_of::<super::CaptureInfo>(), 148);
     }
 
     #[test]

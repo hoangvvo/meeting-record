@@ -16,6 +16,48 @@ let api;
 let native;
 const recordings = new Set();
 
+test("fallback selection crosses N-API and capture metadata is readable before its initial event", async () => {
+  native.testConfigure({ initialPackets: 0, tailPackets: 0, initialEventType: 4 });
+  const recording = await start({ type: "process", pid: 123 }, { allowSystemAudioFallback: true });
+  const initial = recording.systemAudio.captureInfo;
+  assert.equal(native.testStats().captureFlags, 2);
+  assert.deepEqual(initial.requestedTarget, { type: "process", pid: 123 });
+  assert.deepEqual(initial.actualTarget, { type: "system" });
+  assert.equal(initial.fallback.reason, "process-capture-incompatible");
+  assert.equal(initial.volumeDependent, true);
+  assert.equal(initial.includesRecorderAudio, true);
+  const changes = [];
+  recording.systemAudio.on("capturechange", (info) => {
+    assert.equal(recording.systemAudio.captureInfo, info);
+    assert.equal(recording.systemAudio.availability, "live");
+    changes.push(info);
+  });
+  await until(() => changes.length === 1);
+  assert.deepEqual(changes[0], initial);
+  assert.equal(recording.microphone, undefined);
+  await recording.stopRecording();
+  await delay(20);
+  assert.equal(changes.length, 1);
+});
+
+test("fallback defaults on and can be explicitly disabled", async () => {
+  native.testConfigure({ initialPackets: 0, tailPackets: 0 });
+  await assert.rejects(
+    api.capture.start({ type: "system" }, { allowSystemAudioFallback: "yes" }),
+    /must be a boolean/,
+  );
+  assert.equal(native.testStats().starts, 0);
+  const recording = await start({ type: "system" });
+  assert.equal(native.testStats().captureFlags, 3);
+  assert.equal(recording.systemAudio.captureInfo.volumeDependent, true);
+  assert.equal(recording.systemAudio.captureInfo.includesRecorderAudio, true);
+  await recording.stopRecording();
+  const isolated = await start({ type: "system" }, { allowSystemAudioFallback: false });
+  assert.equal(native.testStats().captureFlags, 1);
+  assert.equal(isolated.systemAudio.captureInfo.volumeDependent, false);
+  assert.equal(isolated.systemAudio.captureInfo.includesRecorderAudio, false);
+});
+
 async function start(target = { type: "system" }, options) {
   const recording = await api.capture.start(target, options);
   recordings.add(recording);
@@ -254,6 +296,7 @@ for (const mono of [true, false]) {
       microphoneSource: 2,
       pid: 123,
       systemWide: false,
+      captureFlags: 2,
     });
     native.testAudio({ index: 10 });
     native.testAudio({ track: "microphone", index: 10 });

@@ -3,8 +3,11 @@
 #include "meeting-record-detect.h"
 #include "AudioAppProcess.h"
 #include "AudioThreadScheduling.h"
+#include "AudioSessionNotifications.h"
 #include "CaptureRoots.h"
 #include "CapturePump.h"
+#include "EndpointLoopback.h"
+#include "windows-capture-policy.h"
 #include "TimelineMixer.h"
 #include "meeting-catalog.h"
 #include "tracks.h"
@@ -28,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -208,8 +212,8 @@ public:
   STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override { return Changed(); }
   STDMETHODIMP OnDeviceAdded(LPCWSTR) override { return Changed(); }
   STDMETHODIMP OnDeviceRemoved(LPCWSTR) override { return Changed(); }
-  STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole, LPCWSTR) override {
-    return flow == eCapture ? Changed() : S_OK;
+  STDMETHODIMP OnDefaultDeviceChanged(EDataFlow, ERole, LPCWSTR) override {
+    return Changed();
   }
   STDMETHODIMP OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
 
@@ -229,6 +233,7 @@ struct LoopbackStream {
   uint32_t pid = 0;
   bool exclude = false;
   uint32_t channels = 0;
+  std::wstring device_id; // Nonempty only for explicitly permitted endpoint capture.
 };
 
 struct MicrophoneStream {
@@ -304,6 +309,7 @@ std::string FriendlyName(IMMDevice *device) {
 struct ProcessEntry {
   uint32_t parent = 0;
   int32_t platform = MREC_PLATFORM_UNKNOWN;
+  const char *capture_compatibility_app = nullptr;
 };
 
 /* Every process's parent, and the conferencing app its executable belongs to. */
@@ -319,7 +325,8 @@ std::map<uint32_t, ProcessEntry> ProcessSnapshot() {
       WideCharToMultiByte(CP_UTF8, 0, entry.szExeFile, -1, executable, sizeof executable,
                           nullptr, nullptr);
       processes[entry.th32ProcessID] = {entry.th32ParentProcessID,
-                                        mrec_catalog_executable_platform(executable)};
+                                        mrec_catalog_executable_platform(executable),
+                                        meeting_record::WindowsCaptureCompatibilityApp(executable)};
     } while (Process32NextW(snapshot, &entry));
   }
   CloseHandle(snapshot);
@@ -531,6 +538,13 @@ public:
       SetLastErrorMessage("a nonempty process list requires pids");
       return MREC_ERR_INTERNAL;
     }
+    if ((global_mixdown & ~3) != 0) {
+      SetLastErrorMessage("unknown capture flags");
+      return MREC_ERR_INTERNAL;
+    }
+    const bool allow_fallback = (global_mixdown & MREC_CAPTURE_ALLOW_SYSTEM_FALLBACK) != 0;
+    global_mixdown = (global_mixdown & MREC_CAPTURE_SYSTEM) != 0;
+    mrec_capture_info capture_info{};
 
     std::vector<uint32_t> targets;
     if (pids && pid_count > 0) targets.assign(pids, pids + pid_count);
@@ -551,8 +565,26 @@ public:
       }
       const auto processes = ProcessSnapshot();
       if (!processes.empty()) {
+        if (allow_fallback) {
+          for (uint32_t pid : targets) {
+            // Helpers inherit their owning app's compatibility entry, never a
+            // browser-wide guess based on a window title or a silent packet.
+            for (size_t remaining = processes.size(); remaining > 0; remaining--) {
+              const auto entry = processes.find(pid);
+              if (entry == processes.end()) break;
+              if (entry->second.capture_compatibility_app) {
+                std::snprintf(capture_info.app_id, sizeof capture_info.app_id, "%s",
+                              entry->second.capture_compatibility_app);
+                break;
+              }
+              pid = entry->second.parent;
+            }
+            if (capture_info.app_id[0]) break;
+          }
+        }
         sibling_rule_ = SiblingRule(targets, processes);
         targets = meeting_record::SelectCaptureRoots(processes, std::move(targets), sibling_rule_);
+        capture_info.includes_recorder = InTrees(processes, GetCurrentProcessId(), targets);
       }
     }
 
@@ -580,8 +612,29 @@ public:
     microphone_callback_ = microphone_callback;
     microphone_user_data_ = microphone_user_data;
     channels_ = mono ? 1 : 2;
+    endpoint_capture_ = allow_fallback && (global_mixdown || capture_info.app_id[0]);
+    capture_info.requested_scope = global_mixdown ? MREC_CAPTURE_SCOPE_SYSTEM : MREC_CAPTURE_SCOPE_PROCESS;
+    capture_info.actual_scope = endpoint_capture_ ? MREC_CAPTURE_SCOPE_SYSTEM : capture_info.requested_scope;
+    capture_info.reason = endpoint_capture_ && !global_mixdown
+        ? MREC_CAPTURE_COMPATIBILITY_FALLBACK : MREC_CAPTURE_REQUESTED;
+    capture_info.volume_dependent = endpoint_capture_;
+    capture_info.includes_recorder = endpoint_capture_ || capture_info.includes_recorder;
 
-    if (global_mixdown) {
+    if (endpoint_capture_) {
+      if (const auto ids = meeting_record::RenderEndpointIds()) {
+        active_outputs_ = {ids->active.begin(), ids->active.end()};
+        wanted_outputs_ = {ids->wanted.begin(), ids->wanted.end()};
+        for (const auto &id : ids->wanted) {
+          auto stream = ActivateOutput(id);
+          if (stream) streams_.push_back(std::make_unique<LoopbackStream>(std::move(*stream)));
+        }
+      }
+      if (streams_.empty()) {
+        mta_usage_.reset();
+        SetLastErrorMessage("no output endpoint could be opened");
+        return MREC_ERR_DEVICE_FAILED;
+      }
+    } else if (global_mixdown) {
       /* System capture needs a real PID to exclude; omit the recorder to avoid feedback. */
       auto stream = Activate(GetCurrentProcessId(), /*exclude=*/true);
       if (!stream) {
@@ -665,8 +718,12 @@ public:
       workers_.emplace_back([this, i] { Drain(i); });
     }
     if (!targets_.empty()) targets_worker_ = std::thread([this] { WatchTargets(); });
+    if (microphone_enabled_ || endpoint_capture_) ListenForDevices();
+    if (endpoint_capture_) {
+      outputs_signal_ = std::make_shared<meeting_record::RescanSignal>();
+      outputs_worker_ = std::thread([this] { WatchOutputs(); });
+    }
     if (microphone_enabled_) {
-      ListenForDevices();
       if (microphone_) {
         HRESULT hr = microphone_->client->Start();
         if (FAILED(hr)) {
@@ -682,6 +739,7 @@ public:
           MREC_TRACK_REASON_DEVICE_REMOVED, "microphone unavailable at startup");
       microphone_worker_ = std::thread([this] { DrainMicrophone(); });
     }
+    mrec_tracks_capture_changed(track_session_, &capture_info);
     SetLastErrorMessage("no error");
     return MREC_OK;
   }
@@ -713,6 +771,71 @@ public:
   }
 
 private:
+  std::optional<LoopbackStream> ActivateOutput(const std::wstring &id) {
+    LoopbackStream stream;
+    const HRESULT hr = meeting_record::OpenEndpointLoopback(id, channels_,
+        stream.client.GetAddressOf(), stream.capture.GetAddressOf());
+    if (FAILED(hr)) {
+      SetLastErrorMessage(HResultMessage("endpoint loopback", hr));
+      return std::nullopt;
+    }
+    stream.device_id = id;
+    stream.channels = channels_;
+    return stream;
+  }
+
+  void WatchOutputs() {
+    ScopedComApartment apartment;
+    // Reuse session/device notifications so a newly active output does not have
+    // to wait for the inventory backstop. Callbacks only wake this owner thread.
+    meeting_record::AudioSessionNotifications notifications(outputs_signal_);
+    notifications.Refresh();
+    uint64_t revision = outputs_signal_->Revision();
+    while (!stop_requested_ && !system_exited_) {
+      revision = outputs_signal_->Wait(std::chrono::steady_clock::now() +
+          std::chrono::milliseconds(MREC_TRACK_RETRY_INTERVAL_MS), revision);
+      if (stop_requested_ || system_exited_) break;
+      notifications.Refresh();
+      const auto ids = meeting_record::RenderEndpointIds();
+      // A failed enumeration is not evidence that every device disappeared.
+      if (!ids) continue;
+      const std::set<std::wstring> available(ids->active.begin(), ids->active.end());
+      const std::set<std::wstring> wanted(ids->wanted.begin(), ids->wanted.end());
+      bool changed = false;
+      {
+        std::lock_guard<std::mutex> lock(sources_mutex_);
+        changed = active_outputs_ != available || wanted_outputs_ != wanted;
+        active_outputs_ = available;
+        wanted_outputs_ = wanted;
+      }
+      if (changed) mrec_tracks_wake(track_session_);
+      for (const auto &id : ids->wanted) {
+        bool captured = false;
+        {
+          std::lock_guard<std::mutex> lock(sources_mutex_);
+          captured = std::any_of(streams_.begin(), streams_.end(),
+              [&](const auto &stream) { return stream->device_id == id; });
+        }
+        if (captured || stop_requested_) continue;
+        auto stream = ActivateOutput(id);
+        if (!stream || FAILED(stream->client->Start())) continue;
+        std::lock_guard<std::mutex> lock(sources_mutex_);
+        if (stop_requested_ || !mrec_track_add_source(track_session_, MREC_TRACK_SYSTEM_AUDIO)) {
+          stream->client->Stop();
+          return;
+        }
+        const size_t index = system_mixer_.AddSource();
+        streams_.push_back(std::make_unique<LoopbackStream>(std::move(*stream)));
+        workers_.emplace_back([this, index] { Drain(index); });
+      }
+    }
+  }
+
+  bool OutputAvailable(size_t index, bool wanted = false) {
+    std::lock_guard<std::mutex> lock(sources_mutex_);
+    return (wanted ? wanted_outputs_ : active_outputs_).count(streams_[index]->device_id) != 0;
+  }
+
   std::optional<LoopbackStream> Activate(uint32_t pid, bool exclude) {
     AUDIOCLIENT_ACTIVATION_PARAMS params{};
     params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
@@ -857,6 +980,21 @@ private:
 
     while (!stop_requested_.load(std::memory_order_relaxed) &&
            !system_exited_.load(std::memory_order_relaxed)) {
+      if (endpoint_capture_ && !OutputAvailable(index)) {
+        RecoverLoopback(index, MREC_TRACK_REASON_DEVICE_REMOVED, "output endpoint is no longer available");
+        continue;
+      }
+      if (endpoint_capture_ && !OutputAvailable(index, true)) {
+        if (stream.client) stream.client->Stop();
+        stream.capture.Reset();
+        stream.client.Reset();
+        Sleep(5);
+        continue;
+      }
+      if (endpoint_capture_ && !stream.client) {
+        RecoverLoopback(index, MREC_TRACK_REASON_DEVICE_CHANGED, "output became active");
+        continue;
+      }
       WasapiPackets packets(stream.capture.Get());
       meeting_record::PumpCapture(
           packets,
@@ -966,6 +1104,11 @@ private:
   void AddTarget(uint32_t pid) {
     if (stop_requested_) return;
     const uint64_t created = ProcessCreationTime(pid);
+    if (endpoint_capture_) {
+      std::lock_guard<std::mutex> lock(sources_mutex_);
+      if (!stop_requested_) targets_.push_back({pid, created});
+      return;
+    }
     auto stream = Activate(pid, /*exclude=*/false);
     if (!stream || FAILED(stream->client->Start())) return;
     std::lock_guard<std::mutex> lock(sources_mutex_);
@@ -1030,13 +1173,19 @@ private:
     auto *recovery = static_cast<Recovery *>(context);
     if (recovery->session->system_exited_.load(std::memory_order_relaxed)) return 0;
     LoopbackStream &stream = recovery->session->Stream(recovery->index);
-    auto replacement = recovery->session->Activate(stream.pid, stream.exclude);
+    if (!stream.device_id.empty() && !recovery->session->OutputAvailable(recovery->index)) return 0;
+    if (!stream.device_id.empty() && !recovery->session->OutputAvailable(recovery->index, true)) return 1;
+    auto replacement = stream.device_id.empty()
+        ? recovery->session->Activate(stream.pid, stream.exclude)
+        : recovery->session->ActivateOutput(stream.device_id);
     if (!replacement) return 0;
     HRESULT hr = replacement->client->Start();
     if (FAILED(hr)) {
       SetLastErrorMessage(HResultMessage("IAudioClient::Start", hr));
       return 0;
     }
+    // The output inventory reads endpoint identities while this lane recovers.
+    std::lock_guard<std::mutex> lock(recovery->session->sources_mutex_);
     stream = std::move(*replacement);
     return 1;
   }
@@ -1062,6 +1211,12 @@ private:
   void RecoverLoopback(size_t index, mrec_track_reason reason, const std::string &detail) {
     LoopbackStream &stream = Stream(index);
     if (stream.client) stream.client->Stop();
+    if (!stream.device_id.empty()) {
+      // An invalidated endpoint can remain in use until both old interfaces are
+      // released before the endpoint can be reopened after restore.
+      stream.capture.Reset();
+      stream.client.Reset();
+    }
     const std::string message = "system audio interrupted: " + detail;
     SetLastErrorMessage(message);
     Recovery recovery{this, index};
@@ -1083,11 +1238,14 @@ private:
 
   void StopLocked() {
     stop_requested_ = true;
+    if (outputs_signal_) outputs_signal_->Notify();
     StopListeningForDevices();
     /* Ends pending retries at once; nothing is published after this. */
     mrec_tracks_close();
     /* The watcher adds drain threads, so it stops first. */
     if (targets_worker_.joinable()) targets_worker_.join();
+    if (outputs_worker_.joinable()) outputs_worker_.join();
+    outputs_signal_.reset();
     for (auto &worker : workers_) {
       if (worker.joinable()) worker.join();
     }
@@ -1103,6 +1261,8 @@ private:
       if (stream->client) stream->client->Stop();
     }
     streams_.clear();
+    active_outputs_.clear();
+    wanted_outputs_.clear();
     if (microphone_ && microphone_->client) microphone_->client->Stop();
     microphone_.reset();
     targets_.clear();
@@ -1118,6 +1278,7 @@ private:
 
   std::mutex mutex_;
   bool running_ = false;
+  bool endpoint_capture_ = false;
   std::optional<ScopedMtaUsage> mta_usage_;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> system_exited_{false};
@@ -1128,6 +1289,8 @@ private:
   std::vector<meeting_record::Root> targets_;
   /* Index `i` feeds mixer source `i` and system track source `i`. */
   std::vector<std::unique_ptr<LoopbackStream>> streams_;
+  std::set<std::wstring> active_outputs_;
+  std::set<std::wstring> wanted_outputs_;
   std::vector<std::thread> workers_;
   SiblingRule sibling_rule_;
   ComPtr<IMMDeviceEnumerator> device_enumerator_;
@@ -1138,6 +1301,8 @@ private:
   uint64_t track_session_ = 0;
   std::thread microphone_worker_;
   std::thread targets_worker_;
+  std::thread outputs_worker_;
+  std::shared_ptr<meeting_record::RescanSignal> outputs_signal_;
   TimelineMixer system_mixer_;
   TimelineMixer microphone_mixer_;
   std::unique_ptr<mrec_voice_processor, decltype(&mrec_voice_destroy)> voice_{nullptr, mrec_voice_destroy};

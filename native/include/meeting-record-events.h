@@ -7,6 +7,7 @@
 #define MEETING_RECORD_EVENTS_H
 
 #include <stdint.h>
+#include "meeting-record-capture.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,8 @@ typedef enum {
   MREC_TRACK_DEVICE_CHANGED = 2,
   /* Some sources are unavailable; the remaining sources still deliver audio. */
   MREC_TRACK_DEGRADED = 3,
+  /* Initial capture path, or a subsequent change. Does not imply source loss. */
+  MREC_TRACK_CAPTURE_CHANGED = 4,
 } mrec_track_event_type;
 
 /* Reason for source loss. */
@@ -44,6 +47,7 @@ typedef struct {
   uint64_t host_time_ns; /* the clock of the audio callbacks */
   char device_name[256]; /* the microphone in use; empty for system audio */
   char message[512]; /* detail for logs */
+  mrec_capture_info capture_info; /* CAPTURE_CHANGED only */
 } mrec_track_event;
 
 /*

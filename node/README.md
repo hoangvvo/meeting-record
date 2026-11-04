@@ -42,6 +42,15 @@ const appRecording = await capture.start(
 );
 ```
 
+Inspect the capture scope and watch for changes.
+
+```ts
+console.log(appRecording.systemAudio.captureInfo);
+appRecording.systemAudio.on("capturechange", (info) => console.log(info));
+```
+
+On Windows, calling apps such as Microsoft Teams, WhatsApp and 8x8 Work use system audio when process capture is unreliable. Set `allowSystemAudioFallback: false` to disable this fallback. System audio can include other apps and recorder playback, and output volume/mute may affect the recording.
+
 Read the mix and pause, resume, or stop the recording.
 
 ```ts

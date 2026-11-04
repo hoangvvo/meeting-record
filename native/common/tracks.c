@@ -36,6 +36,8 @@ static mrec_track_event_callback g_callback;
 static void *g_user_data;
 /* Counts wakes, so a retry also sees one that came during its attempt. */
 static uint64_t g_wakes;
+static mrec_capture_info g_capture_info;
+static int g_have_capture_info;
 
 #ifdef _WIN32
 static SRWLOCK g_lock = SRWLOCK_INIT;
@@ -150,6 +152,7 @@ uint64_t mrec_tracks_open(mrec_track_event_callback callback, void *user_data) {
   ClearTracks();
   if (++g_session == 0) ++g_session;
   g_open = 1;
+  g_have_capture_info = 0;
   g_callback = callback;
   g_user_data = user_data;
   const uint64_t session = g_session;
@@ -162,9 +165,37 @@ void mrec_tracks_close(void) {
   Lock();
   ClearTracks();
   g_open = 0;
+  g_have_capture_info = 0;
   g_callback = NULL;
   g_user_data = NULL;
   Broadcast();
+  Unlock();
+}
+
+int32_t mrec_current_capture_info(mrec_capture_info *out) {
+  Lock();
+  const int valid = g_open && g_have_capture_info && out;
+  if (valid) *out = g_capture_info;
+  Unlock();
+  return valid ? MREC_OK : MREC_ERR_NOT_RUNNING;
+}
+
+void mrec_tracks_capture_changed(uint64_t session, const mrec_capture_info *info) {
+  if (!info) return;
+  Lock();
+  if (IsSession(session)) {
+    g_capture_info = *info;
+    g_have_capture_info = 1;
+    if (g_callback) {
+      mrec_track_event event;
+      memset(&event, 0, sizeof event);
+      event.track = MREC_TRACK_SYSTEM_AUDIO;
+      event.type = MREC_TRACK_CAPTURE_CHANGED;
+      event.host_time_ns = HostTimeNs();
+      event.capture_info = *info;
+      g_callback(&event, g_user_data);
+    }
+  }
   Unlock();
 }
 

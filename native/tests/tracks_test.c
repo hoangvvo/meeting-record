@@ -224,6 +224,24 @@ static void AppExitSupersedesDeviceInterruption(void) {
 }
 
 int main(void) {
+  /* Capture metadata shares lifecycle/session guards with recovery events. */
+  Reset();
+  mrec_capture_info capture = {MREC_CAPTURE_SCOPE_PROCESS, MREC_CAPTURE_SCOPE_SYSTEM,
+      MREC_CAPTURE_COMPATIBILITY_FALLBACK, 1, 1, "com.microsoft.teams2"};
+  mrec_capture_info snapshot;
+  assert(mrec_current_capture_info(&snapshot) == MREC_ERR_NOT_RUNNING);
+  mrec_tracks_capture_changed(g_session, &capture);
+  assert(g_count == 1 && Is(0, MREC_TRACK_SYSTEM_AUDIO, MREC_TRACK_CAPTURE_CHANGED));
+  assert(mrec_current_capture_info(&snapshot) == MREC_OK);
+  assert(snapshot.volume_dependent && snapshot.includes_recorder);
+  assert(strcmp(snapshot.app_id, "com.microsoft.teams2") == 0);
+  const uint64_t stale_capture = g_session;
+  Reset();
+  mrec_tracks_capture_changed(stale_capture, &capture);
+  assert(g_count == 0 && mrec_current_capture_info(&snapshot) == MREC_ERR_NOT_RUNNING);
+  mrec_tracks_close();
+  mrec_tracks_capture_changed(g_session, &capture);
+  assert(g_count == 0 && mrec_current_capture_info(&snapshot) == MREC_ERR_NOT_RUNNING);
   InvalidSourcesDoNotReopen();
   DuplicateTransitionsAndNamesAreQuiet();
   ReplacementSessionCancelsOldRecovery();
@@ -231,7 +249,9 @@ int main(void) {
   AddedSourcesJoinTheTrack();
   RetriesRunOnIntervalOrWake();
   /* The Rust binding hardcodes this layout. */
-  assert(sizeof(mrec_track_event) == 792);
+  assert(sizeof(mrec_track_event) == 944);
+  assert(sizeof(mrec_capture_info) == 148);
+  assert(offsetof(mrec_track_event, capture_info) == 792);
   assert(offsetof(mrec_track_event, host_time_ns) == 16);
   assert(offsetof(mrec_track_event, device_name) == 24);
   assert(offsetof(mrec_track_event, message) == 280);

@@ -4,6 +4,9 @@ param(
     # playback device. Without it, print the current default's name.
     [string]$Device,
     [switch]$Output,
+    # Limit default queries/changes to one role. All preserves the original behavior.
+    [ValidateSet("All", "Console", "Multimedia", "Communications")]
+    [string]$Role = "All",
     # Default makes the device the default for every role. Disable removes it, as
     # unplugging would; Enable restores it and makes it the default again. Find
     # prints the active device's full name, or nothing. List prints every active
@@ -83,9 +86,9 @@ namespace MeetingRecord {
             return Marshal.PtrToStringUni(value.Pointer);
         }
 
-        public static string Default(int flow) {
+        public static string Default(int flow, int role) {
             IMMDevice device;
-            int result = ((IMMDeviceEnumerator)new MMDeviceEnumerator()).GetDefaultAudioEndpoint(flow, 0, out device);
+            int result = ((IMMDeviceEnumerator)new MMDeviceEnumerator()).GetDefaultAudioEndpoint(flow, role < 0 ? 0 : role, out device);
             return result == 0 ? Name(device) : "";
         }
 
@@ -132,18 +135,19 @@ namespace MeetingRecord {
             }
         }
 
-        static void MakeDefault(string id) {
+        static void MakeDefault(string id, int selectedRole = -1) {
             IPolicyConfig policy = (IPolicyConfig)new PolicyConfigClient();
             for (int role = 0; role < 3; role++) {
+                if (selectedRole >= 0 && role != selectedRole) continue;
                 int result = policy.SetDefaultEndpoint(id, role);
                 if (result != 0) throw new InvalidOperationException("SetDefaultEndpoint failed with " + result);
             }
         }
 
         // Each returns the full name of the device changed.
-        public static string SetDefault(int flow, string text) {
+        public static string SetDefault(int flow, string text, int role) {
             string name;
-            MakeDefault(Find(flow, Active, text, out name));
+            MakeDefault(Find(flow, Active, text, out name), role);
             return name;
         }
 
@@ -176,12 +180,13 @@ namespace MeetingRecord {
 }
 
 $flow = if ($Output) { [MeetingRecord.AudioDevices]::Playback } else { [MeetingRecord.AudioDevices]::Recording }
+$selectedRole = switch ($Role) { "Console" { 0 } "Multimedia" { 1 } "Communications" { 2 } default { -1 } }
 if ($Action -eq "List") {
     [MeetingRecord.AudioDevices]::ListActive($flow)
     return
 }
 if (-not $Device) {
-    [MeetingRecord.AudioDevices]::Default($flow)
+    [MeetingRecord.AudioDevices]::Default($flow, $selectedRole)
     return
 }
 if ($Action -eq "Find") {
@@ -190,7 +195,7 @@ if ($Action -eq "Find") {
 }
 Start-Sleep -Milliseconds ([int]($DelaySeconds * 1000))
 $name = switch ($Action) {
-    "Default" { [MeetingRecord.AudioDevices]::SetDefault($flow, $Device) }
+    "Default" { [MeetingRecord.AudioDevices]::SetDefault($flow, $Device, $selectedRole) }
     "Disable" { [MeetingRecord.AudioDevices]::Disable($flow, $Device) }
     "Enable" { [MeetingRecord.AudioDevices]::Enable($flow, $Device) }
 }

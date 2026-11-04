@@ -401,6 +401,9 @@ fn verify_track_events(
     let unexpected: Vec<_> = events
         .iter()
         .filter(|event| {
+            if matches!(event, TrackEvent::CaptureChanged(_)) {
+                return false;
+            }
             !((expect_device_change || expect_recovery) && microphone_changed(event))
                 && !(expect_recovery && (microphone_removed(event) || microphone_resumed(event)))
         })
@@ -811,6 +814,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         microphone_frequencies: frequencies("MREC_MICROPHONE_FREQUENCIES")?,
     };
     let options = CaptureOptions {
+        allow_system_audio_fallback: enabled("MREC_ALLOW_SYSTEM_AUDIO_FALLBACK"),
         mono: enabled("MREC_MONO"),
         microphone: include_microphone.then_some(MicrophoneSource::Auto),
         mix: mix_sample_rate.map(|sample_rate| MixedAudioOptions { sample_rate }),
@@ -827,6 +831,18 @@ fn main() -> Result<(), Box<dyn StdError>> {
 
     println!("starting {target:?} capture for {}s", duration.as_secs());
     let recording = Arc::new(capture::start(target, options)?);
+    let capture_info = recording
+        .system_audio()
+        .capture_info()
+        .ok_or("missing native capture info")?;
+    let endpoint_expected = enabled("MREC_ALLOW_SYSTEM_AUDIO_FALLBACK")
+        && (matches!(target, CaptureTarget::System) || enabled("MREC_EXPECT_SYSTEM_FALLBACK"));
+    if capture_info.volume_dependent != endpoint_expected
+        || capture_info.includes_recorder_audio != endpoint_expected
+    {
+        return Err(format!("unexpected capture info: {capture_info:?}").into());
+    }
+    println!("capture info: {capture_info:?}");
     // A late tone's check starts once it plays.
     let measuring = Arc::new(AtomicBool::new(
         excluded_frequency.is_none() && helper_frequency.is_none(),
@@ -953,6 +969,16 @@ fn main() -> Result<(), Box<dyn StdError>> {
         return Err("a track was still interrupted at the end".into());
     }
     verify_track_events(&events, expect_device_change, expect_recovery)?;
+    let changes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            TrackEvent::CaptureChanged(info) => Some(info),
+            _ => None,
+        })
+        .collect();
+    if changes.len() != 1 || changes[0] != &capture_info {
+        return Err(format!("expected one initial capture-change event: {changes:?}").into());
+    }
     verify_recovery_latency(microphone_recovered_at)?;
 
     let expected_duration = duration.saturating_sub(pause.unwrap_or_default());

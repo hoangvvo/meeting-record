@@ -46,6 +46,7 @@ param(
     [ValidateRange(0, 50)]
     [int]$RestartCycles = 2,
     [switch]$Microphone,
+    [switch]$AllowSystemAudioFallback,
     [string]$MicrophoneDevice,
     [string]$SwitchMicrophone,
     [string]$RemoveMicrophone,
@@ -73,7 +74,7 @@ $appExecutable = Join-Path $appDirectory "Zoom.exe"
 $restoredFile = Join-Path ([IO.Path]::GetTempPath()) "meeting-record-e2e-restored-$PID"
 if (-not $Mode) {
     $shared = @{ Mode = "All" }
-    foreach ($name in "Binding", "DurationSeconds", "MinimumPeak", "MixSampleRate", "PauseSeconds", "RestartCycles", "Microphone") {
+    foreach ($name in "Binding", "DurationSeconds", "MinimumPeak", "MixSampleRate", "PauseSeconds", "RestartCycles", "Microphone", "AllowSystemAudioFallback") {
         if ($PSBoundParameters.ContainsKey($name)) { $shared[$name] = $PSBoundParameters[$name] }
     }
     function Test-Device([string]$Device, [bool]$Output) {
@@ -134,6 +135,8 @@ if (-not $Mode) {
 }
 
 $variableNames = @(
+    "MREC_ALLOW_SYSTEM_AUDIO_FALLBACK",
+    "MREC_EXPECT_SYSTEM_FALLBACK",
     "MREC_TARGET_PID",
     "MREC_DURATION_SECONDS",
     "MREC_MIN_PEAK",
@@ -271,6 +274,8 @@ try {
     }
 
     Set-HarnessVariable "MREC_DURATION_SECONDS" $DurationSeconds
+    Set-HarnessVariable "MREC_ALLOW_SYSTEM_AUDIO_FALLBACK" $(if ($AllowSystemAudioFallback) { "1" })
+    Set-HarnessVariable "MREC_EXPECT_SYSTEM_FALLBACK" $null
     Set-HarnessVariable "MREC_MIN_PEAK" $MinimumPeak.ToString([Globalization.CultureInfo]::InvariantCulture)
     Set-HarnessVariable "MREC_MICROPHONE" $(if ($Microphone -or $MicrophoneDevice -or $SwitchMicrophone -or $RemoveMicrophone) { "1" })
     # A switched microphone carries another device's audio for a while, and a removed
@@ -305,10 +310,11 @@ try {
                 Set-HarnessVariable "MREC_EXPECT_MEETING" $null
                 Set-HarnessVariable "MREC_TARGET_PID" $null
                 Set-HarnessVariable "MREC_MONO" $null
-                Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" "$targetFrequency,$otherFrequency"
-                $checkExclusion = -not ($microphoneChanges -or $SwitchOutput)
+                $checkRecorder = -not ($microphoneChanges -or $SwitchOutput)
+                Set-HarnessVariable "MREC_EXPECT_FREQUENCIES" $(if ($checkRecorder -and $AllowSystemAudioFallback) { "$targetFrequency,$otherFrequency,$excludedFrequency" } else { "$targetFrequency,$otherFrequency" })
+                $checkExclusion = $checkRecorder -and -not $AllowSystemAudioFallback
                 Set-HarnessVariable "MREC_REJECT_FREQUENCIES" $(if ($checkExclusion) { $excludedFrequency })
-                Set-HarnessVariable "MREC_EXCLUDED_TONE_FREQUENCY" $(if ($checkExclusion) { $excludedFrequency })
+                Set-HarnessVariable "MREC_EXCLUDED_TONE_FREQUENCY" $(if ($checkRecorder) { $excludedFrequency })
             } elseif ($run -eq "Exit") {
                 # The harness ends this app, so it gets its own tone.
                 $exitTone = Start-Tone $targetFrequency 30

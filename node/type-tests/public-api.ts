@@ -15,6 +15,7 @@ import {
   type AudioFormat,
   type AudioTrack,
   type CaptureSession,
+  type CaptureInfo,
   type CaptureTarget,
   type Meeting,
   type MeetingEvent,
@@ -28,6 +29,23 @@ declare const track: AudioTrack;
 declare const mixed: MixedAudio;
 declare const session: CaptureSession;
 declare const destination: Writable;
+track.on("capturechange", (info) => {
+  expectType<CaptureInfo>(info);
+  expectType<Readonly<CaptureTarget>>(info.actualTarget);
+  if (info.actualTarget.type === "process") {
+    expectType<number>(info.actualTarget.pid);
+  } else {
+    // @ts-expect-error System targets have no PID.
+    expectType<unknown>(info.actualTarget.pid);
+  }
+  expectType<boolean>(info.volumeDependent);
+  // @ts-expect-error Capture state does not expose a guessed stream category.
+  expectType<unknown>(info.communicationsCategory);
+});
+expectType<CaptureInfo | undefined>(track.captureInfo);
+capture.start({ type: "process", pid: 123 }, { allowSystemAudioFallback: true });
+// @ts-expect-error Fallback selection must be a boolean.
+capture.start({ type: "system" }, { allowSystemAudioFallback: "auto" });
 
 // Value exports share their names with the corresponding union types.
 expectType<Platform>(Platform.Zoom);
