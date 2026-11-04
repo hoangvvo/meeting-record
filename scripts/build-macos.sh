@@ -33,6 +33,13 @@ clang++ -std=c++17 -Wall -Wextra -Werror \
   -o "$BUILD/audio_app_process_test" "$ROOT/native/tests/audio_app_process_test.cpp"
 "$BUILD/audio_app_process_test"
 
+echo "==> audio process lifecycle tests"
+swiftc -O -parse-as-library -target "$SWIFT_TARGET" \
+  -o "$BUILD/audio_process_lifecycle_test" \
+  "$ROOT/native/tests/audio_process_lifecycle_test.swift" \
+  "$ROOT/native/macos/AudioProcesses.swift" "$ROOT/native/macos/ProcessTree.swift"
+"$BUILD/audio_process_lifecycle_test"
+
 echo "==> meeting catalog tests"
 clang -std=c11 -Wall -Wextra -Werror -I"$ROOT/native/include" -I"$ROOT/native/common" \
   -o "$BUILD/meeting_catalog_test" "$ROOT/native/tests/meeting_catalog_test.c" \

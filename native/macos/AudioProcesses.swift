@@ -176,10 +176,18 @@ enum AudioProcessRegistry {
         all().filter { $0.isRunningOutput && $0.pid != getpid() }
     }
 
-    /// Signal 0 checks existence without delivering. EPERM means the process
-    /// exists but is owned by another user.
+    /// An unreaped child still accepts signal 0, but cannot produce audio.
+    /// Fall back to that existence check when BSD process details are unavailable.
     static func isAlive(_ pid: pid_t) -> Bool {
-        kill(pid, 0) == 0 || errno == EPERM
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size {
+            return info.pbi_status != UInt32(SZOMB)
+        }
+        // macOS can also reject BSD info for a zombie with ESRCH while signal 0
+        // keeps succeeding until its parent reaps it.
+        if errno == ESRCH { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
     }
 
     /// The HAL exposes no process name and helpers have no bundle id.

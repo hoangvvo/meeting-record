@@ -110,10 +110,12 @@ enum CallControlReader {
             guard now() < deadline else { return }
             let subrole = role == "AXGroup" ? element.subrole : nil
             let status = statusContext || role == "AXHeading" || role == "AXStatusBar"
+                || role == "AXProgressIndicator"
                 || subrole == "AXApplicationAlert" || subrole == "AXApplicationStatus"
             let action = ["AXButton", "AXMenuButton", "AXPopUpButton", "AXMenuItem"].contains(role)
             let voiceStatus = platform == .discord && ["AXStaticText", "AXLink"].contains(role)
-            let statusLabel = status && (role == "AXStaticText" || role == "AXHeading" || role == "AXStatusBar")
+            let statusLabel = status && (role == "AXStaticText" || role == "AXHeading"
+                || role == "AXStatusBar" || role == "AXProgressIndicator")
             if action || voiceStatus || statusLabel {
                 let identifier = element.identifier
                 let controlRole = statusLabel ? "AXHeading" : role

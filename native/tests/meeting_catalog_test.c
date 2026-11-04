@@ -161,8 +161,11 @@ static void CallStateEvidence(void) {
   } joined[] = {
       {MREC_PLATFORM_TEAMS, MREC_CONTROL_BUTTON, "hangup-button", "Localized leave label"},
       {MREC_PLATFORM_MEET, MREC_CONTROL_BUTTON, "", "Leave call"},
+      {MREC_PLATFORM_MEET, MREC_CONTROL_STATUS, "", "End the call or just leave?"},
       {MREC_PLATFORM_ZOOM, MREC_CONTROL_MENU_ITEM, "", "Leave Meeting"},
       {MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, "", "Leave"},
+      {MREC_PLATFORM_ZOOM, MREC_CONTROL_MENU_ITEM, "onCopyInviteLink:", "Localized copy invite link"},
+      {MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, "leave", "End"},
       {MREC_PLATFORM_WEBEX, MREC_CONTROL_BUTTON, "", "Leave meeting"},
       {MREC_PLATFORM_SLACK, MREC_CONTROL_BUTTON, "", "Leave huddle"},
       {MREC_PLATFORM_GENERIC_BROWSER, MREC_CONTROL_BUTTON, "", "Leave call"},
@@ -192,6 +195,7 @@ static void CallStateEvidence(void) {
       {MREC_PLATFORM_ZOOM, "", "Join meeting"},
       {MREC_PLATFORM_ZOOM, "", "Join"},
       {MREC_PLATFORM_ZOOM, "", "Sign in to join"},
+      {MREC_PLATFORM_ZOOM, "", "Start"},
       {MREC_PLATFORM_WEBEX, "", "Join meeting"},
       {MREC_PLATFORM_SLACK, "", "Join huddle"},
       {MREC_PLATFORM_DISCORD, "", "Join voice"},
@@ -224,6 +228,9 @@ static void CallStateEvidence(void) {
   const uint32_t lobby = mrec_catalog_call_control(MREC_PLATFORM_ZOOM, MREC_CONTROL_STATUS, "",
       "Please wait for the host to start this meeting.");
   assert(mrec_catalog_call_state(lobby | MREC_CALL_SIGNAL_JOINED) == MREC_CALL_NOT_JOINED);
+  const uint32_t meet_lobby = mrec_catalog_call_control(MREC_PLATFORM_MEET, MREC_CONTROL_STATUS, "",
+      "Please wait until a meeting host brings you into the call");
+  assert(mrec_catalog_call_state(meet_lobby | MREC_CALL_SIGNAL_JOINED) == MREC_CALL_NOT_JOINED);
   assert(mrec_catalog_call_control(MREC_PLATFORM_ZOOM, MREC_CONTROL_TEXT, "",
       "Please wait for the host to start this meeting.") == 0);
   assert(mrec_catalog_call_control(MREC_PLATFORM_ZOOM, MREC_CONTROL_BUTTON, "", "Join Audio") == 0);

@@ -313,6 +313,7 @@ export const permissions = {
 export interface MeetingEvents extends EmitterEvents {
   started: (meeting: Meeting) => void;
   updated: (meeting: Meeting) => void;
+  /** Only platform and pid identify the ended meeting; other fields may be stale. Does not stop capture. */
   ended: (meeting: Meeting) => void;
 }
 

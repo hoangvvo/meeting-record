@@ -88,6 +88,29 @@ private func tree(_ parents: [pid_t: pid_t]) -> ProcessTree {
         precondition(MeetingCatalog.browserWindow(meetPreview).callState == .notJoined)
         precondition(MeetingCatalog.browserWindow(meetEnded).callState == .notJoined)
 
+        precondition(Accessibility.enhancedWriteSucceeded(.success, requested: true) {
+            preconditionFailure("successful AX writes need no readback")
+        })
+        precondition(Accessibility.enhancedWriteSucceeded(.notImplemented, requested: true) { true })
+        precondition(Accessibility.enhancedWriteSucceeded(.notImplemented, requested: false) { false })
+        precondition(!Accessibility.enhancedWriteSucceeded(.notImplemented, requested: true) { false })
+        precondition(!Accessibility.enhancedWriteSucceeded(.notImplemented, requested: false) { nil })
+        precondition(!Accessibility.enhancedWriteSucceeded(.cannotComplete, requested: true) { true })
+
+        let meetWaiting = page("https://meet.google.com/abc-defg-hij", controls: [
+            Element("AXProgressIndicator", title: "Please wait until a meeting host brings you into the call"),
+            Element("AXButton", title: "Leave call")
+        ])
+        precondition(MeetingCatalog.browserWindow(meetWaiting).callState == .notJoined,
+                     "Meet's waiting room has a Leave call button before the participant is admitted")
+        let meetLeavePrompt = page("https://meet.google.com/abc-defg-hij", controls: [
+            Element("AXHeading", title: "End the call or just leave?"),
+            Element("AXButton", title: "Just leave the call"),
+            Element("AXButton", title: "End the call for everyone")
+        ])
+        precondition(MeetingCatalog.browserWindow(meetLeavePrompt).callState == .joined,
+                     "a leave confirmation must not end a muted call before the action is confirmed")
+
         let quotedControls = page("https://meet.google.com/abc-defg-hij", controls: [
             Element("AXStaticText", title: "Leave call"),
             Element("AXButton", title: "Leave call", hidden: true),
@@ -315,6 +338,32 @@ private func tree(_ parents: [pid_t: pid_t]) -> ProcessTree {
             Element("AXMenuItem", title: "Leave Meeting"), Element("AXButton", title: "Join Audio")
         ]), deadline: 1, now: { 0 }, nativePlatform: .zoom)
         precondition(MeetingCatalog.browserWindow(zoomAudioDisconnected).callState == .joined)
+
+        let zoomPreview = BrowserContentReader.read(Element("AXWindow", children: [
+            Element("AXButton", title: "Start"), Element("AXButton", title: "Audio")
+        ]), deadline: 1, now: { 0 }, nativePlatform: .zoom)
+        precondition(MeetingCatalog.browserWindow(zoomPreview).callState == .notJoined)
+        let zoomEndControl = BrowserContentReader.read(Element("AXWindow", children: [
+            Element("AXButton", title: "End", identifier: "leave")
+        ]), deadline: 1, now: { 0 }, nativePlatform: .zoom)
+        precondition(MeetingCatalog.browserWindow(zoomEndControl).callState == .joined)
+
+        // Recent Zoom clients hide the meeting toolbar and keep a separate home
+        // window with a Join meeting button. The in-meeting menu still identifies
+        // the live call, including when its microphone is muted.
+        let zoomMenu = BrowserContentReader.read(Element("AXMenuBar", children: [
+            Element("AXMenuItem", title: "Copy invite link", identifier: "onCopyInviteLink:")
+        ]), deadline: 1, now: { 0 }, nativePlatform: .zoom)
+        let zoomHome = BrowserContentReader.read(Element("AXWindow", title: "Zoom Workplace", children: [
+            Element("AXButton", title: "Join meeting")
+        ]), deadline: 1, now: { 0 }, nativePlatform: .zoom)
+        let zoomApp = ApplicationProcess(pid: 300, bundleID: "us.zoom.xos", name: "Zoom", isRegular: true)
+        let zoomHiddenToolbar = MeetingDetector.scan(
+            processes: [], apps: [zoomApp], tree: tree([:]), recorderPID: 999,
+            browserWindows: { _ in [] }, windowTitle: { _ in "Zoom Meeting" },
+            nativeWindows: { _, _ in [zoomHome, BrowserWindowContent(title: "Zoom Meeting"), zoomMenu] })
+        precondition(zoomHiddenToolbar.count == 1 && zoomHiddenToolbar[0].confidence == 90,
+                     "Zoom's in-meeting menu must retain a muted call when its toolbar is hidden")
 
         let selfApp = ApplicationProcess(pid: 999, bundleID: "com.google.chrome", name: "Recorder", isRegular: true)
         let selfSeed = MeetingDetector.scan(processes: [], apps: [selfApp], tree: tree([:]), recorderPID: 999,

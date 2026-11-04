@@ -64,9 +64,22 @@ enum Accessibility {
         cleanupInterval: 5,
         read: { copyAttribute(application($0), "AXEnhancedUserInterface") as? Bool },
         write: { pid, enabled in
-            AXUIElementSetAttributeValue(application(pid), "AXEnhancedUserInterface" as CFString,
-                                         enabled ? kCFBooleanTrue : kCFBooleanFalse) == .success
+            let app = application(pid)
+            let status = AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString,
+                                                      enabled ? kCFBooleanTrue : kCFBooleanFalse)
+            return enhancedWriteSucceeded(status, requested: enabled) {
+                copyAttribute(app, "AXEnhancedUserInterface") as? Bool
+            }
         }, identity: ProcessTree.identity)
+
+    static func enhancedWriteSucceeded(_ status: AXError, requested: Bool,
+                                       readBack: () -> Bool?) -> Bool {
+        if status == .success { return true }
+        // Chrome can apply this undocumented attribute and then return its
+        // superclass's not-implemented error. Confirm the effect so our enable
+        // is still balanced by a disable, without repeating a counted write.
+        return status == .notImplemented && readBack() == requested
+    }
 
     static func releaseEnhancedInterfaces() {
         enhancedInterface.releaseAll()
@@ -130,6 +143,16 @@ enum Accessibility {
            let window = elementAttribute(app, kAXFocusedWindowAttribute as String) {
             windows.removeAll { CFEqual($0, window) }
             windows.insert(window, at: 0)
+        }
+        if nativePlatform == .zoom {
+            // Zoom keeps its home window's Join meeting action alongside the
+            // actual meeting. Do not let that unrelated window veto a live call
+            // when the meeting toolbar is temporarily hidden.
+            let meetingWindows = windows.filter {
+                ProcessInfo.processInfo.systemUptime < deadline
+                    && stringAttribute($0, "AXIdentifier") == "zm.meeting.window.main"
+            }
+            if !meetingWindows.isEmpty { windows = meetingWindows }
         }
         var contents = windows.prefix(4).compactMap { window -> BrowserWindowContent? in
             guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }

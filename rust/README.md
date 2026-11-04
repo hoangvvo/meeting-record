@@ -77,10 +77,18 @@ let active: Vec<_> = meetings::scan()?
     .filter(|meeting| meeting.should_record)
     .collect();
 
-let watcher = meetings::watch(|event, meeting| println!("{event:?}: {meeting:?}"))?;
+let watcher = meetings::watch(|event, meeting| {
+    if event == meeting_record::MeetingEvent::Ended {
+        println!("Ended: {:?} {}", meeting.platform, meeting.pid);
+    } else {
+        println!("{event:?}: {meeting:?}");
+    }
+})?;
 thread::sleep(Duration::from_secs(10));
 drop(watcher);
 ```
+
+On `Ended`, use `platform` and `pid` to remove the meeting. Other payload fields, including `should_record`, may contain the last active observation. Meeting events do not stop capture; call `stop()` and drain the tracks when you want the recording to end.
 
 ## License
 
