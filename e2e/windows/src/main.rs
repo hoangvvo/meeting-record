@@ -383,10 +383,7 @@ fn microphone_resumed(event: &TrackEvent) -> bool {
 fn microphone_changed(event: &TrackEvent) -> bool {
     matches!(
         event,
-        TrackEvent::DeviceChanged {
-            track: Track::Microphone,
-            ..
-        }
+        TrackEvent::DeviceChanged { .. }
     )
 }
 
@@ -831,10 +828,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
 
     println!("starting {target:?} capture for {}s", duration.as_secs());
     let recording = Arc::new(capture::start(target, options)?);
-    let capture_info = recording
-        .system_audio()
-        .capture_info()
-        .ok_or("missing native capture info")?;
+    let capture_info = recording.system_audio().capture_info();
     let endpoint_expected = enabled("MREC_ALLOW_SYSTEM_AUDIO_FALLBACK")
         && (matches!(target, CaptureTarget::System) || enabled("MREC_EXPECT_SYSTEM_FALLBACK"));
     if capture_info.volume_dependent != endpoint_expected

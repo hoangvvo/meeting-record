@@ -16,6 +16,7 @@ struct Config {
   int start_status = MREC_OK;
   int format_status = MREC_OK;
   int microphone_format_status = MREC_OK;
+  int capture_info_status = MREC_OK;
   int initial_event_type = -1;
   int initial_event_track = MREC_TRACK_SYSTEM_AUDIO;
   int microphone_rate = 44100;
@@ -122,6 +123,7 @@ int32_t mrec_start_tracks_raw(const uint32_t *pids, size_t pid_count, int32_t gl
 }
 int32_t mrec_current_capture_info(mrec_capture_info *out) {
   if (!running) return MREC_ERR_NOT_RUNNING;
+  if (config.capture_info_status != MREC_OK) return config.capture_info_status;
   *out = capture_info;
   return MREC_OK;
 }
@@ -164,6 +166,7 @@ void RegisterTestBackend(Napi::Env env, Napi::Object exports) {
     config.start_status = Number(options, "startStatus", MREC_OK);
     config.format_status = Number(options, "formatStatus", MREC_OK);
     config.microphone_format_status = Number(options, "microphoneFormatStatus", MREC_OK);
+    config.capture_info_status = Number(options, "captureInfoStatus", MREC_OK);
     config.initial_event_type = Number(options, "initialEventType", -1);
     config.initial_event_track = Number(options, "initialEventTrack", MREC_TRACK_SYSTEM_AUDIO);
     config.microphone_rate = Number(options, "microphoneRate", 44100);

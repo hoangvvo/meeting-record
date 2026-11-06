@@ -281,12 +281,12 @@ fn playing_pid() -> Result<u32, String> {
 }
 
 /// Select a track from the session owned by the writer thread.
-type TrackOf = fn(&CaptureSession) -> Option<&AudioTrack>;
+type TrackOf<Source> = fn(&CaptureSession) -> Option<&AudioTrack<Source>>;
 
 /// Drains one track to its own WAV until the capture stops.
-fn spawn_writer(
+fn spawn_writer<Source: 'static>(
     capture: Arc<CaptureSession>,
-    track_of: TrackOf,
+    track_of: TrackOf<Source>,
     path: PathBuf,
     window: Arc<WindowPeak>,
 ) -> Result<JoinHandle<Summary>, String> {

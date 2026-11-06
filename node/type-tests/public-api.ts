@@ -15,6 +15,8 @@ import {
   type AudioFormat,
   type AudioTrack,
   type CaptureSession,
+  type MicrophoneTrack,
+  type SystemAudioTrack,
   type CaptureInfo,
   type CaptureTarget,
   type Meeting,
@@ -26,10 +28,12 @@ import {
 declare function expectType<Type>(value: Type): void;
 declare const meeting: Meeting;
 declare const track: AudioTrack;
+declare const systemAudio: SystemAudioTrack;
+declare const microphone: MicrophoneTrack;
 declare const mixed: MixedAudio;
 declare const session: CaptureSession;
 declare const destination: Writable;
-track.on("capturechange", (info) => {
+systemAudio.on("capturechange", (info) => {
   expectType<CaptureInfo>(info);
   expectType<Readonly<CaptureTarget>>(info.actualTarget);
   if (info.actualTarget.type === "process") {
@@ -42,7 +46,19 @@ track.on("capturechange", (info) => {
   // @ts-expect-error Capture state does not expose a guessed stream category.
   expectType<unknown>(info.communicationsCategory);
 });
-expectType<CaptureInfo | undefined>(track.captureInfo);
+expectType<CaptureInfo>(systemAudio.captureInfo);
+expectType<CaptureInfo>(session.systemAudio.captureInfo);
+// @ts-expect-error Only system audio reports capture scope.
+expectType<unknown>(track.captureInfo);
+// @ts-expect-error The microphone never emits capture changes.
+session.microphone?.on("capturechange", (info: CaptureInfo) => expectType<CaptureInfo>(info));
+expectType<MicrophoneTrack | undefined>(session.microphone);
+expectType<string | undefined>(microphone.deviceName);
+microphone.prependListener("devicechange", (name) => expectType<string>(name));
+// @ts-expect-error System audio has no input device.
+expectType<unknown>(systemAudio.deviceName);
+// @ts-expect-error System audio never emits device changes.
+systemAudio.on("devicechange", (name: string) => expectType<string>(name));
 capture.start({ type: "process", pid: 123 }, { allowSystemAudioFallback: true });
 // @ts-expect-error Fallback selection must be a boolean.
 capture.start({ type: "system" }, { allowSystemAudioFallback: "auto" });
@@ -138,7 +154,6 @@ track
     expectType<number>(reason);
   })
   .off("drop", (count) => expectType<number>(count))
-  .prependListener("devicechange", (name) => expectType<string>(name))
   .prependOnceListener("degraded", (reason) => expectType<TrackInterruptionReason>(reason))
   .addListener("resumed", () => {})
   .removeListener("format", (format) => expectType<AudioFormat>(format))

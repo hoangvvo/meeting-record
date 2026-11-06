@@ -531,6 +531,17 @@ test("aborting a running capture drains both tracks and stops only once", async 
   assert.equal(api.capture.running, false);
 });
 
+test("start rejects and releases the singleton when capture info is unavailable", async () => {
+  native.testConfigure({ initialPackets: 0, tailPackets: 0, captureInfoStatus: -4 });
+  await assert.rejects(api.capture.start({ type: "system" }), (error) => {
+    assert.equal(error.code, -4);
+    assert.match(error.message, /without capture info/);
+    return true;
+  });
+  assert.equal(api.capture.running, false);
+  assert.equal(native.testStats().stops, 1);
+});
+
 for (const [field, status, ErrorType, expectedStops] of [
   ["startStatus", -2, "PermissionError", 0],
   ["formatStatus", -7, "CaptureError", 1],

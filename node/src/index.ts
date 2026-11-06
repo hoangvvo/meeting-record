@@ -205,7 +205,7 @@ interface NativeBinding {
   ): Promise<{
     systemAudio: NativeFormat;
     microphone?: NativeFormat;
-    captureInfo?: CaptureInfo;
+    captureInfo: CaptureInfo;
   }>;
   captureStop(): Promise<void>;
   capturePause(): void;
@@ -447,8 +447,6 @@ export const TrackAvailability = {
 export type TrackAvailability = (typeof TrackAvailability)[keyof typeof TrackAvailability];
 
 export interface AudioTrackEvents extends ReadableEvents<AudioChunk> {
-  /** Initial capture scope/capabilities and subsequent changes. System track only. */
-  capturechange: (info: CaptureInfo) => void;
   drop: (droppedSamples: number) => void;
   /** Emitted before the first chunk in a newly negotiated device format. */
   format: (format: AudioFormat) => void;
@@ -457,14 +455,23 @@ export interface AudioTrackEvents extends ReadableEvents<AudioChunk> {
   resumed: () => void;
   /** Some sources are lost; remaining sources continue delivering audio. */
   degraded: (reason: TrackInterruptionReason, message: string) => void;
-  /** The microphone moved to another device. */
+}
+
+export interface SystemAudioTrackEvents extends AudioTrackEvents {
+  /** Capture scope/capabilities changed; `captureInfo` already holds `info`. */
+  capturechange: (info: CaptureInfo) => void;
+}
+
+export interface MicrophoneTrackEvents extends AudioTrackEvents {
+  /** The microphone moved to another device; `deviceName` already holds it. */
   devicechange: (deviceName: string) => void;
 }
 
 /** Interleaved float32 PCM. Slow consumers lose samples, reported by `drop`. */
-export interface AudioTrack extends TypedReadable<AudioTrackEvents> {
-  /** Actual playback capture scope/capabilities. Present on systemAudio after start; absent on microphone. */
-  readonly captureInfo?: CaptureInfo;
+export interface AudioTrack<
+  Events extends AudioTrackEvents & { [Event in keyof Events]: (...args: any[]) => void } =
+    AudioTrackEvents,
+> extends TypedReadable<Events> {
   readonly availability: TrackAvailability;
   [Symbol.asyncIterator](): NodeJS.AsyncIterator<AudioChunk>;
   /** Current negotiated format; a `format` event announces changes. */
@@ -474,7 +481,15 @@ export interface AudioTrack extends TypedReadable<AudioTrackEvents> {
   readonly droppedSamples: number;
   /** True when none of this track's sources are available. */
   readonly interrupted: boolean;
-  /** The microphone in use; undefined for system audio. */
+}
+
+export interface SystemAudioTrack extends AudioTrack<SystemAudioTrackEvents> {
+  /** Actual playback capture scope/capabilities; `capturechange` announces changes. */
+  readonly captureInfo: CaptureInfo;
+}
+
+export interface MicrophoneTrack extends AudioTrack<MicrophoneTrackEvents> {
+  /** The device in use; undefined while no microphone is available. */
   readonly deviceName?: string;
 }
 
@@ -510,8 +525,8 @@ function captureSnapshot(info: CaptureInfo): CaptureInfo {
 
 /** A lost source interrupts its track; the session records until stopped. */
 export interface CaptureSession {
-  readonly systemAudio: AudioTrack;
-  readonly microphone?: AudioTrack;
+  readonly systemAudio: SystemAudioTrack;
+  readonly microphone?: MicrophoneTrack;
   readonly mixedAudio?: MixedAudio;
   readonly state: CaptureState;
   /** Pause all tracks. Paused time is omitted from mixed output. */
@@ -530,7 +545,7 @@ export interface MixedCaptureSession extends CaptureSession {
   readonly mixedAudio: MixedAudio;
 }
 
-class AudioTrackImpl extends Readable implements AudioTrack {
+abstract class AudioTrackImpl extends Readable implements AudioTrack {
   #sampleRate: number;
   #channels: number;
   readonly #microphone: boolean;
@@ -540,22 +555,12 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   #mixConsumer: ((chunk: AudioChunk) => void) | undefined;
   #finished = false;
   #availability: TrackAvailability = TrackAvailability.Live;
-  #deviceName?: string;
-  #captureInfo?: CaptureInfo;
 
-  constructor(
-    sampleRate: number,
-    channels: number,
-    microphone: boolean,
-    deviceName?: string,
-    captureInfo?: CaptureInfo,
-  ) {
+  constructor(sampleRate: number, channels: number, microphone: boolean) {
     super({ objectMode: true, highWaterMark: 32 });
     this.#sampleRate = sampleRate;
     this.#channels = channels;
     this.#microphone = microphone;
-    this.#deviceName = deviceName;
-    this.#captureInfo = captureInfo && captureSnapshot(captureInfo);
   }
 
   /** Required by Readable; data arrives from the native side, not on demand. */
@@ -580,10 +585,6 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     return this.#sampleRate;
   }
 
-  get captureInfo(): CaptureInfo | undefined {
-    return this.#captureInfo;
-  }
-
   get channels(): number {
     return this.#channels;
   }
@@ -602,10 +603,6 @@ class AudioTrackImpl extends Readable implements AudioTrack {
 
   get interrupted(): boolean {
     return this.#availability === TrackAvailability.Interrupted;
-  }
-
-  get deviceName(): string | undefined {
-    return this.#deviceName;
   }
 
   pushAudio(chunk: Buffer, info: NativeAudioInfo): void {
@@ -635,11 +632,8 @@ class AudioTrackImpl extends Readable implements AudioTrack {
 
   pushEvent(event: NativeTrackEvent): void {
     if (this.#finished) return;
-    if (event.type === "capturechange") {
-      if (event.captureInfo && !this.#microphone) {
-        this.#captureInfo = captureSnapshot(event.captureInfo);
-        this.emit("capturechange", this.#captureInfo);
-      }
+    if (event.type === "capturechange" || event.type === "devicechange") {
+      this.pushSourceEvent(event);
     } else if (event.type === "interrupted") {
       this.#availability = TrackAvailability.Interrupted;
       this.emit("interrupted", event.reason, event.message);
@@ -649,11 +643,12 @@ class AudioTrackImpl extends Readable implements AudioTrack {
     } else if (event.type === "degraded") {
       this.#availability = TrackAvailability.Degraded;
       this.emit("degraded", event.reason, event.message);
-    } else {
-      this.#deviceName = event.deviceName;
-      this.emit("devicechange", event.deviceName);
     }
   }
+
+  protected abstract pushSourceEvent(
+    event: NativeCaptureChangeEvent | NativeDeviceChangeEvent,
+  ): void;
 
   finish(): void {
     if (this.#finished) return;
@@ -662,11 +657,53 @@ class AudioTrackImpl extends Readable implements AudioTrack {
   }
 }
 
+class SystemAudioTrackImpl extends AudioTrackImpl implements SystemAudioTrack {
+  #captureInfo: CaptureInfo;
+
+  constructor(sampleRate: number, channels: number, captureInfo: CaptureInfo) {
+    super(sampleRate, channels, false);
+    this.#captureInfo = captureSnapshot(captureInfo);
+  }
+
+  get captureInfo(): CaptureInfo {
+    return this.#captureInfo;
+  }
+
+  protected override pushSourceEvent(
+    event: NativeCaptureChangeEvent | NativeDeviceChangeEvent,
+  ): void {
+    if (event.type !== "capturechange") return;
+    this.#captureInfo = captureSnapshot(event.captureInfo);
+    this.emit("capturechange", this.#captureInfo);
+  }
+}
+
+class MicrophoneTrackImpl extends AudioTrackImpl implements MicrophoneTrack {
+  #deviceName?: string;
+
+  constructor(sampleRate: number, channels: number, deviceName: string | undefined) {
+    super(sampleRate, channels, true);
+    this.#deviceName = deviceName;
+  }
+
+  get deviceName(): string | undefined {
+    return this.#deviceName;
+  }
+
+  protected override pushSourceEvent(
+    event: NativeCaptureChangeEvent | NativeDeviceChangeEvent,
+  ): void {
+    if (event.type !== "devicechange") return;
+    this.#deviceName = event.deviceName;
+    this.emit("devicechange", event.deviceName);
+  }
+}
+
 class CaptureSessionImpl implements CaptureSession {
   #state: CaptureState = CaptureState.Recording;
   #stopping?: Promise<void>;
-  readonly #systemAudio: AudioTrackImpl;
-  readonly #microphone?: AudioTrackImpl;
+  readonly #systemAudio: SystemAudioTrackImpl;
+  readonly #microphone?: MicrophoneTrackImpl;
   readonly mixedAudio?: MixedAudioImpl;
   readonly #signal?: AbortSignal;
   readonly #onAbort = () => {
@@ -674,8 +711,8 @@ class CaptureSessionImpl implements CaptureSession {
   };
 
   constructor(
-    systemAudio: AudioTrackImpl,
-    microphone?: AudioTrackImpl,
+    systemAudio: SystemAudioTrackImpl,
+    microphone?: MicrophoneTrackImpl,
     mix?: MixedAudioOptions,
     signal?: AbortSignal,
   ) {
@@ -698,11 +735,11 @@ class CaptureSessionImpl implements CaptureSession {
     this[event.track]?.pushEvent(event);
   }
 
-  get systemAudio(): AudioTrackImpl {
+  get systemAudio(): SystemAudioTrackImpl {
     return this.#systemAudio;
   }
 
-  get microphone(): AudioTrackImpl | undefined {
+  get microphone(): MicrophoneTrackImpl | undefined {
     return this.#microphone;
   }
 
@@ -758,14 +795,29 @@ interface NativeAudioInfo {
   channels: number;
 }
 
-interface NativeTrackEvent {
+interface NativeAvailabilityEvent {
   track: "systemAudio" | "microphone";
-  type: "interrupted" | "resumed" | "devicechange" | "degraded" | "capturechange";
-  captureInfo?: CaptureInfo;
+  type: "interrupted" | "resumed" | "degraded";
   reason: TrackInterruptionReason;
-  deviceName: string;
   message: string;
 }
+
+interface NativeDeviceChangeEvent {
+  track: "microphone";
+  type: "devicechange";
+  deviceName: string;
+}
+
+interface NativeCaptureChangeEvent {
+  track: "systemAudio";
+  type: "capturechange";
+  captureInfo: CaptureInfo;
+}
+
+type NativeTrackEvent =
+  | NativeAvailabilityEvent
+  | NativeCaptureChangeEvent
+  | NativeDeviceChangeEvent;
 
 /**
  * Start a process-wide recording. Attach source-event listeners after awaiting startup.
@@ -909,18 +961,15 @@ async function startCapture(
       await native.captureStop();
       options.signal.throwIfAborted();
     }
-    const systemAudio = new AudioTrackImpl(
+    const systemAudio = new SystemAudioTrackImpl(
       formats.systemAudio.sampleRate,
       formats.systemAudio.channels,
-      false,
-      undefined,
       formats.captureInfo,
     );
     const microphone = formats.microphone
-      ? new AudioTrackImpl(
+      ? new MicrophoneTrackImpl(
           formats.microphone.sampleRate,
           formats.microphone.channels,
-          true,
           formats.microphone.deviceName || undefined,
         )
       : undefined;

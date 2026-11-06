@@ -399,8 +399,16 @@ public:
     Napi::Object result = Napi::Object::New(env);
     result.Set("systemAudio", system_audio);
     mrec_capture_info capture_info{};
-    if (mrec_current_capture_info(&capture_info) == MREC_OK)
-      result.Set("captureInfo", CaptureInfoToJS(env, capture_info, pid_));
+    const int32_t capture_info_status = mrec_current_capture_info(&capture_info);
+    if (capture_info_status != MREC_OK) {
+      Napi::Error err = Napi::Error::New(env, "capture started without capture info");
+      err.Set("code", Napi::Number::New(env, capture_info_status));
+      mrec_stop();
+      ReleaseCapture();
+      deferred_.Reject(err.Value());
+      return;
+    }
+    result.Set("captureInfo", CaptureInfoToJS(env, capture_info, pid_));
     if (microphone_) {
       double microphone_rate = 0;
       uint32_t microphone_channels = 0;
