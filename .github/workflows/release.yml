@@ -37,7 +37,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
           - target: darwin-x64
             runner: macos-15-intel
           - target: win32-arm64
@@ -94,7 +94,7 @@ jobs:
     name: Package npm tarball
     needs: node-prebuild
     if: ${{ inputs.package == 'all' || inputs.package == 'node' }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
 
     steps:
@@ -163,7 +163,7 @@ jobs:
   package-crate:
     name: Package Rust crate
     if: ${{ inputs.package == 'all' || inputs.package == 'rust' }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
 
     steps:
@@ -236,7 +236,7 @@ jobs:
           needs.package-npm.result == 'success' &&
           needs.release-ready.result == 'success' &&
           (inputs.package == 'all' || inputs.package == 'node') }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     permissions:
       contents: read
@@ -272,7 +272,7 @@ jobs:
           needs.package-crate.result == 'success' &&
           needs.release-ready.result == 'success' &&
           (inputs.package == 'all' || inputs.package == 'rust') }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: read
